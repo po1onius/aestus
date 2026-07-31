@@ -1,0 +1,32 @@
+[workspace]
+members = [
+    "crates/common",
+    "crates/request",
+    "crates/buffered-response",
+    "crates/stream-response",
+    "crates/componentize",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+anyhow = "1.0.104"
+hex = "0.4.3"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+wit-bindgen = "0.60.0"
+wit-component = "0.254.0"
+
+[profile.release]
+codegen-units = 1
+lto = true
+# JSON 解析和序列化是插件热点；三个组件使用速度优化后也只有数百 KiB，优先减少
+# 大型请求的转换延迟。
+opt-level = 3
+panic = "abort"
+strip = true

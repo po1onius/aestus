@@ -1,0 +1,81 @@
+package aestus:stream-response-transformer@1.0.0;
+
+interface common-types {
+    record header {
+        name: string,
+        value: list<u8>,
+    }
+
+    record response-head {
+        status: u16,
+        headers: list<header>,
+    }
+
+    record start-input {
+        head: response-head,
+        /// 同一 attempt 的请求插件输出；只在 start 传入一次，由组件实例保存流内状态。
+        request-context: option<list<u8>>,
+    }
+
+    record transform-error {
+        code: string,
+        message: string,
+    }
+
+    record token-usage {
+        input-tokens: s64,
+        cached-input-tokens: s64,
+        output-tokens: s64,
+        reasoning-output-tokens: s64,
+        total-tokens: s64,
+    }
+
+    record limit-feedback {
+        resets-at-unix-seconds: option<s64>,
+        reason: string,
+    }
+
+    variant upstream-feedback {
+        error(string),
+        authentication-rejected(string),
+        rate-limited(limit-feedback),
+        quota-exhausted(limit-feedback),
+        temporarily-unavailable(string),
+        entitlement-missing(string),
+    }
+
+    record stream-failure {
+        kind: string,
+        message: string,
+    }
+
+    record response-effects {
+        feedback: option<upstream-feedback>,
+        usage: option<token-usage>,
+        failure: option<stream-failure>,
+    }
+
+    record item-output {
+        item: option<list<u8>>,
+        effects: response-effects,
+    }
+
+    record finish-output {
+        items: list<list<u8>>,
+        effects: response-effects,
+    }
+}
+
+world gpt-stream-response-transformer {
+    use common-types.{start-input, response-head, item-output, finish-output, transform-error};
+    export start: func(input: start-input) -> result<response-head, transform-error>;
+    export transform-item: func(item: list<u8>) -> result<item-output, transform-error>;
+    export finish: func() -> result<finish-output, transform-error>;
+}
+
+world claude-stream-response-transformer {
+    use common-types.{start-input, response-head, item-output, finish-output, transform-error};
+    export start: func(input: start-input) -> result<response-head, transform-error>;
+    export transform-item: func(item: list<u8>) -> result<item-output, transform-error>;
+    export finish: func() -> result<finish-output, transform-error>;
+}

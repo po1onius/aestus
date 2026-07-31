@@ -1,0 +1,77 @@
+package aestus:buffered-response-transformer@1.0.0;
+
+interface common-types {
+    record header {
+        name: string,
+        value: list<u8>,
+    }
+
+    record response {
+        status: u16,
+        headers: list<header>,
+        body: list<u8>,
+    }
+
+    record transform-input {
+        response: response,
+        /// 同一 attempt 的请求插件输出；请求插槽为空或未产生上下文时为 none。
+        request-context: option<list<u8>>,
+    }
+
+    record transform-error {
+        code: string,
+        message: string,
+    }
+
+    record token-usage {
+        input-tokens: s64,
+        cached-input-tokens: s64,
+        output-tokens: s64,
+        reasoning-output-tokens: s64,
+        total-tokens: s64,
+    }
+
+    record limit-feedback {
+        resets-at-unix-seconds: option<s64>,
+        reason: string,
+    }
+
+    variant upstream-feedback {
+        error(string),
+        authentication-rejected(string),
+        rate-limited(limit-feedback),
+        quota-exhausted(limit-feedback),
+        temporarily-unavailable(string),
+        entitlement-missing(string),
+    }
+
+    record response-effects {
+        feedback: option<upstream-feedback>,
+        usage: option<token-usage>,
+    }
+
+    record retry-instruction {
+        exclude-current-resource: bool,
+        reason: string,
+    }
+
+    variant buffered-disposition {
+        respond(response),
+        retry(retry-instruction),
+    }
+
+    record transform-output {
+        disposition: buffered-disposition,
+        effects: response-effects,
+    }
+}
+
+world gpt-buffered-response-transformer {
+    use common-types.{transform-input, transform-output, transform-error};
+    export transform: func(input: transform-input) -> result<transform-output, transform-error>;
+}
+
+world claude-buffered-response-transformer {
+    use common-types.{transform-input, transform-output, transform-error};
+    export transform: func(input: transform-input) -> result<transform-output, transform-error>;
+}

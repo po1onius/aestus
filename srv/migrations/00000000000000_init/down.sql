@@ -1,0 +1,10 @@
+DROP TABLE IF EXISTS provider_api_keys;
+DROP TABLE IF EXISTS provider_accounts;
+DROP TABLE IF EXISTS api_key_models;
+DROP TABLE IF EXISTS api_keys;
+DROP TABLE IF EXISTS plugin_suite_artifacts;
+DROP TABLE IF EXISTS plugin_suite_releases;
+DROP TABLE IF EXISTS plugin_suites;
+DROP TABLE IF EXISTS provider_group_models;
+DROP TABLE IF EXISTS provider_groups;
+DROP TABLE IF EXISTS users;

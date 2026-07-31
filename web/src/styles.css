@@ -1,0 +1,58 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: "IBM Plex Sans Variable", "Noto Sans SC Variable", "Microsoft YaHei", sans-serif;
+  --font-mono: "IBM Plex Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+
+  /*
+   * 石墨中性色承担页面层级，避免默认 Slate 在暗色模式中过度偏蓝。
+   * 保留原有 slate utility 名称，使所有业务组件共享同一套语义色阶。
+   */
+  --color-slate-50: #f7f8fa;
+  --color-slate-100: #f0f2f5;
+  --color-slate-200: #e4e7ec;
+  --color-slate-300: #d0d5dd;
+  --color-slate-400: #98a2b3;
+  --color-slate-500: #667085;
+  --color-slate-600: #475467;
+  --color-slate-700: #344054;
+  --color-slate-800: #28313e;
+  --color-slate-900: #131820;
+  --color-slate-950: #0c0f14;
+
+  /* 鸢尾紫仅用于品牌、主操作、选中态和焦点反馈，状态颜色仍保持独立语义。 */
+  --color-indigo-50: #eeeeff;
+  --color-indigo-100: #e0e0ff;
+  --color-indigo-200: #c7c8ff;
+  --color-indigo-300: #a5a6ff;
+  --color-indigo-400: #818cf8;
+  --color-indigo-500: #6c6ce5;
+  --color-indigo-600: #5b5bd6;
+  --color-indigo-700: #4b4bc4;
+  --color-indigo-800: #4141ae;
+  --color-indigo-900: #303078;
+  --color-indigo-950: #242442;
+
+  /* 成功色单独使用更清透的状态色阶，不再承担任何品牌或导航职责。 */
+  --color-emerald-50: #ecfdf3;
+  --color-emerald-100: #dcfce7;
+  --color-emerald-200: #abefc6;
+  --color-emerald-300: #75e0a7;
+  --color-emerald-400: #47cd89;
+  --color-emerald-500: #17b26a;
+  --color-emerald-600: #079455;
+  --color-emerald-700: #067647;
+  --color-emerald-800: #085d3a;
+  --color-emerald-900: #074d31;
+  --color-emerald-950: #053321;
+}
+
+@layer base {
+  /* 全局使用统一的 IBM Plex/思源系字体度量，并让后台数字列天然保持纵向对齐。 */
+  html {
+    @apply font-sans antialiased;
+    font-variant-numeric: tabular-nums;
+  }
+}

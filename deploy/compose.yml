@@ -1,0 +1,151 @@
+name: aestus-gateway
+
+services:
+  postgres:
+    image: postgres:18.4-alpine
+    container_name: aestus-gateway-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-aestus_gateway}
+      POSTGRES_USER: ${POSTGRES_USER:-aestus}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aestus}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-p", "5432", "-U", "${POSTGRES_USER:-aestus}", "-d", "${POSTGRES_DB:-aestus_gateway}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:8.8-alpine
+    container_name: aestus-gateway-redis
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest-alpine
+    container_name: aestus-gateway-clickhouse
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE:-default}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?require}
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./clickhouse-init.sql:/docker-entrypoint-initdb.d/000-init-request-log.sql:ro
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: diesel-cli
+    image: aestus-gateway-migrate:local
+    container_name: aestus-gateway-migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-aestus}:${POSTGRES_PASSWORD:-aestus}@postgres:5432/${POSTGRES_DB:-aestus_gateway}
+    volumes:
+      - ../srv/migrations:/app/srv/migrations:ro
+    command: ["migration", "run", "--migration-dir", "/app/srv/migrations"]
+    restart: "no"
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: aestus-gateway:local
+    container_name: aestus-gateway
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-aestus}:${POSTGRES_PASSWORD:-aestus}@postgres:5432/${POSTGRES_DB:-aestus_gateway}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      CLICKHOUSE_URL: ${CLICKHOUSE_URL:-http://clickhouse:8123}
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-default}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?require}
+      AESTUS_REQUEST_LOG_TABLE: ${AESTUS_REQUEST_LOG_TABLE:-gateway_request_logs}
+      AESTUS_JWT_SECRET: ${AESTUS_JWT_SECRET:-}
+      AESTUS_JWT_TTL_SECONDS: ${AESTUS_JWT_TTL_SECONDS:-604800}
+      AESTUS_ADMIN_USERNAME: ${AESTUS_ADMIN_USERNAME:-}
+      AESTUS_ADMIN_EMAIL: ${AESTUS_ADMIN_EMAIL:-}
+      AESTUS_ADMIN_PASSWORD: ${AESTUS_ADMIN_PASSWORD:-}
+      AESTUS_ADMIN_INITIAL_QUOTA: ${AESTUS_ADMIN_INITIAL_QUOTA:-1000000}
+      AESTUS_SMTP_HOST: ${AESTUS_SMTP_HOST:-}
+      AESTUS_SMTP_PORT: ${AESTUS_SMTP_PORT:-587}
+      AESTUS_SMTP_USERNAME: ${AESTUS_SMTP_USERNAME:-}
+      AESTUS_SMTP_PASSWORD: ${AESTUS_SMTP_PASSWORD:-}
+      AESTUS_SMTP_FROM: ${AESTUS_SMTP_FROM:-}
+      AESTUS_EMAIL_CODE_TTL_SECONDS: ${AESTUS_EMAIL_CODE_TTL_SECONDS:-600}
+      AESTUS_EMAIL_CODE_COOLDOWN_SECONDS: ${AESTUS_EMAIL_CODE_COOLDOWN_SECONDS:-60}
+      AESTUS_DATABASE_POOL_SIZE: ${AESTUS_DATABASE_POOL_SIZE:-16}
+      AESTUS_BODY_MEMORY_LIMIT_BYTES: ${AESTUS_BODY_MEMORY_LIMIT_BYTES:-1048576}
+      AESTUS_UPSTREAM_RETRY_LIMIT: ${AESTUS_UPSTREAM_RETRY_LIMIT:-2}
+      AESTUS_PROVIDER_SESSION_STICKY_TTL_SECONDS: ${AESTUS_PROVIDER_SESSION_STICKY_TTL_SECONDS:-3600}
+      AESTUS_PROVIDER_SCHEDULER_CANDIDATE_LIMIT: ${AESTUS_PROVIDER_SCHEDULER_CANDIDATE_LIMIT:-32}
+      AESTUS_GPT_ACCOUNT_RATE_LIMIT_COOLDOWN_SECONDS: ${AESTUS_GPT_ACCOUNT_RATE_LIMIT_COOLDOWN_SECONDS:-120}
+      AESTUS_GPT_ACCOUNT_UPSTREAM_5XX_COOLDOWN_SECONDS: ${AESTUS_GPT_ACCOUNT_UPSTREAM_5XX_COOLDOWN_SECONDS:-30}
+      AESTUS_GPT_UPSTREAM_API_KEY_PROBE_INTERVAL_SECONDS: ${AESTUS_GPT_UPSTREAM_API_KEY_PROBE_INTERVAL_SECONDS:-120}
+      AESTUS_GPT_UPSTREAM_BASE_URL: ${AESTUS_GPT_UPSTREAM_BASE_URL:-https://chatgpt.com/backend-api/codex}
+      AESTUS_GPT_UPSTREAM_RESPONSES_PATH: ${AESTUS_GPT_UPSTREAM_RESPONSES_PATH:-/responses}
+      AESTUS_PROVIDER_UPSTREAM_CONNECT_TIMEOUT_SECONDS: ${AESTUS_PROVIDER_UPSTREAM_CONNECT_TIMEOUT_SECONDS:-30}
+      AESTUS_PROVIDER_UPSTREAM_TIMEOUT_SECONDS: ${AESTUS_PROVIDER_UPSTREAM_TIMEOUT_SECONDS:-120}
+      AESTUS_PROVIDER_UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS: ${AESTUS_PROVIDER_UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS:-0}
+      AESTUS_GPT_TOKEN_REFRESH_AHEAD_SECONDS: ${AESTUS_GPT_TOKEN_REFRESH_AHEAD_SECONDS:-180}
+      AESTUS_GPT_OAUTH_ISSUER: ${AESTUS_GPT_OAUTH_ISSUER:-https://auth.openai.com}
+      AESTUS_GPT_OAUTH_REDIRECT_URI: ${AESTUS_GPT_OAUTH_REDIRECT_URI:-http://localhost:1455/auth/callback}
+      AESTUS_GPT_OAUTH_SCOPE: ${AESTUS_GPT_OAUTH_SCOPE:-openid profile email offline_access}
+      AESTUS_GPT_OAUTH_SESSION_TTL_SECONDS: ${AESTUS_GPT_OAUTH_SESSION_TTL_SECONDS:-600}
+      AESTUS_GPT_TOKEN_ENDPOINT: ${AESTUS_GPT_TOKEN_ENDPOINT:-https://auth.openai.com/oauth/token}
+      AESTUS_CLAUDE_ACCOUNT_RATE_LIMIT_COOLDOWN_SECONDS: ${AESTUS_CLAUDE_ACCOUNT_RATE_LIMIT_COOLDOWN_SECONDS:-120}
+      AESTUS_CLAUDE_ACCOUNT_UPSTREAM_5XX_COOLDOWN_SECONDS: ${AESTUS_CLAUDE_ACCOUNT_UPSTREAM_5XX_COOLDOWN_SECONDS:-30}
+      AESTUS_CLAUDE_UPSTREAM_API_KEY_PROBE_INTERVAL_SECONDS: ${AESTUS_CLAUDE_UPSTREAM_API_KEY_PROBE_INTERVAL_SECONDS:-120}
+      AESTUS_CLAUDE_UPSTREAM_API_KEY_PROBE_MODEL: ${AESTUS_CLAUDE_UPSTREAM_API_KEY_PROBE_MODEL:-claude-opus-4-8}
+      AESTUS_CLAUDE_UPSTREAM_BASE_URL: ${AESTUS_CLAUDE_UPSTREAM_BASE_URL:-https://api.anthropic.com}
+      AESTUS_CLAUDE_UPSTREAM_MESSAGES_PATH: ${AESTUS_CLAUDE_UPSTREAM_MESSAGES_PATH:-/v1/messages}
+      AESTUS_CLAUDE_TOKEN_REFRESH_AHEAD_SECONDS: ${AESTUS_CLAUDE_TOKEN_REFRESH_AHEAD_SECONDS:-180}
+      AESTUS_CLAUDE_OAUTH_AUTHORIZE_URL: ${AESTUS_CLAUDE_OAUTH_AUTHORIZE_URL:-https://claude.com/cai/oauth/authorize}
+      AESTUS_CLAUDE_OAUTH_REDIRECT_URI: ${AESTUS_CLAUDE_OAUTH_REDIRECT_URI:-https://platform.claude.com/oauth/code/callback}
+      AESTUS_CLAUDE_OAUTH_SCOPE: ${AESTUS_CLAUDE_OAUTH_SCOPE:-user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload}
+      AESTUS_CLAUDE_OAUTH_SESSION_TTL_SECONDS: ${AESTUS_CLAUDE_OAUTH_SESSION_TTL_SECONDS:-600}
+      AESTUS_CLAUDE_TOKEN_ENDPOINT: ${AESTUS_CLAUDE_TOKEN_ENDPOINT:-https://platform.claude.com/v1/oauth/token}
+      AESTUS_GPT_QUOTA_RECOVERY_SECONDS: ${AESTUS_GPT_QUOTA_RECOVERY_SECONDS:-18000}
+      AESTUS_CODEX_VERSION_HEADER: ${AESTUS_CODEX_VERSION_HEADER:-}
+      AESTUS_LOG_FILE_NAME: ${AESTUS_LOG_FILE_NAME:-aestus-gateway.log}
+      RUST_LOG: ${RUST_LOG:-aestus=info,tower_http=info,axum=info}
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  clickhouse-data:

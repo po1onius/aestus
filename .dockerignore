@@ -1,0 +1,13 @@
+.git
+.gitignore
+Dockerfile
+deploy/
+srv/target/
+srv/target-codex*/
+srv/logs/
+web/node_modules/
+web/dist/
+web/*.tsbuildinfo
+web/vite.config.js
+web/vite.config.d.ts
+web/dev-server*.log
