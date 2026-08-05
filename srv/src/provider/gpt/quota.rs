@@ -11,7 +11,10 @@ use crate::{
     err::{AppError, AppResult},
     provider::{
         credential::ProviderAccount,
-        gpt::{codex_http::header as codex_header, model::GptAccountSpecific},
+        gpt::{
+            codex_http::header as codex_header,
+            model::{GptAccountSpecific, PROVIDER},
+        },
         response_logging::response_body_for_tracing,
     },
     state::AppState,
@@ -233,7 +236,8 @@ pub async fn fetch_account_quota(
             error = %source,
             "请求 GPT 账号额度接口失败"
         );
-        AppError::GptUpstream {
+        AppError::ProviderUpstream {
+            provider: PROVIDER.to_owned(),
             message: format!("请求 GPT 账号额度接口失败: {source}"),
         }
     })?;
@@ -247,7 +251,8 @@ pub async fn fetch_account_quota(
             error = %source,
             "读取 GPT 账号额度响应体失败"
         );
-        AppError::GptUpstream {
+        AppError::ProviderUpstream {
+            provider: PROVIDER.to_owned(),
             message: format!("读取 GPT 账号额度响应体失败: {source}"),
         }
     })?;
@@ -273,7 +278,8 @@ pub async fn fetch_account_quota(
             upstream_response_body = %tracing_body.content(),
             "GPT 账号额度响应 JSON 解析失败，完整响应正文已写入 tracing"
         );
-        AppError::GptUpstream {
+        AppError::ProviderUpstream {
+            provider: PROVIDER.to_owned(),
             message: format!("GPT 账号额度响应格式无效: {source}"),
         }
     })?;
@@ -471,7 +477,8 @@ fn map_usage_status_error(
         };
     }
 
-    AppError::GptUpstream {
+    AppError::ProviderUpstream {
+        provider: PROVIDER.to_owned(),
         message: format!("GPT 账号额度接口返回失败状态: HTTP {status}"),
     }
 }

@@ -446,7 +446,9 @@ pub mod header {
 
     use crate::{
         err::{AppError, AppResult},
-        provider::request_header::build_transparent_official_api_key_headers,
+        provider::{
+            gpt::model::PROVIDER, request_header::build_transparent_official_api_key_headers,
+        },
     };
 
     const CHATGPT_ACCOUNT_ID_HEADER: &str = "chatgpt-account-id";
@@ -627,9 +629,11 @@ pub mod header {
         upstream_headers.remove(FEDRAMP_HEADER);
 
         let bearer = format!("Bearer {}", account_auth.access_token);
-        let mut value = HeaderValue::from_str(&bearer).map_err(|source| AppError::GptUpstream {
-            message: format!("Codex access token 无法写入 Authorization header: {source}"),
-        })?;
+        let mut value =
+            HeaderValue::from_str(&bearer).map_err(|source| AppError::ProviderUpstream {
+                provider: PROVIDER.to_owned(),
+                message: format!("Codex access token 无法写入 Authorization header: {source}"),
+            })?;
         value.set_sensitive(true);
         upstream_headers.insert(header::AUTHORIZATION, value);
 
@@ -639,7 +643,8 @@ pub mod header {
             .filter(|value| !value.is_empty());
         if let Some(account_id) = account_id {
             let value =
-                HeaderValue::from_str(account_id).map_err(|source| AppError::GptUpstream {
+                HeaderValue::from_str(account_id).map_err(|source| AppError::ProviderUpstream {
+                    provider: PROVIDER.to_owned(),
                     message: format!("chatgpt_account_id 无法写入上游 header: {source}"),
                 })?;
             upstream_headers.insert(CHATGPT_ACCOUNT_ID_HEADER, value);
@@ -665,9 +670,11 @@ pub mod header {
     ) -> AppResult<()> {
         upstream_headers.remove(header::AUTHORIZATION);
         let bearer = format!("Bearer {api_key}");
-        let mut value = HeaderValue::from_str(&bearer).map_err(|source| AppError::GptUpstream {
-            message: format!("官方 API Key 无法写入 Authorization header: {source}"),
-        })?;
+        let mut value =
+            HeaderValue::from_str(&bearer).map_err(|source| AppError::ProviderUpstream {
+                provider: PROVIDER.to_owned(),
+                message: format!("官方 API Key 无法写入 Authorization header: {source}"),
+            })?;
         value.set_sensitive(true);
         upstream_headers.insert(header::AUTHORIZATION, value);
         Ok(())

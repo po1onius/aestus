@@ -15,8 +15,9 @@ use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 use crate::{
     err::{AppError, AppResult},
     provider::{
-        claude::model::ClaudeAccountRequestContext, gpt::model::GptAccountRequestContext,
-        protocol::UpstreamFeedback,
+        claude::model::ClaudeAccountRequestContext,
+        gpt::model::GptAccountRequestContext,
+        protocol::{MAX_SSE_ITEM_BYTES, UpstreamFeedback},
     },
     request_event::TokenUsage,
 };
@@ -35,9 +36,6 @@ const PLUGIN_MEMORY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 /// 明确边界，避免异常组件无限增长线性内存。
 const STREAM_PLUGIN_MEMORY_LIMIT_BYTES: usize = 2 * 1024 * 1024 * 1024;
 const MAX_OUTPUT_BODY_BYTES: usize = 64 * 1024 * 1024;
-/// 与 sub2api 默认 `gateway.max_line_size` 对齐。宿主按完整 SSE item 调用插件，所以同一
-/// 上限同时校验原始 item 和插件输出 item。
-const MAX_SSE_ITEM_BYTES: usize = 500 * 1024 * 1024;
 const _: () = assert!(STREAM_PLUGIN_MEMORY_LIMIT_BYTES > MAX_SSE_ITEM_BYTES);
 /// opaque context 只应保存跨请求/响应阶段必需的最小映射。限制独立于 body，避免插件借此
 /// 绕过响应体上限，或因异常输出让单次 attempt 长时间占用大块宿主内存。

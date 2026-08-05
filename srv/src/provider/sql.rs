@@ -47,8 +47,24 @@ pub mod account {
 
     pub async fn create(
         conn: &mut AsyncPgConnection,
-        mut new_account: NewProviderAccount,
+        new_account: NewProviderAccount,
     ) -> AppResult<ProviderAccount> {
+        create_with_db_error_mapper(conn, new_account, db_error).await
+    }
+
+    /// 创建账号并允许 provider facade 自己转换数据库写入错误。
+    ///
+    /// 通用 SQL 层只负责校验共享字段和执行 insert，不应知道某个 provider 在 `specific`
+    /// JSON 上建立了什么唯一索引。需要展示 provider 专属业务提示时，由对应 facade 传入
+    /// 错误转换函数；默认的 [`create`] 仍统一折叠为 `DbQuery`。
+    pub(crate) async fn create_with_db_error_mapper<F>(
+        conn: &mut AsyncPgConnection,
+        mut new_account: NewProviderAccount,
+        map_db_error: F,
+    ) -> AppResult<ProviderAccount>
+    where
+        F: FnOnce(diesel::result::Error) -> AppError,
+    {
         use provider_accounts::dsl;
 
         new_account.provider = normalize_provider(new_account.provider)?;
@@ -69,13 +85,12 @@ pub mod account {
             });
         }
 
-        let provider = new_account.provider.clone();
         let account = diesel::insert_into(dsl::provider_accounts)
             .values(&new_account)
             .returning(ProviderAccount::as_returning())
             .get_result::<ProviderAccount>(conn)
             .await
-            .map_err(|source| account_create_db_error(&provider, source))?;
+            .map_err(map_db_error)?;
 
         info!(
             provider = %account.provider,
@@ -789,28 +804,6 @@ fn db_error(source: diesel::result::Error) -> AppError {
     AppError::DbQuery {
         message: source.to_string(),
     }
-}
-
-fn account_create_db_error(provider: &str, source: diesel::result::Error) -> AppError {
-    const CLAUDE_ACCOUNT_UUID_UNIQUE_INDEX: &str = "uq_provider_accounts_claude_account_uuid";
-
-    if let diesel::result::Error::DatabaseError(
-        diesel::result::DatabaseErrorKind::UniqueViolation,
-        information,
-    ) = &source
-        && information.constraint_name() == Some(CLAUDE_ACCOUNT_UUID_UNIQUE_INDEX)
-    {
-        warn!(
-            provider,
-            constraint = CLAUDE_ACCOUNT_UUID_UNIQUE_INDEX,
-            "provider 账号唯一身份冲突，已拒绝重复导入"
-        );
-        return AppError::BadRequest {
-            message: "Claude 账号已导入，不能重复导入同一账号".to_owned(),
-        };
-    }
-
-    db_error(source)
 }
 
 fn optional<T>(result: Result<T, diesel::result::Error>) -> AppResult<Option<T>> {

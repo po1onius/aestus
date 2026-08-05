@@ -296,7 +296,10 @@ fn map_refresh_token_import_error(error: auth::TokenRefreshError) -> AppError {
         auth::TokenRefreshFailureKind::InvalidRefreshToken
         | auth::TokenRefreshFailureKind::BadResponse => AppError::BadRequest { message },
         auth::TokenRefreshFailureKind::RateLimited | auth::TokenRefreshFailureKind::Retryable => {
-            AppError::GptUpstream { message }
+            AppError::ProviderUpstream {
+                provider: gpt_model::PROVIDER.to_owned(),
+                message,
+            }
         }
     }
 }

@@ -9,6 +9,7 @@ use crate::{
     err::{AppError, AppResult},
     provider::{
         gpt::codex_http::request::{parse_id_token_claims, parse_jwt_expiration},
+        gpt::model::PROVIDER,
         response_logging::response_body_for_tracing,
     },
     state::AppState,
@@ -326,7 +327,8 @@ pub async fn exchange_callback_code(
     let response = request
         .send()
         .await
-        .map_err(|source| AppError::GptUpstream {
+        .map_err(|source| AppError::ProviderUpstream {
+            provider: PROVIDER.to_owned(),
             message: format!("OAuth code 换 token 请求失败: {source}"),
         })?;
 
@@ -334,7 +336,8 @@ pub async fn exchange_callback_code(
     let body = response
         .bytes()
         .await
-        .map_err(|source| AppError::GptUpstream {
+        .map_err(|source| AppError::ProviderUpstream {
+            provider: PROVIDER.to_owned(),
             message: format!("OAuth code 换 token 响应读取失败: {source}"),
         })?;
 

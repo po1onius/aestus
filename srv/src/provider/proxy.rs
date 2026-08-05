@@ -30,10 +30,11 @@ use crate::{
     provider::{
         maintenance::{self, MaintenanceProvider},
         protocol::{
-            BufferedProtocolResponse, ProtocolFailure, ProtocolResponse, ProviderProtocol,
-            ReplayableRequest, StreamErrorRecord, StreamObserver, StreamingProtocolResponse,
-            TokenUsage, UpstreamAttemptContext, UpstreamFeedback, UpstreamRequestBodyMode,
-            UpstreamRequestDraft, UpstreamRequestTarget, read_buffered_upstream_body,
+            BufferedProtocolResponse, MAX_SSE_ITEM_BYTES, ProtocolFailure, ProtocolResponse,
+            ProviderProtocol, ReplayableRequest, StreamErrorRecord, StreamObserver,
+            StreamingProtocolResponse, TokenUsage, UpstreamAttemptContext, UpstreamFeedback,
+            UpstreamRequestBodyMode, UpstreamRequestDraft, UpstreamRequestTarget,
+            read_buffered_upstream_body,
         },
         resource::UpstreamResourceKind,
         response_logging::response_body_for_tracing,
@@ -988,7 +989,6 @@ enum PendingPluginResult {
 }
 
 type PendingPluginWork = Pin<Box<dyn Future<Output = AppResult<PendingPluginResult>> + Send>>;
-const MAX_PLUGIN_SSE_BUFFER_BYTES: usize = 256 * 1024;
 
 /// 通用流包装器向 axum body 暴露的错误。
 ///
@@ -1144,10 +1144,11 @@ impl<M: MaintenanceProvider> ManagedUpstreamStream<M> {
         }
         self.plugin_sse_buffer.extend_from_slice(&bytes);
         let items = plugin::sse::drain_complete_items(&mut self.plugin_sse_buffer);
-        if self.plugin_sse_buffer.len() > MAX_PLUGIN_SSE_BUFFER_BYTES {
+        if self.plugin_sse_buffer.len() > MAX_SSE_ITEM_BYTES {
             self.fail_plugin(format!(
-                "原始 SSE item 超过缓冲上限: {} bytes",
-                self.plugin_sse_buffer.len()
+                "原始 SSE item 超过缓冲上限: {} bytes（最大 {} bytes）",
+                self.plugin_sse_buffer.len(),
+                MAX_SSE_ITEM_BYTES
             ));
             return;
         }

@@ -21,11 +21,11 @@ use crate::{
             model::{ClaudeAccountRequestContext, PROVIDER},
         },
         protocol::{
-            BufferedProtocolResponse, EncodedProviderError, ProtocolFailure, ProtocolResponse,
-            ProviderProtocol, ProviderVisibleError, ReplayableRequest, RequestInspection,
-            RequestLogFields, StreamCompletion, StreamErrorRecord, StreamObserver, StreamUpdate,
-            StreamingProtocolResponse, UpstreamAttemptContext, UpstreamFeedback,
-            UpstreamRequestBodyMode, UpstreamRequestDraft, UpstreamRequestTarget,
+            BufferedProtocolResponse, EncodedProviderError, MAX_SSE_ITEM_BYTES, ProtocolFailure,
+            ProtocolResponse, ProviderProtocol, ProviderVisibleError, ReplayableRequest,
+            RequestInspection, RequestLogFields, StreamCompletion, StreamErrorRecord,
+            StreamObserver, StreamUpdate, StreamingProtocolResponse, UpstreamAttemptContext,
+            UpstreamFeedback, UpstreamRequestBodyMode, UpstreamRequestDraft, UpstreamRequestTarget,
             read_buffered_upstream_body,
         },
         resource::{UpstreamResource, UpstreamResourceKind},
@@ -33,7 +33,6 @@ use crate::{
     },
 };
 
-const MAX_SSE_EVENT_BUFFER_BYTES: usize = 64 * 1024;
 const COUNT_TOKENS_PATH: &str = "/v1/messages/count_tokens";
 
 /// Claude 原生 Messages API adapter。
@@ -447,9 +446,10 @@ impl ClaudeSseObserver {
             }
         }
 
-        if self.sse_buffer.len() > MAX_SSE_EVENT_BUFFER_BYTES {
+        if self.sse_buffer.len() > MAX_SSE_ITEM_BYTES {
             warn!(
                 buffered_bytes = self.sse_buffer.len(),
+                max_sse_item_bytes = MAX_SSE_ITEM_BYTES,
                 "Claude SSE 单事件缓冲超过上限，当前缓冲按原始字节透传"
             );
             update

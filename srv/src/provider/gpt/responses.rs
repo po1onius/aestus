@@ -22,19 +22,17 @@ use crate::{
             model::GptAccountRequestContext,
         },
         protocol::{
-            BufferedProtocolResponse, EncodedProviderError, ProtocolFailure, ProtocolResponse,
-            ProviderProtocol, ProviderVisibleError, ReplayableRequest, RequestInspection,
-            RequestLogFields, StreamCompletion, StreamErrorRecord, StreamObserver, StreamUpdate,
-            StreamingProtocolResponse, TokenUsage, UpstreamAttemptContext, UpstreamFeedback,
-            UpstreamRequestBodyMode, UpstreamRequestDraft, UpstreamRequestTarget,
-            read_buffered_upstream_body,
+            BufferedProtocolResponse, EncodedProviderError, MAX_SSE_ITEM_BYTES, ProtocolFailure,
+            ProtocolResponse, ProviderProtocol, ProviderVisibleError, ReplayableRequest,
+            RequestInspection, RequestLogFields, StreamCompletion, StreamErrorRecord,
+            StreamObserver, StreamUpdate, StreamingProtocolResponse, TokenUsage,
+            UpstreamAttemptContext, UpstreamFeedback, UpstreamRequestBodyMode,
+            UpstreamRequestDraft, UpstreamRequestTarget, read_buffered_upstream_body,
         },
         resource::{UpstreamResource, UpstreamResourceKind},
         response_logging::response_body_for_tracing,
     },
 };
-
-const MAX_SSE_EVENT_BUFFER_BYTES: usize = 64 * 1024;
 
 /// ChatGPT 账号 Responses 上游返回的账号级 Codex 窗口额度 header。
 ///
@@ -434,9 +432,10 @@ impl GptSseObserver {
             }
         }
 
-        if self.sse_buffer.len() > MAX_SSE_EVENT_BUFFER_BYTES {
+        if self.sse_buffer.len() > MAX_SSE_ITEM_BYTES {
             warn!(
                 buffered_bytes = self.sse_buffer.len(),
+                max_sse_item_bytes = MAX_SSE_ITEM_BYTES,
                 "GPT SSE 事件缓冲区超过上限，按原始字节透传当前缓冲内容"
             );
             update

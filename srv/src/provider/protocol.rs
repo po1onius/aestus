@@ -20,6 +20,13 @@ use crate::{
 
 pub use crate::request_event::{RequestLogFields, StreamErrorRecord, TokenUsage};
 
+/// 单个完整 SSE item（包含字段、数据和结尾空行）的统一大小上限。
+///
+/// Responses 中的图片等合法结果可能远大于传统文本事件，因此这里与 sub2api 默认的
+/// `gateway.max_line_size` 保持一致，允许最多 500 MiB。Provider 旁路观察器、插件拼包
+/// 缓冲以及插件 ABI 输入/输出必须共用该值，避免同一响应在前后处理阶段受到不同限制。
+pub const MAX_SSE_ITEM_BYTES: usize = 500 * 1024 * 1024;
+
 /// provider 对调用方原始请求执行一次协议检查后，交给通用 pipeline 的统一结果。
 ///
 /// provider 内部可以使用私有强类型 DTO 完成 JSON 解析、必填字段校验和协议归一化；通用层
@@ -109,7 +116,6 @@ impl ProviderVisibleError {
             | AppError::Forbidden
             | AppError::BodyCache { .. }
             | AppError::Plugin { .. }
-            | AppError::GptUpstream { .. }
             | AppError::ProviderUpstream { .. }
             | AppError::Email { .. }
             | AppError::ProviderStateSyncFailed { .. } => {
