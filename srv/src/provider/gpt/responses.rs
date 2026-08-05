@@ -274,18 +274,19 @@ async fn process_upstream_response(
     let response_headers = filtered_response_headers(&headers, resource.kind);
     let (retry, exclude_resource_on_retry, feedback) =
         if resource.kind == UpstreamResourceKind::ApiKey {
-            let decision = classify_api_key_http_failure(status);
+            let (retry, exclude_resource_on_retry, quarantine_key) =
+                classify_api_key_http_failure(status);
             debug!(
                 upstream_status = status.as_u16(),
-                retry = decision.retry,
-                exclude_resource_on_retry = decision.exclude_resource_on_retry,
-                quarantine_key = decision.quarantine_key,
+                retry,
+                exclude_resource_on_retry,
+                quarantine_key,
                 "GPT 官方 API Key HTTP 错误已完成请求级/资源级分类"
             );
-            let feedback = decision.quarantine_key.then(|| UpstreamFeedback::Error {
+            let feedback = quarantine_key.then(|| UpstreamFeedback::Error {
                 reason: format!("HTTP {status}"),
             });
-            (decision.retry, decision.exclude_resource_on_retry, feedback)
+            (retry, exclude_resource_on_retry, feedback)
         } else if let Some(signal) = account_signal {
             // usage_not_included 只说明当前账号不能承载这次调用，不足以改变账号对其他请求的
             // 持久健康状态；但本请求重试时也不能再次选回同一账号。
@@ -311,45 +312,20 @@ async fn process_upstream_response(
     }))
 }
 
-/// GPT 官方 API Key 的 HTTP 失败分类。
-///
-/// `retry`、`exclude_resource_on_retry` 和 `quarantine_key` 分别代表三种不同
-/// 的生命周期语义：是否允许当前请求换资源重试、是否只在当前请求的排除集合中
-/// 暂时排除该 Key，以及是否通过 `UpstreamFeedback` 把 Key 的错误写入全局维护
-/// 状态。408 和 5xx 属于上游/网络的瞬态失败，不能据此认定 Key 本身失效，因而
-/// 仅执行前两项；401、403、429 仍保留原有的全局 Key 错误回执策略。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ApiKeyHttpFailureDecision {
-    retry: bool,
-    exclude_resource_on_retry: bool,
-    quarantine_key: bool,
-}
-
-fn classify_api_key_http_failure(status: StatusCode) -> ApiKeyHttpFailureDecision {
-    if matches!(
+/// 返回 `(retry, exclude_resource_on_retry, quarantine_key)`，把当前请求的重试、
+/// 请求级排除和 Key 的持久化隔离三个生命周期决策保持独立。408 只直接重试；5xx
+/// 只在当前请求重试时暂时排除该 Key，不提交全局错误回执；401、403、429 继续提交
+/// 全局 Key 错误回执。
+fn classify_api_key_http_failure(status: StatusCode) -> (bool, bool, bool) {
+    let quarantine_key = matches!(
         status,
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS
-    ) {
-        return ApiKeyHttpFailureDecision {
-            retry: true,
-            exclude_resource_on_retry: false,
-            quarantine_key: true,
-        };
-    }
-
-    if is_transient_upstream_status(status) {
-        return ApiKeyHttpFailureDecision {
-            retry: true,
-            exclude_resource_on_retry: true,
-            quarantine_key: false,
-        };
-    }
-
-    ApiKeyHttpFailureDecision {
-        retry: false,
-        exclude_resource_on_retry: false,
-        quarantine_key: false,
-    }
+    );
+    let retry = quarantine_key || is_transient_upstream_status(status);
+    // 408 是明确的“直接重试”状态，不把当前 Key 加入本请求排除集合；只有 5xx
+    // 才在重试时切换到其他资源，同时保持 Key 的全局健康状态不变。
+    let exclude_resource_on_retry = status.is_server_error();
+    (retry, exclude_resource_on_retry, quarantine_key)
 }
 
 fn is_transient_upstream_status(status: StatusCode) -> bool {

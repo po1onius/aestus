@@ -2,10 +2,10 @@ use std::future::Future;
 
 use axum::{
     body::Bytes,
-    http::{HeaderMap, header},
+    http::{HeaderMap, StatusCode, header},
 };
 use chrono::{DateTime, Utc};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     config::AppConfig,
@@ -307,6 +307,11 @@ async fn process_upstream_response(
         parsed_error.as_ref(),
         config.claude_account_rate_limit_cooldown_seconds,
     );
+    // 只有未识别为凭证/权限/计费/限流信号、但协议明确要求重试的瞬态失败，才使用
+    // 请求级资源排除；这不会修改 Key 或账号的全局维护状态。408 由调用方要求直接
+    // 重试，因此即使被识别为瞬态失败，也不加入本请求排除集合。
+    let transient_retry =
+        signal.is_none() && claude_response::is_transient(status, &headers, parsed_error.as_ref());
     let (retry, feedback) = if resource.kind == UpstreamResourceKind::ApiKey {
         // 官方 Key 只有能够明确归因到凭证、权限、计费或该 Key 配额的失败才提交资源
         // 回执。网络波动和 Anthropic 临时故障只切换资源重试，不能因为一次公共上游故障
@@ -336,10 +341,7 @@ async fn process_upstream_response(
                     reason: "permission_error".to_owned(),
                 }),
             ),
-            None => (
-                claude_response::is_transient(status, &headers, parsed_error.as_ref()),
-                None,
-            ),
+            None => (transient_retry, None),
         }
     } else {
         match signal {
@@ -368,7 +370,7 @@ async fn process_upstream_response(
                     reason: "permission_error".to_owned(),
                 }),
             ),
-            None if claude_response::is_transient(status, &headers, parsed_error.as_ref()) => (
+            None if transient_retry => (
                 true,
                 Some(UpstreamFeedback::TemporarilyUnavailable {
                     reason: parsed_error
@@ -380,6 +382,19 @@ async fn process_upstream_response(
             None => (false, None),
         }
     };
+    let exclude_resource_on_retry = transient_retry && status != StatusCode::REQUEST_TIMEOUT;
+    debug!(
+        upstream_status = status.as_u16(),
+        resource_type = resource.kind.as_str(),
+        retry,
+        transient_retry,
+        exclude_resource_on_retry,
+        feedback = feedback
+            .as_ref()
+            .map(UpstreamFeedback::as_str)
+            .unwrap_or("none"),
+        "Claude HTTP 失败已完成重试与请求级资源排除分类"
+    );
     let response_headers = filtered_response_headers(&headers);
     Ok(ProtocolResponse::Buffered(BufferedProtocolResponse {
         status,
@@ -387,7 +402,7 @@ async fn process_upstream_response(
         body,
         record_error_response: true,
         retry,
-        exclude_resource_on_retry: false,
+        exclude_resource_on_retry,
         feedback,
         usage: None,
     }))
