@@ -37,3 +37,6 @@ cd deploy && cp .env.example .env && docker compose up -d   # Docker 一键部�
 ├── web/       React 管理面板
 └── deploy/    Docker Compose 部署配置
 ```
+
+## AGENTS
+* 禁止添加测试用例

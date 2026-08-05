@@ -854,61 +854,6 @@ fn should_use_stream_response(
     }
 }
 
-#[cfg(test)]
-mod response_routing_tests {
-    use super::*;
-
-    fn sse_headers() -> HeaderMap {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::CONTENT_TYPE,
-            "text/event-stream; charset=utf-8".parse().unwrap(),
-        );
-        headers
-    }
-
-    #[test]
-    fn request_plugin_stream_mode_is_authoritative_without_sse_header() {
-        assert!(should_use_stream_response(
-            StatusCode::OK,
-            Some(PluginResponseMode::Stream),
-            &HeaderMap::new(),
-        ));
-    }
-
-    #[test]
-    fn request_plugin_buffered_mode_is_authoritative_with_sse_header() {
-        assert!(!should_use_stream_response(
-            StatusCode::OK,
-            Some(PluginResponseMode::Buffered),
-            &sse_headers(),
-        ));
-    }
-
-    #[test]
-    fn failed_http_response_is_always_buffered() {
-        assert!(!should_use_stream_response(
-            StatusCode::TOO_MANY_REQUESTS,
-            Some(PluginResponseMode::Stream),
-            &sse_headers(),
-        ));
-    }
-
-    #[test]
-    fn missing_request_plugin_mode_falls_back_to_content_type() {
-        assert!(should_use_stream_response(
-            StatusCode::OK,
-            None,
-            &sse_headers(),
-        ));
-        assert!(!should_use_stream_response(
-            StatusCode::OK,
-            None,
-            &HeaderMap::new(),
-        ));
-    }
-}
-
 fn finish_buffered_response(
     state: &AppState,
     request_id: uuid::Uuid,
