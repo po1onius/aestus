@@ -67,9 +67,9 @@ where
         });
     }
     let max_attempts = usize::from(state.config().upstream_retry_limit).saturating_add(1);
-    // 排除集合只属于当前下游请求，不改变资源的持久健康状态。只有 provider 明确返回
-    // `exclude_resource_on_retry` 时才加入当前资源；普通网络失败、408/5xx 等重试不自动
-    // 扩大为排除语义。
+    // 排除集合只属于当前下游请求，不改变资源的持久健康状态。Provider 可以针对明确
+    // 归因于当前 attempt 的瞬态 HTTP 错误设置 `exclude_resource_on_retry`，但这不能替代
+    // 持久化的 `UpstreamFeedback`；普通传输错误是否排除也必须由各 provider adapter 决定。
     let mut excluded_resource_members = HashSet::<String>::with_capacity(max_attempts);
 
     info!(
