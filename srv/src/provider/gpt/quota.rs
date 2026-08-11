@@ -26,8 +26,9 @@ const DEFAULT_LIMIT_ID: &str = "codex";
 
 /// 单个 GPT 账号的额度快照响应。
 ///
-/// 该结构只服务管理端即时查看，不落库，也不参与调度决策。账号列表不会携带该字段，
-/// 前端只有在用户主动点击“刷新额度”时才会调用接口并缓存到页面内存态。
+/// 该结构主要服务管理端即时查看，本身不落库。账号列表不会携带该字段，前端只有在用户
+/// 主动点击“刷新额度”时才会调用接口并缓存到页面内存态。若主 Codex 额度确认恢复，HTTP
+/// 编排层会据此清理既有额度限制，并通过 `quota_limit_removed` 告知前端刷新账号运行态。
 #[derive(Debug, Clone, Serialize)]
 pub struct GptAccountQuotaResponse {
     pub account_id: Uuid,
@@ -37,6 +38,35 @@ pub struct GptAccountQuotaResponse {
     pub primary: Option<GptQuotaSnapshot>,
     pub snapshots: Vec<GptQuotaSnapshot>,
     pub rate_limit_reset_credits: Option<RateLimitResetCreditsSummary>,
+    pub quota_limit_removed: bool,
+}
+
+impl GptAccountQuotaResponse {
+    /// 返回主 Codex 额度所有约束窗口中的最小剩余百分比。
+    ///
+    /// ChatGPT 可能同时返回短周期 primary 与长周期 secondary 窗口；任一窗口耗尽都会
+    /// 阻止真实请求，因此不能看到其中一个窗口大于 0 就提前恢复调度。上游显式声明
+    /// `allowed=false` 或 `limit_reached=true` 时同样以协议状态为准。返回 `Some` 即表示
+    /// 已获得“当前额度严格大于 0”的充分证据，可用于解除先前的额度限制。
+    pub(crate) fn available_remaining_percent(&self) -> Option<f64> {
+        let snapshot = self.primary.as_ref().or_else(|| {
+            self.snapshots
+                .iter()
+                .find(|snapshot| snapshot.limit_id == DEFAULT_LIMIT_ID)
+                .or_else(|| self.snapshots.first())
+        })?;
+        if snapshot.allowed == Some(false) || snapshot.limit_reached == Some(true) {
+            return None;
+        }
+
+        let minimum_remaining = snapshot
+            .primary
+            .iter()
+            .chain(snapshot.secondary.iter())
+            .map(|window| window.remaining_percent)
+            .reduce(f64::min)?;
+        (minimum_remaining > 0.0).then_some(minimum_remaining)
+    }
 }
 
 /// Codex usage 接口返回的一组额度窗口。
@@ -366,6 +396,7 @@ fn quota_response_from_payload(
         primary,
         snapshots,
         rate_limit_reset_credits,
+        quota_limit_removed: false,
     }
 }
 

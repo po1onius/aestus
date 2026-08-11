@@ -420,21 +420,68 @@ async fn refresh_gpt_account_quota(
     _admin: dash_auth::AdminUser,
     Path(id): Path<Uuid>,
 ) -> AdminResult<Json<quota::GptAccountQuotaResponse>> {
-    let account = ProviderResourceService::<GptMaintenance>::new(&state)
-        .find_account(id)
-        .await?
-        .ok_or_else(|| {
-            warn!(gpt_account_id = %id, "管理端刷新 GPT 账号额度失败，账号不存在");
-            AppError::BadRequest {
-                message: format!("GPT 账号不存在: {id}"),
-            }
-        })?;
+    let service = ProviderResourceService::<GptMaintenance>::new(&state);
+    let account = service.find_account(id).await?.ok_or_else(|| {
+        warn!(gpt_account_id = %id, "管理端刷新 GPT 账号额度失败，账号不存在");
+        AppError::BadRequest {
+            message: format!("GPT 账号不存在: {id}"),
+        }
+    })?;
 
-    let quota = quota::fetch_account_quota(&state, &account).await?;
+    // 只记录查询发起前仍生效的 quota 快照。查询期间若账号发生任意持久变化，后续 CAS
+    // 会拒绝用旧的上游结果清理状态，防止覆盖新到达的额度耗尽回执。
+    let limited_snapshot = account
+        .quota_resets_at
+        .filter(|quota_resets_at| *quota_resets_at > chrono::Utc::now())
+        .map(|quota_resets_at| (quota_resets_at, account.updated_at));
+    let mut quota = quota::fetch_account_quota(&state, &account).await?;
+    let available_remaining_percent = quota.available_remaining_percent();
+
+    if let (Some((expected_quota_resets_at, expected_updated_at)), Some(remaining_percent)) =
+        (limited_snapshot, available_remaining_percent)
+    {
+        match service
+            .clear_account_quota_limit_if_snapshot(
+                account.id,
+                expected_quota_resets_at,
+                expected_updated_at,
+            )
+            .await?
+        {
+            Some(snapshot) => {
+                quota.quota_limit_removed = true;
+                info!(
+                    gpt_account_id = %account.id,
+                    minimum_remaining_percent = remaining_percent,
+                    previous_quota_resets_at = %expected_quota_resets_at,
+                    runtime_ready = snapshot.runtime.runtime_ready,
+                    "GPT 账号额度已恢复，既有额度限制已清理并重新同步调度运行态"
+                );
+            }
+            None => {
+                warn!(
+                    gpt_account_id = %account.id,
+                    minimum_remaining_percent = remaining_percent,
+                    expected_quota_resets_at = %expected_quota_resets_at,
+                    expected_updated_at = %expected_updated_at,
+                    "GPT 账号额度已恢复，但查询期间持久状态发生变化，已保留当前额度限制"
+                );
+            }
+        }
+    } else if limited_snapshot.is_some() {
+        info!(
+            gpt_account_id = %account.id,
+            allowed = quota.primary.as_ref().and_then(|snapshot| snapshot.allowed),
+            limit_reached = quota.primary.as_ref().and_then(|snapshot| snapshot.limit_reached),
+            "GPT 账号仍无可用额度，保留现有额度限制"
+        );
+    }
+
     info!(
         gpt_account_id = %account.id,
         chatgpt_account_id = quota.chatgpt_account_id.as_deref().unwrap_or("<missing>"),
         snapshot_count = quota.snapshots.len(),
+        quota_limit_removed = quota.quota_limit_removed,
         "管理端 GPT 账号额度已刷新"
     );
 

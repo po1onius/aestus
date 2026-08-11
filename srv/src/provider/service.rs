@@ -110,6 +110,34 @@ impl<'a, P: MaintenanceProvider> ProviderResourceService<'a, P> {
         self.sync_account(account).await
     }
 
+    /// 额度查询确认恢复后，使用查询前的持久快照 CAS 清理限制并立即恢复 Redis 投影。
+    ///
+    /// 返回 `None` 表示查询期间账号已经发生并发变化，或限制已自然到期；此时绝不能用
+    /// 旧查询结果覆盖新事实。返回 `Some` 时 PostgreSQL 已提交，且最新账号状态已完成
+    /// reconcile：只有仍启用、凭证有效且已分组的账号才会重新进入 ready 集合。
+    pub async fn clear_account_quota_limit_if_snapshot(
+        &self,
+        id: Uuid,
+        expected_quota_resets_at: chrono::DateTime<chrono::Utc>,
+        expected_updated_at: chrono::DateTime<chrono::Utc>,
+    ) -> AppResult<Option<AccountSnapshot>> {
+        let mut conn = self.state.db_conn().await?;
+        let account = sql::account::clear_quota_resets_at_if_snapshot(
+            &mut conn,
+            P::NAME,
+            id,
+            expected_quota_resets_at,
+            expected_updated_at,
+        )
+        .await?;
+        drop(conn);
+
+        match account {
+            Some(account) => self.sync_account(account).await.map(Some),
+            None => Ok(None),
+        }
+    }
+
     /// 数据库删除成功后才写 Redis 永久 tombstone，保持原有 revision fence 语义。
     pub async fn delete_account(&self, id: Uuid) -> AppResult<ProviderAccount> {
         let mut conn = self.state.db_conn().await?;

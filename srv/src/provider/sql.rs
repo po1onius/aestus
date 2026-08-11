@@ -358,6 +358,39 @@ pub mod account {
         )
     }
 
+    /// 管理端主动查询确认额度恢复后，按查询前持久快照清理仍生效的 quota 限制。
+    ///
+    /// 额度查询包含一次上游网络往返。在此期间可能有真实请求提交新的 quota 回执，或有
+    /// maintenance/管理员更新账号。`quota_resets_at + updated_at` 双重 CAS 保证旧查询结果
+    /// 不会抹掉这些并发事实；CAS 未命中时由调用方保留当前状态，管理员可再次查询。
+    pub async fn clear_quota_resets_at_if_snapshot(
+        conn: &mut AsyncPgConnection,
+        provider: &str,
+        id: Uuid,
+        expected_quota_resets_at: DateTime<Utc>,
+        expected_updated_at: DateTime<Utc>,
+    ) -> AppResult<Option<ProviderAccount>> {
+        use provider_accounts::dsl;
+
+        optional(
+            diesel::update(
+                dsl::provider_accounts
+                    .filter(dsl::provider.eq(provider))
+                    .filter(dsl::id.eq(id))
+                    .filter(dsl::quota_resets_at.eq(expected_quota_resets_at))
+                    .filter(dsl::quota_resets_at.gt(now))
+                    .filter(dsl::updated_at.eq(expected_updated_at)),
+            )
+            .set((
+                dsl::quota_resets_at.eq::<Option<DateTime<Utc>>>(None),
+                dsl::updated_at.eq(next_projection_version!(dsl::updated_at)),
+            ))
+            .returning(ProviderAccount::as_returning())
+            .get_result(conn)
+            .await,
+        )
+    }
+
     /// refresh 成功只合并 token 世代拥有的字段，并保留管理员并发写入的 enabled/override。
     /// generation CAS 防止已经被新世代替换的 refresh 结果倒灌。
     #[allow(clippy::too_many_arguments)]
