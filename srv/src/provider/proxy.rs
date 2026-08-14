@@ -321,7 +321,8 @@ where
                 // 此时已经取得 provider 完成分类的真实 buffered 响应，lease 释放只负责
                 // 清理 Redis inflight 计数，不能改变随后“返回、重试或收口为资源错误”的
                 // 决策。`UpstreamLease::release` 失败时会保留 allocation，并在自身 Drop 中
-                // 自动提交后台兜底释放；这里记录清理故障后继续执行既定响应决策。
+                // 使用同一个唯一 lease token 自动提交幂等释放；这里记录清理故障后继续执行
+                // 既定响应决策。
                 if let Err(error) = lease.release().await {
                     error!(
                         request_id = %release_request_id,

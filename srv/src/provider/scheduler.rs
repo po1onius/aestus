@@ -14,13 +14,43 @@ use crate::{
 const INFLIGHT_SCORE_WEIGHT: i64 = 1_000;
 const STICKY_SCORE_BONUS: i64 = 500;
 
-const RELEASE_LOAD_LUA: &str = r#"
+/// 原子登记一次资源占用。
+///
+/// 每个 lease 都使用独立 token。只有 token 首次写入 registry 时才增加资源 inflight，
+/// 从数据模型上保证 acquire 不会因为命令重放而重复计数。
+const ACQUIRE_LOAD_LUA: &str = r#"
 local current = tonumber(redis.call('HGET', KEYS[1], ARGV[1]) or '0')
-if current <= 1 then
-    redis.call('HSET', KEYS[1], ARGV[1], 0)
-    return 0
+if redis.call('HEXISTS', KEYS[2], ARGV[2]) == 1 then
+    return {0, current}
 end
-return redis.call('HINCRBY', KEYS[1], ARGV[1], -1)
+redis.call('HSET', KEYS[2], ARGV[2], ARGV[1])
+return {1, redis.call('HINCRBY', KEYS[1], ARGV[1], 1)}
+"#;
+
+/// 按唯一 lease token 原子释放资源占用。
+///
+/// Redis 命令可能已经执行、但调用方在收到响应前遇到连接取消。显式释放失败后 Drop 会
+/// 重试同一个 token；脚本只有在 registry 中实际删除 token 时才递减 inflight，因此重试
+/// 是严格幂等的，不会误减同一资源上其他请求的占用。
+const RELEASE_LOAD_LUA: &str = r#"
+local registered_member = redis.call('HGET', KEYS[2], ARGV[1])
+local current = tonumber(redis.call('HGET', KEYS[1], ARGV[2]) or '0')
+if not registered_member then
+    if current < 0 then
+        redis.call('HSET', KEYS[1], ARGV[2], 0)
+        current = 0
+    end
+    return {0, current}
+end
+if registered_member ~= ARGV[2] then
+    return {-1, current}
+end
+redis.call('HDEL', KEYS[2], ARGV[1])
+if current <= 1 then
+    redis.call('HSET', KEYS[1], ARGV[2], 0)
+    return {1, 0}
+end
+return {1, redis.call('HINCRBY', KEYS[1], ARGV[2], -1)}
 "#;
 
 #[derive(Debug, Clone)]
@@ -46,13 +76,16 @@ impl UpstreamAllocation {
 /// 取消或 panic，Drop 会在后台补发同一个幂等释放操作，避免 inflight 计数长期泄漏。
 pub struct UpstreamLease {
     state: AppState,
+    /// 单次 acquire 的唯一所有权标识；同一请求的不同重试也必须使用不同 token。
+    lease_id: Uuid,
     allocation: Option<UpstreamAllocation>,
 }
 
 impl UpstreamLease {
-    fn new(state: AppState, allocation: UpstreamAllocation) -> Self {
+    fn new(state: AppState, lease_id: Uuid, allocation: UpstreamAllocation) -> Self {
         Self {
             state,
+            lease_id,
             allocation: Some(allocation),
         }
     }
@@ -64,7 +97,7 @@ impl UpstreamLease {
     }
 
     pub async fn release(mut self) -> AppResult<()> {
-        let result = release_allocation(&self.state, self.allocation()).await;
+        let result = release_allocation(&self.state, self.lease_id, self.allocation()).await;
         if result.is_ok() {
             self.allocation.take();
         }
@@ -78,17 +111,20 @@ impl Drop for UpstreamLease {
             return;
         };
         let state = self.state.clone();
+        let lease_id = self.lease_id;
         warn!(
             request_id = %allocation.request_id,
+            lease_id = %lease_id,
             provider = %allocation.resource.provider,
             resource_type = allocation.resource_type(),
             resource_id = %allocation.resource.id,
             "上游资源 lease 在显式释放前结束，RAII guard 已提交兜底释放"
         );
         tokio::spawn(async move {
-            if let Err(error) = release_allocation(&state, &allocation).await {
+            if let Err(error) = release_allocation(&state, lease_id, &allocation).await {
                 error!(
                     request_id = %allocation.request_id,
+                    lease_id = %lease_id,
                     provider = %allocation.resource.provider,
                     resource_type = allocation.resource_type(),
                     resource_id = %allocation.resource.id,
@@ -236,13 +272,34 @@ pub async fn acquire(
         resource: selected.resource,
     };
     let member = allocation.resource_member();
-    let new_inflight_count: i64 = redis
-        .hincr(load_key(provider), &member, 1)
+    let lease_id = Uuid::now_v7();
+    // guard 必须在 Redis await 前创建。如果命令已在 Redis 执行、但 future 随后被取消，
+    // Drop 仍会使用同一个 token 补发幂等释放，不留下无法归属的 inflight。
+    let mut lease = UpstreamLease::new(state.clone(), lease_id, allocation);
+    let acquire_result: Vec<i64> = redis::cmd("EVAL")
+        .arg(ACQUIRE_LOAD_LUA)
+        .arg(2)
+        .arg(load_key(provider))
+        .arg(lease_registry_key(provider))
+        .arg(&member)
+        .arg(lease_id.to_string())
+        .query_async(&mut redis)
         .await
         .map_err(redis_error)?;
-    // 从 inflight 增加成功这一刻开始立即交给 lease 持有。后续 sticky 写入或日志路径若被
-    // 取消，Drop 也能回收本次占用，不留下 acquire 内部的时间窗口。
-    let lease = UpstreamLease::new(state.clone(), allocation);
+    let [registered, new_inflight_count] = acquire_result.as_slice() else {
+        return Err(AppError::Redis {
+            message: "登记 provider 上游资源 lease 时响应格式无效".to_owned(),
+        });
+    };
+    if *registered != 1 {
+        // UUID token 冲突时脚本没有修改任何 Redis 状态，因此必须解除 guard，避免 Drop
+        // 删除另一个请求极低概率持有的同名 token。
+        lease.allocation.take();
+        return Err(AppError::Redis {
+            message: format!("provider 上游资源 lease token 冲突: {lease_id}"),
+        });
+    }
+    let new_inflight_count = *new_inflight_count;
 
     if let Some(sticky_hash) = sticky_hash.as_deref() {
         let ttl = state.config().provider_session_sticky_ttl_seconds.max(1);
@@ -255,6 +312,7 @@ pub async fn acquire(
     let allocation = lease.allocation();
     info!(
         request_id = %allocation.request_id,
+        lease_id = %lease_id,
         provider,
         provider_group_id = %group_id,
         resource_type = allocation.resource_type(),
@@ -269,24 +327,44 @@ pub async fn acquire(
     Ok(lease)
 }
 
-async fn release_allocation(state: &AppState, allocation: &UpstreamAllocation) -> AppResult<()> {
+async fn release_allocation(
+    state: &AppState,
+    lease_id: Uuid,
+    allocation: &UpstreamAllocation,
+) -> AppResult<()> {
     let mut redis = state.redis();
     let provider = &allocation.resource.provider;
     let member = allocation.resource_member();
-    let inflight_count: i64 = redis::cmd("EVAL")
+    let release_result: Vec<i64> = redis::cmd("EVAL")
         .arg(RELEASE_LOAD_LUA)
-        .arg(1)
+        .arg(2)
         .arg(load_key(provider))
+        .arg(lease_registry_key(provider))
+        .arg(lease_id.to_string())
         .arg(&member)
         .query_async(&mut redis)
         .await
         .map_err(redis_error)?;
+    let [released, inflight_count] = release_result.as_slice() else {
+        return Err(AppError::Redis {
+            message: "释放 provider 上游资源 lease 时响应格式无效".to_owned(),
+        });
+    };
+    if *released < 0 {
+        return Err(AppError::Redis {
+            message: format!(
+                "provider 上游资源 lease token 与资源不匹配: lease_id={lease_id}, member={member}"
+            ),
+        });
+    }
     info!(
         request_id = %allocation.request_id,
+        lease_id = %lease_id,
         provider,
         resource_type = allocation.resource_type(),
         resource_id = %allocation.resource.id,
-        inflight_count,
+        inflight_count = *inflight_count,
+        release_applied = *released == 1,
         "provider 上游资源占用已释放"
     );
     Ok(())
@@ -294,8 +372,14 @@ async fn release_allocation(state: &AppState, allocation: &UpstreamAllocation) -
 
 pub(super) async fn reset_loads(state: &AppState, provider: &str) -> AppResult<()> {
     let mut redis = state.redis();
-    let _: usize = redis.del(load_key(provider)).await.map_err(redis_error)?;
-    info!(provider, "provider scheduler 遗留负载已清理");
+    let deleted_keys: usize = redis
+        .del((load_key(provider), lease_registry_key(provider)))
+        .await
+        .map_err(redis_error)?;
+    info!(
+        provider,
+        deleted_keys, "provider scheduler 遗留负载与 lease registry 已清理"
+    );
     Ok(())
 }
 
@@ -371,6 +455,10 @@ fn score(inflight_count: i64) -> i64 {
 
 fn load_key(provider: &str) -> String {
     format!("provider:{provider}:resource:load")
+}
+
+fn lease_registry_key(provider: &str) -> String {
+    format!("provider:{provider}:resource:lease")
 }
 
 fn sticky_key(provider: &str, group_id: Uuid, hash: &str) -> String {
