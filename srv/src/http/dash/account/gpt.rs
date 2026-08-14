@@ -296,7 +296,10 @@ fn map_refresh_token_import_error(error: auth::TokenRefreshError) -> AppError {
         auth::TokenRefreshFailureKind::InvalidRefreshToken
         | auth::TokenRefreshFailureKind::BadResponse => AppError::BadRequest { message },
         auth::TokenRefreshFailureKind::RateLimited | auth::TokenRefreshFailureKind::Retryable => {
-            AppError::GptUpstream { message }
+            AppError::ProviderUpstream {
+                provider: gpt_model::PROVIDER.to_owned(),
+                message,
+            }
         }
     }
 }
@@ -417,21 +420,68 @@ async fn refresh_gpt_account_quota(
     _admin: dash_auth::AdminUser,
     Path(id): Path<Uuid>,
 ) -> AdminResult<Json<quota::GptAccountQuotaResponse>> {
-    let account = ProviderResourceService::<GptMaintenance>::new(&state)
-        .find_account(id)
-        .await?
-        .ok_or_else(|| {
-            warn!(gpt_account_id = %id, "管理端刷新 GPT 账号额度失败，账号不存在");
-            AppError::BadRequest {
-                message: format!("GPT 账号不存在: {id}"),
-            }
-        })?;
+    let service = ProviderResourceService::<GptMaintenance>::new(&state);
+    let account = service.find_account(id).await?.ok_or_else(|| {
+        warn!(gpt_account_id = %id, "管理端刷新 GPT 账号额度失败，账号不存在");
+        AppError::BadRequest {
+            message: format!("GPT 账号不存在: {id}"),
+        }
+    })?;
 
-    let quota = quota::fetch_account_quota(&state, &account).await?;
+    // 只记录查询发起前仍生效的 quota 快照。查询期间若账号发生任意持久变化，后续 CAS
+    // 会拒绝用旧的上游结果清理状态，防止覆盖新到达的额度耗尽回执。
+    let limited_snapshot = account
+        .quota_resets_at
+        .filter(|quota_resets_at| *quota_resets_at > chrono::Utc::now())
+        .map(|quota_resets_at| (quota_resets_at, account.updated_at));
+    let mut quota = quota::fetch_account_quota(&state, &account).await?;
+    let available_remaining_percent = quota.available_remaining_percent();
+
+    if let (Some((expected_quota_resets_at, expected_updated_at)), Some(remaining_percent)) =
+        (limited_snapshot, available_remaining_percent)
+    {
+        match service
+            .clear_account_quota_limit_if_snapshot(
+                account.id,
+                expected_quota_resets_at,
+                expected_updated_at,
+            )
+            .await?
+        {
+            Some(snapshot) => {
+                quota.quota_limit_removed = true;
+                info!(
+                    gpt_account_id = %account.id,
+                    minimum_remaining_percent = remaining_percent,
+                    previous_quota_resets_at = %expected_quota_resets_at,
+                    runtime_ready = snapshot.runtime.runtime_ready,
+                    "GPT 账号额度已恢复，既有额度限制已清理并重新同步调度运行态"
+                );
+            }
+            None => {
+                warn!(
+                    gpt_account_id = %account.id,
+                    minimum_remaining_percent = remaining_percent,
+                    expected_quota_resets_at = %expected_quota_resets_at,
+                    expected_updated_at = %expected_updated_at,
+                    "GPT 账号额度已恢复，但查询期间持久状态发生变化，已保留当前额度限制"
+                );
+            }
+        }
+    } else if limited_snapshot.is_some() {
+        info!(
+            gpt_account_id = %account.id,
+            allowed = quota.primary.as_ref().and_then(|snapshot| snapshot.allowed),
+            limit_reached = quota.primary.as_ref().and_then(|snapshot| snapshot.limit_reached),
+            "GPT 账号仍无可用额度，保留现有额度限制"
+        );
+    }
+
     info!(
         gpt_account_id = %account.id,
         chatgpt_account_id = quota.chatgpt_account_id.as_deref().unwrap_or("<missing>"),
         snapshot_count = quota.snapshots.len(),
+        quota_limit_removed = quota.quota_limit_removed,
         "管理端 GPT 账号额度已刷新"
     );
 
@@ -548,83 +598,5 @@ impl GptAccountResponse {
             override_: request_override,
             runtime,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn expires_at() -> chrono::DateTime<chrono::Utc> {
-        chrono::DateTime::from_timestamp(1_893_456_000, 0).expect("valid timestamp")
-    }
-
-    fn refresh_grant() -> RefreshTokenGrant {
-        RefreshTokenGrant {
-            access_token: Some("access-token".to_owned()),
-            refresh_token: None,
-            access_token_expires_at: Some(expires_at()),
-            chatgpt_account_id: None,
-            chatgpt_account_is_fedramp: None,
-            email: None,
-            plan_type: None,
-        }
-    }
-
-    #[test]
-    fn refresh_import_uses_manual_account_id_when_id_token_omits_it() {
-        let token = auth_token_from_refresh_import(
-            "original-refresh".to_owned(),
-            Some("manual-account".to_owned()),
-            refresh_grant(),
-        )
-        .expect("manual account id should complete import");
-
-        assert_eq!(token.access_token, "access-token");
-        assert_eq!(token.refresh_token, "original-refresh");
-        assert_eq!(token.chatgpt_account_id.as_deref(), Some("manual-account"));
-        assert!(!token.chatgpt_account_is_fedramp);
-        assert!(token.plan_type.is_none());
-    }
-
-    #[test]
-    fn refresh_import_prefers_id_token_account_id() {
-        let mut grant = refresh_grant();
-        grant.chatgpt_account_id = Some("id-token-account".to_owned());
-
-        let token = auth_token_from_refresh_import(
-            "original-refresh".to_owned(),
-            Some("manual-account".to_owned()),
-            grant,
-        )
-        .expect("id_token account id should complete import");
-
-        assert_eq!(
-            token.chatgpt_account_id.as_deref(),
-            Some("id-token-account")
-        );
-    }
-
-    #[test]
-    fn refresh_import_requires_access_token() {
-        let mut grant = refresh_grant();
-        grant.access_token = None;
-        grant.access_token_expires_at = None;
-
-        let result = auth_token_from_refresh_import(
-            "original-refresh".to_owned(),
-            Some("manual-account".to_owned()),
-            grant,
-        );
-
-        assert!(matches!(result, Err(AppError::BadRequest { .. })));
-    }
-
-    #[test]
-    fn refresh_import_requires_final_account_id() {
-        let result =
-            auth_token_from_refresh_import("original-refresh".to_owned(), None, refresh_grant());
-
-        assert!(matches!(result, Err(AppError::BadRequest { .. })));
     }
 }

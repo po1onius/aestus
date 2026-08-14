@@ -130,6 +130,7 @@ export interface GptAccountQuotaResponse {
   primary: GptQuotaSnapshot | null;
   snapshots: GptQuotaSnapshot[];
   rate_limit_reset_credits: RateLimitResetCreditsSummary | null;
+  quota_limit_removed: boolean;
 }
 
 export interface GptQuotaSnapshot {

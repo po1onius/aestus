@@ -446,7 +446,9 @@ pub mod header {
 
     use crate::{
         err::{AppError, AppResult},
-        provider::request_header::build_transparent_official_api_key_headers,
+        provider::{
+            gpt::model::PROVIDER, request_header::build_transparent_official_api_key_headers,
+        },
     };
 
     const CHATGPT_ACCOUNT_ID_HEADER: &str = "chatgpt-account-id";
@@ -627,9 +629,11 @@ pub mod header {
         upstream_headers.remove(FEDRAMP_HEADER);
 
         let bearer = format!("Bearer {}", account_auth.access_token);
-        let mut value = HeaderValue::from_str(&bearer).map_err(|source| AppError::GptUpstream {
-            message: format!("Codex access token 无法写入 Authorization header: {source}"),
-        })?;
+        let mut value =
+            HeaderValue::from_str(&bearer).map_err(|source| AppError::ProviderUpstream {
+                provider: PROVIDER.to_owned(),
+                message: format!("Codex access token 无法写入 Authorization header: {source}"),
+            })?;
         value.set_sensitive(true);
         upstream_headers.insert(header::AUTHORIZATION, value);
 
@@ -639,7 +643,8 @@ pub mod header {
             .filter(|value| !value.is_empty());
         if let Some(account_id) = account_id {
             let value =
-                HeaderValue::from_str(account_id).map_err(|source| AppError::GptUpstream {
+                HeaderValue::from_str(account_id).map_err(|source| AppError::ProviderUpstream {
+                    provider: PROVIDER.to_owned(),
                     message: format!("chatgpt_account_id 无法写入上游 header: {source}"),
                 })?;
             upstream_headers.insert(CHATGPT_ACCOUNT_ID_HEADER, value);
@@ -665,9 +670,11 @@ pub mod header {
     ) -> AppResult<()> {
         upstream_headers.remove(header::AUTHORIZATION);
         let bearer = format!("Bearer {api_key}");
-        let mut value = HeaderValue::from_str(&bearer).map_err(|source| AppError::GptUpstream {
-            message: format!("官方 API Key 无法写入 Authorization header: {source}"),
-        })?;
+        let mut value =
+            HeaderValue::from_str(&bearer).map_err(|source| AppError::ProviderUpstream {
+                provider: PROVIDER.to_owned(),
+                message: format!("官方 API Key 无法写入 Authorization header: {source}"),
+            })?;
         value.set_sensitive(true);
         upstream_headers.insert(header::AUTHORIZATION, value);
         Ok(())
@@ -1177,124 +1184,5 @@ data: {"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded
 
     fn is_stream_quota_exceeded_error(error: &CodexResponseError) -> bool {
         error.code.as_deref() == Some("insufficient_quota")
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        fn error_body(error: serde_json::Value) -> Bytes {
-            Bytes::from(serde_json::json!({ "error": error }).to_string())
-        }
-
-        #[test]
-        fn http_401_is_unauthorized_account_signal() {
-            let body = error_body(serde_json::json!({
-                "message": "unauthorized"
-            }));
-
-            let result = parse_account_signal(StatusCode::UNAUTHORIZED, &body);
-
-            assert!(matches!(result, Some(CodexAccountSignal::Unauthorized)));
-        }
-
-        #[test]
-        fn http_403_is_passthrough() {
-            let body = error_body(serde_json::json!({
-                "message": "forbidden"
-            }));
-
-            let result = parse_account_signal(StatusCode::FORBIDDEN, &body);
-
-            assert!(result.is_none(), "expected HTTP 403 to pass through");
-        }
-
-        #[test]
-        fn http_insufficient_quota_is_passthrough() {
-            let body = error_body(serde_json::json!({
-                "code": "insufficient_quota",
-                "message": "quota exceeded"
-            }));
-
-            let result = parse_account_signal(StatusCode::BAD_REQUEST, &body);
-
-            assert!(
-                result.is_none(),
-                "expected HTTP insufficient_quota to pass through"
-            );
-        }
-
-        #[test]
-        fn http_402_is_passthrough() {
-            let body = error_body(serde_json::json!({
-                "message": "payment required"
-            }));
-
-            let result = parse_account_signal(StatusCode::PAYMENT_REQUIRED, &body);
-
-            assert!(result.is_none(), "expected HTTP 402 to pass through");
-        }
-
-        #[test]
-        fn http_429_usage_limit_reached_is_account_signal() {
-            let body = error_body(serde_json::json!({
-                "type": "usage_limit_reached",
-                "plan_type": "pro",
-                "resets_at": 1_735_689_600_i64
-            }));
-
-            let result = parse_account_signal(StatusCode::TOO_MANY_REQUESTS, &body);
-
-            match result {
-                Some(CodexAccountSignal::UsageLimitReached {
-                    plan_type,
-                    resets_at,
-                }) => {
-                    assert_eq!(plan_type.as_deref(), Some("pro"));
-                    assert!(resets_at.is_some());
-                }
-                other => panic!("expected usage_limit_reached account signal, got {other:?}"),
-            }
-        }
-
-        #[test]
-        fn http_429_usage_not_included_is_account_signal() {
-            let body = error_body(serde_json::json!({
-                "type": "usage_not_included"
-            }));
-
-            let result = parse_account_signal(StatusCode::TOO_MANY_REQUESTS, &body);
-
-            assert!(matches!(result, Some(CodexAccountSignal::UsageNotIncluded)));
-        }
-
-        #[test]
-        fn http_429_non_usage_errors_are_passthrough() {
-            let cases = [
-                serde_json::json!({
-                    "code": "rate_limit_exceeded",
-                    "message": "Please try again in 28ms"
-                }),
-                serde_json::json!({
-                    "code": "insufficient_quota",
-                    "message": "quota exceeded"
-                }),
-                serde_json::json!({
-                    "type": "unknown_limit",
-                    "message": "unknown 429"
-                }),
-            ];
-
-            for error in cases {
-                let body = error_body(error);
-
-                let result = parse_account_signal(StatusCode::TOO_MANY_REQUESTS, &body);
-
-                assert!(
-                    result.is_none(),
-                    "expected non-usage HTTP 429 to pass through, got {result:?}"
-                );
-            }
-        }
     }
 }

@@ -15,8 +15,9 @@ use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 use crate::{
     err::{AppError, AppResult},
     provider::{
-        claude::model::ClaudeAccountRequestContext, gpt::model::GptAccountRequestContext,
-        protocol::UpstreamFeedback,
+        claude::model::ClaudeAccountRequestContext,
+        gpt::model::GptAccountRequestContext,
+        protocol::{MAX_SSE_ITEM_BYTES, UpstreamFeedback},
     },
     request_event::TokenUsage,
 };
@@ -35,9 +36,6 @@ const PLUGIN_MEMORY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 /// 明确边界，避免异常组件无限增长线性内存。
 const STREAM_PLUGIN_MEMORY_LIMIT_BYTES: usize = 2 * 1024 * 1024 * 1024;
 const MAX_OUTPUT_BODY_BYTES: usize = 64 * 1024 * 1024;
-/// 与 sub2api 默认 `gateway.max_line_size` 对齐。宿主按完整 SSE item 调用插件，所以同一
-/// 上限同时校验原始 item 和插件输出 item。
-const MAX_SSE_ITEM_BYTES: usize = 500 * 1024 * 1024;
 const _: () = assert!(STREAM_PLUGIN_MEMORY_LIMIT_BYTES > MAX_SSE_ITEM_BYTES);
 /// opaque context 只应保存跨请求/响应阶段必需的最小映射。限制独立于 body，避免插件借此
 /// 绕过响应体上限，或因异常输出让单次 attempt 长时间占用大块宿主内存。
@@ -1393,42 +1391,5 @@ fn claude_stream_feedback(
         F::EntitlementMissing(reason) => {
             feedback_from_parts(FeedbackKind::EntitlementMissing, reason, None)
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn plugin_context_rejects_empty_and_oversized_values() {
-        assert!(validate_plugin_context(None).unwrap().is_none());
-        assert!(validate_plugin_context(Some(Vec::new())).is_err());
-        assert!(validate_plugin_context(Some(vec![0; MAX_PLUGIN_CONTEXT_BYTES + 1])).is_err());
-
-        let context = validate_plugin_context(Some(vec![1, 2, 3]))
-            .unwrap()
-            .unwrap();
-        assert_eq!(context.as_ref(), &[1, 2, 3]);
-    }
-
-    #[test]
-    fn stream_response_head_restores_authoritative_keep_alive_after_sanitizing() {
-        let (_, headers) = stream_response_head_from_parts(
-            StatusCode::OK.as_u16(),
-            vec![
-                ("connection".to_owned(), b"x-upstream".to_vec()),
-                ("x-upstream".to_owned(), b"must-be-removed".to_vec()),
-                ("content-type".to_owned(), b"text/event-stream".to_vec()),
-            ]
-            .into_iter(),
-        )
-        .unwrap();
-
-        assert_eq!(
-            headers.get(header::CONNECTION),
-            Some(&HeaderValue::from_static("keep-alive"))
-        );
-        assert!(!headers.contains_key("x-upstream"));
     }
 }

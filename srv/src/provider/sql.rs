@@ -47,8 +47,24 @@ pub mod account {
 
     pub async fn create(
         conn: &mut AsyncPgConnection,
-        mut new_account: NewProviderAccount,
+        new_account: NewProviderAccount,
     ) -> AppResult<ProviderAccount> {
+        create_with_db_error_mapper(conn, new_account, db_error).await
+    }
+
+    /// 创建账号并允许 provider facade 自己转换数据库写入错误。
+    ///
+    /// 通用 SQL 层只负责校验共享字段和执行 insert，不应知道某个 provider 在 `specific`
+    /// JSON 上建立了什么唯一索引。需要展示 provider 专属业务提示时，由对应 facade 传入
+    /// 错误转换函数；默认的 [`create`] 仍统一折叠为 `DbQuery`。
+    pub(crate) async fn create_with_db_error_mapper<F>(
+        conn: &mut AsyncPgConnection,
+        mut new_account: NewProviderAccount,
+        map_db_error: F,
+    ) -> AppResult<ProviderAccount>
+    where
+        F: FnOnce(diesel::result::Error) -> AppError,
+    {
         use provider_accounts::dsl;
 
         new_account.provider = normalize_provider(new_account.provider)?;
@@ -69,13 +85,12 @@ pub mod account {
             });
         }
 
-        let provider = new_account.provider.clone();
         let account = diesel::insert_into(dsl::provider_accounts)
             .values(&new_account)
             .returning(ProviderAccount::as_returning())
             .get_result::<ProviderAccount>(conn)
             .await
-            .map_err(|source| account_create_db_error(&provider, source))?;
+            .map_err(map_db_error)?;
 
         info!(
             provider = %account.provider,
@@ -332,6 +347,39 @@ pub mod account {
                     .filter(dsl::provider.eq(provider))
                     .filter(dsl::id.eq(id))
                     .filter(dsl::quota_resets_at.le(due_at)),
+            )
+            .set((
+                dsl::quota_resets_at.eq::<Option<DateTime<Utc>>>(None),
+                dsl::updated_at.eq(next_projection_version!(dsl::updated_at)),
+            ))
+            .returning(ProviderAccount::as_returning())
+            .get_result(conn)
+            .await,
+        )
+    }
+
+    /// 管理端主动查询确认额度恢复后，按查询前持久快照清理仍生效的 quota 限制。
+    ///
+    /// 额度查询包含一次上游网络往返。在此期间可能有真实请求提交新的 quota 回执，或有
+    /// maintenance/管理员更新账号。`quota_resets_at + updated_at` 双重 CAS 保证旧查询结果
+    /// 不会抹掉这些并发事实；CAS 未命中时由调用方保留当前状态，管理员可再次查询。
+    pub async fn clear_quota_resets_at_if_snapshot(
+        conn: &mut AsyncPgConnection,
+        provider: &str,
+        id: Uuid,
+        expected_quota_resets_at: DateTime<Utc>,
+        expected_updated_at: DateTime<Utc>,
+    ) -> AppResult<Option<ProviderAccount>> {
+        use provider_accounts::dsl;
+
+        optional(
+            diesel::update(
+                dsl::provider_accounts
+                    .filter(dsl::provider.eq(provider))
+                    .filter(dsl::id.eq(id))
+                    .filter(dsl::quota_resets_at.eq(expected_quota_resets_at))
+                    .filter(dsl::quota_resets_at.gt(now))
+                    .filter(dsl::updated_at.eq(expected_updated_at)),
             )
             .set((
                 dsl::quota_resets_at.eq::<Option<DateTime<Utc>>>(None),
@@ -789,28 +837,6 @@ fn db_error(source: diesel::result::Error) -> AppError {
     AppError::DbQuery {
         message: source.to_string(),
     }
-}
-
-fn account_create_db_error(provider: &str, source: diesel::result::Error) -> AppError {
-    const CLAUDE_ACCOUNT_UUID_UNIQUE_INDEX: &str = "uq_provider_accounts_claude_account_uuid";
-
-    if let diesel::result::Error::DatabaseError(
-        diesel::result::DatabaseErrorKind::UniqueViolation,
-        information,
-    ) = &source
-        && information.constraint_name() == Some(CLAUDE_ACCOUNT_UUID_UNIQUE_INDEX)
-    {
-        warn!(
-            provider,
-            constraint = CLAUDE_ACCOUNT_UUID_UNIQUE_INDEX,
-            "provider 账号唯一身份冲突，已拒绝重复导入"
-        );
-        return AppError::BadRequest {
-            message: "Claude 账号已导入，不能重复导入同一账号".to_owned(),
-        };
-    }
-
-    db_error(source)
 }
 
 fn optional<T>(result: Result<T, diesel::result::Error>) -> AppResult<Option<T>> {

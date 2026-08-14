@@ -2156,7 +2156,14 @@ export function App() {
         method: "POST",
       }, authToken);
       setAccountQuotas((items) => ({ ...items, [account.id]: quota }));
-      toast.success("账号额度查询成功");
+      if (quota.quota_limit_removed) {
+        // 后端已同时更新 PostgreSQL quota 状态与 Redis 调度投影，重新加载账号列表，避免
+        // 页面继续展示查询前的 quota_limited 快照。
+        await loadAccounts();
+        toast.success("账号额度查询成功，额度限制已解除");
+      } else {
+        toast.success("账号额度查询成功");
+      }
     } catch (error) {
       showErrorToast("账号额度查询失败", error);
     } finally {

@@ -116,9 +116,6 @@ pub enum AppError {
         message: String,
     },
 
-    #[error("GPT 上游请求失败: {message}")]
-    GptUpstream { message: String },
-
     #[error("{provider} 上游请求失败: {message}")]
     ProviderUpstream { provider: String, message: String },
 
@@ -200,9 +197,7 @@ impl AppError {
             AppError::RequestBodyInterrupted { .. } => CLIENT_CLOSED_REQUEST,
             AppError::BodyCache { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::ResourceError { .. } => StatusCode::SERVICE_UNAVAILABLE,
-            AppError::GptUpstream { .. }
-            | AppError::ProviderUpstream { .. }
-            | AppError::Plugin { .. } => StatusCode::BAD_GATEWAY,
+            AppError::ProviderUpstream { .. } | AppError::Plugin { .. } => StatusCode::BAD_GATEWAY,
             AppError::Email { .. } => StatusCode::BAD_GATEWAY,
             AppError::ProviderStateSyncFailed { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -234,7 +229,6 @@ impl AppError {
             AppError::RequestBodyInterrupted { .. } => "request_body_interrupted",
             AppError::BodyCache { .. } => "body_cache_failed",
             AppError::ResourceError { .. } => "resource_error",
-            AppError::GptUpstream { .. } => "gpt_upstream_failed",
             AppError::ProviderUpstream { .. } => "provider_upstream_failed",
             AppError::Plugin { .. } => "plugin_failed",
             AppError::Email { .. } => "email_failed",
@@ -278,9 +272,7 @@ impl AppError {
                 "服务内部错误，请联系管理员并提供响应中的 x-request-id".to_owned()
             }
             AppError::Email { .. } => "邮件服务暂时不可用，请稍后重试".to_owned(),
-            AppError::ResourceError { .. }
-            | AppError::GptUpstream { .. }
-            | AppError::ProviderUpstream { .. } => {
+            AppError::ResourceError { .. } | AppError::ProviderUpstream { .. } => {
                 "上游服务请求失败，请稍后重试".to_owned()
             }
             AppError::ProviderStateSyncFailed { .. } => {

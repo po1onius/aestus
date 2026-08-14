@@ -22,19 +22,17 @@ use crate::{
             model::GptAccountRequestContext,
         },
         protocol::{
-            BufferedProtocolResponse, EncodedProviderError, ProtocolFailure, ProtocolResponse,
-            ProviderProtocol, ProviderVisibleError, ReplayableRequest, RequestInspection,
-            RequestLogFields, StreamCompletion, StreamErrorRecord, StreamObserver, StreamUpdate,
-            StreamingProtocolResponse, TokenUsage, UpstreamAttemptContext, UpstreamFeedback,
-            UpstreamRequestBodyMode, UpstreamRequestDraft, UpstreamRequestTarget,
-            read_buffered_upstream_body,
+            BufferedProtocolResponse, EncodedProviderError, MAX_SSE_ITEM_BYTES, ProtocolFailure,
+            ProtocolResponse, ProviderProtocol, ProviderVisibleError, ReplayableRequest,
+            RequestInspection, RequestLogFields, StreamCompletion, StreamErrorRecord,
+            StreamObserver, StreamUpdate, StreamingProtocolResponse, TokenUsage,
+            UpstreamAttemptContext, UpstreamFeedback, UpstreamRequestBodyMode,
+            UpstreamRequestDraft, UpstreamRequestTarget, read_buffered_upstream_body,
         },
         resource::{UpstreamResource, UpstreamResourceKind},
         response_logging::response_body_for_tracing,
     },
 };
-
-const MAX_SSE_EVENT_BUFFER_BYTES: usize = 64 * 1024;
 
 /// ChatGPT 账号 Responses 上游返回的账号级 Codex 窗口额度 header。
 ///
@@ -276,17 +274,19 @@ async fn process_upstream_response(
     let response_headers = filtered_response_headers(&headers, resource.kind);
     let (retry, exclude_resource_on_retry, feedback) =
         if resource.kind == UpstreamResourceKind::ApiKey {
-            if is_api_key_resource_error(status) {
-                (
-                    true,
-                    false,
-                    Some(UpstreamFeedback::Error {
-                        reason: format!("HTTP {status}"),
-                    }),
-                )
-            } else {
-                (false, false, None)
-            }
+            let (retry, exclude_resource_on_retry, quarantine_key) =
+                classify_api_key_http_failure(status);
+            debug!(
+                upstream_status = status.as_u16(),
+                retry,
+                exclude_resource_on_retry,
+                quarantine_key,
+                "GPT 官方 API Key HTTP 错误已完成请求级/资源级分类"
+            );
+            let feedback = quarantine_key.then(|| UpstreamFeedback::Error {
+                reason: format!("HTTP {status}"),
+            });
+            (retry, exclude_resource_on_retry, feedback)
         } else if let Some(signal) = account_signal {
             // usage_not_included 只说明当前账号不能承载这次调用，不足以改变账号对其他请求的
             // 持久健康状态；但本请求重试时也不能再次选回同一账号。
@@ -312,11 +312,20 @@ async fn process_upstream_response(
     }))
 }
 
-fn is_api_key_resource_error(status: StatusCode) -> bool {
-    matches!(
+/// 返回 `(retry, exclude_resource_on_retry, quarantine_key)`，把当前请求的重试、
+/// 请求级排除和 Key 的持久化隔离三个生命周期决策保持独立。408 只直接重试；5xx
+/// 只在当前请求重试时暂时排除该 Key，不提交全局错误回执；401、403、429 继续提交
+/// 全局 Key 错误回执。
+fn classify_api_key_http_failure(status: StatusCode) -> (bool, bool, bool) {
+    let quarantine_key = matches!(
         status,
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS
-    ) || is_transient_upstream_status(status)
+    );
+    let retry = quarantine_key || is_transient_upstream_status(status);
+    // 408 是明确的“直接重试”状态，不把当前 Key 加入本请求排除集合；只有 5xx
+    // 才在重试时切换到其他资源，同时保持 Key 的全局健康状态不变。
+    let exclude_resource_on_retry = status.is_server_error();
+    (retry, exclude_resource_on_retry, quarantine_key)
 }
 
 fn is_transient_upstream_status(status: StatusCode) -> bool {
@@ -434,9 +443,10 @@ impl GptSseObserver {
             }
         }
 
-        if self.sse_buffer.len() > MAX_SSE_EVENT_BUFFER_BYTES {
+        if self.sse_buffer.len() > MAX_SSE_ITEM_BYTES {
             warn!(
                 buffered_bytes = self.sse_buffer.len(),
+                max_sse_item_bytes = MAX_SSE_ITEM_BYTES,
                 "GPT SSE 事件缓冲区超过上限，按原始字节透传当前缓冲内容"
             );
             update

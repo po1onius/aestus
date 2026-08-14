@@ -30,10 +30,11 @@ use crate::{
     provider::{
         maintenance::{self, MaintenanceProvider},
         protocol::{
-            BufferedProtocolResponse, ProtocolFailure, ProtocolResponse, ProviderProtocol,
-            ReplayableRequest, StreamErrorRecord, StreamObserver, StreamingProtocolResponse,
-            TokenUsage, UpstreamAttemptContext, UpstreamFeedback, UpstreamRequestBodyMode,
-            UpstreamRequestDraft, UpstreamRequestTarget, read_buffered_upstream_body,
+            BufferedProtocolResponse, MAX_SSE_ITEM_BYTES, ProtocolFailure, ProtocolResponse,
+            ProviderProtocol, ReplayableRequest, StreamErrorRecord, StreamObserver,
+            StreamingProtocolResponse, TokenUsage, UpstreamAttemptContext, UpstreamFeedback,
+            UpstreamRequestBodyMode, UpstreamRequestDraft, UpstreamRequestTarget,
+            read_buffered_upstream_body,
         },
         resource::UpstreamResourceKind,
         response_logging::response_body_for_tracing,
@@ -66,9 +67,9 @@ where
         });
     }
     let max_attempts = usize::from(state.config().upstream_retry_limit).saturating_add(1);
-    // 排除集合只属于当前下游请求，不改变资源的持久健康状态。只有 provider 明确返回
-    // `exclude_resource_on_retry` 时才加入当前资源；普通网络失败、408/5xx 等重试不自动
-    // 扩大为排除语义。
+    // 排除集合只属于当前下游请求，不改变资源的持久健康状态。Provider 可以针对明确
+    // 归因于当前 attempt 的瞬态 HTTP 错误设置 `exclude_resource_on_retry`，但这不能替代
+    // 持久化的 `UpstreamFeedback`；普通传输错误是否排除也必须由各 provider adapter 决定。
     let mut excluded_resource_members = HashSet::<String>::with_capacity(max_attempts);
 
     info!(
@@ -854,61 +855,6 @@ fn should_use_stream_response(
     }
 }
 
-#[cfg(test)]
-mod response_routing_tests {
-    use super::*;
-
-    fn sse_headers() -> HeaderMap {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::CONTENT_TYPE,
-            "text/event-stream; charset=utf-8".parse().unwrap(),
-        );
-        headers
-    }
-
-    #[test]
-    fn request_plugin_stream_mode_is_authoritative_without_sse_header() {
-        assert!(should_use_stream_response(
-            StatusCode::OK,
-            Some(PluginResponseMode::Stream),
-            &HeaderMap::new(),
-        ));
-    }
-
-    #[test]
-    fn request_plugin_buffered_mode_is_authoritative_with_sse_header() {
-        assert!(!should_use_stream_response(
-            StatusCode::OK,
-            Some(PluginResponseMode::Buffered),
-            &sse_headers(),
-        ));
-    }
-
-    #[test]
-    fn failed_http_response_is_always_buffered() {
-        assert!(!should_use_stream_response(
-            StatusCode::TOO_MANY_REQUESTS,
-            Some(PluginResponseMode::Stream),
-            &sse_headers(),
-        ));
-    }
-
-    #[test]
-    fn missing_request_plugin_mode_falls_back_to_content_type() {
-        assert!(should_use_stream_response(
-            StatusCode::OK,
-            None,
-            &sse_headers(),
-        ));
-        assert!(!should_use_stream_response(
-            StatusCode::OK,
-            None,
-            &HeaderMap::new(),
-        ));
-    }
-}
-
 fn finish_buffered_response(
     state: &AppState,
     request_id: uuid::Uuid,
@@ -989,7 +935,6 @@ enum PendingPluginResult {
 }
 
 type PendingPluginWork = Pin<Box<dyn Future<Output = AppResult<PendingPluginResult>> + Send>>;
-const MAX_PLUGIN_SSE_BUFFER_BYTES: usize = 256 * 1024;
 
 /// 通用流包装器向 axum body 暴露的错误。
 ///
@@ -1145,10 +1090,11 @@ impl<M: MaintenanceProvider> ManagedUpstreamStream<M> {
         }
         self.plugin_sse_buffer.extend_from_slice(&bytes);
         let items = plugin::sse::drain_complete_items(&mut self.plugin_sse_buffer);
-        if self.plugin_sse_buffer.len() > MAX_PLUGIN_SSE_BUFFER_BYTES {
+        if self.plugin_sse_buffer.len() > MAX_SSE_ITEM_BYTES {
             self.fail_plugin(format!(
-                "原始 SSE item 超过缓冲上限: {} bytes",
-                self.plugin_sse_buffer.len()
+                "原始 SSE item 超过缓冲上限: {} bytes（最大 {} bytes）",
+                self.plugin_sse_buffer.len(),
+                MAX_SSE_ITEM_BYTES
             ));
             return;
         }

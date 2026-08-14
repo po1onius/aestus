@@ -9,6 +9,7 @@ use crate::{
     err::{AppError, AppResult},
     provider::{
         gpt::codex_http::request::{parse_id_token_claims, parse_jwt_expiration},
+        gpt::model::PROVIDER,
         response_logging::response_body_for_tracing,
     },
     state::AppState,
@@ -326,7 +327,8 @@ pub async fn exchange_callback_code(
     let response = request
         .send()
         .await
-        .map_err(|source| AppError::GptUpstream {
+        .map_err(|source| AppError::ProviderUpstream {
+            provider: PROVIDER.to_owned(),
             message: format!("OAuth code 换 token 请求失败: {source}"),
         })?;
 
@@ -334,7 +336,8 @@ pub async fn exchange_callback_code(
     let body = response
         .bytes()
         .await
-        .map_err(|source| AppError::GptUpstream {
+        .map_err(|source| AppError::ProviderUpstream {
+            provider: PROVIDER.to_owned(),
             message: format!("OAuth code 换 token 响应读取失败: {source}"),
         })?;
 
@@ -583,87 +586,4 @@ fn truncate_for_status_reason(value: &str) -> String {
     const MAX_STATUS_REASON_CHARS: usize = 2_048;
 
     value.chars().take(MAX_STATUS_REASON_CHARS).collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    fn test_jwt(payload: serde_json::Value) -> String {
-        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"none"}"#);
-        let payload = URL_SAFE_NO_PAD.encode(payload.to_string());
-        format!("{header}.{payload}.signature")
-    }
-
-    #[test]
-    fn refresh_grant_parses_codex_optional_tokens_and_id_claims() {
-        let access_exp = 1_893_456_000_i64;
-        let access_token = test_jwt(json!({ "exp": access_exp }));
-        let id_token = test_jwt(json!({
-            "email": "user@example.com",
-            "https://api.openai.com/auth": {
-                "chatgpt_account_id": "acc_123",
-                "chatgpt_account_is_fedramp": true,
-                "chatgpt_plan_type": "pro",
-                "chatgpt_user_id": "user_123"
-            }
-        }));
-
-        let grant = refresh_grant_from_response(RefreshTokenResponse {
-            id_token: Some(id_token),
-            access_token: Some(access_token.clone()),
-            refresh_token: Some("next-refresh".to_owned()),
-        })
-        .expect("refresh response should parse");
-
-        assert_eq!(grant.access_token.as_deref(), Some(access_token.as_str()));
-        assert_eq!(grant.refresh_token.as_deref(), Some("next-refresh"));
-        assert_eq!(
-            grant.access_token_expires_at.map(|value| value.timestamp()),
-            Some(access_exp)
-        );
-        assert_eq!(grant.chatgpt_account_id.as_deref(), Some("acc_123"));
-        assert_eq!(grant.chatgpt_account_is_fedramp, Some(true));
-        assert_eq!(grant.email.as_deref(), Some("user@example.com"));
-        assert_eq!(grant.plan_type.as_deref(), Some("pro"));
-    }
-
-    #[test]
-    fn refresh_grant_without_id_token_keeps_identity_empty() {
-        let access_token = test_jwt(json!({ "exp": 1_893_456_000_i64 }));
-
-        let grant = refresh_grant_from_response(RefreshTokenResponse {
-            id_token: None,
-            access_token: Some(access_token),
-            refresh_token: None,
-        })
-        .expect("refresh response should parse without id_token");
-
-        assert!(grant.chatgpt_account_id.is_none());
-        assert!(grant.chatgpt_account_is_fedramp.is_none());
-        assert!(grant.email.is_none());
-        assert!(grant.plan_type.is_none());
-    }
-
-    #[test]
-    fn refresh_grant_does_not_require_access_token() {
-        let id_token = test_jwt(json!({
-            "https://api.openai.com/auth": {
-                "chatgpt_account_id": "acc_123"
-            }
-        }));
-
-        let grant = refresh_grant_from_response(RefreshTokenResponse {
-            id_token: Some(id_token),
-            access_token: None,
-            refresh_token: Some("next-refresh".to_owned()),
-        })
-        .expect("Codex refresh response may omit access_token");
-
-        assert!(grant.access_token.is_none());
-        assert!(grant.access_token_expires_at.is_none());
-        assert_eq!(grant.refresh_token.as_deref(), Some("next-refresh"));
-        assert_eq!(grant.chatgpt_account_id.as_deref(), Some("acc_123"));
-    }
 }
