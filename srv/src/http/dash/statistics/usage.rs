@@ -134,7 +134,7 @@ struct UsageOverviewResponse {
     start_at: DateTime<Utc>,
     end_at: DateTime<Utc>,
     timezone: String,
-    period: UsagePeriodResponse,
+    lifetime: UsageLifetimeResponse,
     daily: Vec<UsageDailyPoint>,
     models: Vec<UsageModelPoint>,
     api_keys: Vec<UsageApiKeyPoint>,
@@ -143,7 +143,7 @@ struct UsageOverviewResponse {
 }
 
 #[derive(Debug, Serialize)]
-struct UsagePeriodResponse {
+struct UsageLifetimeResponse {
     total_tokens: String,
     request_count: String,
 }
@@ -193,22 +193,22 @@ async fn get_usage(
     let query = normalize_usage_range(query.timezone)?;
     let scope = UsageScope::from_user(&current_user);
 
-    // PostgreSQL 用户快照、总量、每日聚合、模型分布与 Key/用户分布彼此独立，并行查询，
-    // 避免固定一年窗口扩大后把 ClickHouse 查询串行叠加到 Dashboard 首屏延迟上。
+    // 只有 daily 使用固定年度窗口；总量、模型和消费方分布均查询全历史。各查询彼此独立，
+    // 继续并行执行，避免全历史聚合把 Dashboard 首屏延迟串行叠加。
     let (users, totals, daily_rows, model_rows, breakdown_rows) = tokio::try_join!(
         load_usage_user_directory(&state, &current_user, scope),
-        query_usage_totals(&state, scope, &query),
+        query_usage_totals(&state, scope),
         query_usage_daily(&state, scope, &query),
-        query_usage_models(&state, scope, &query),
-        query_usage_breakdown(&state, scope, &query),
+        query_usage_models(&state, scope),
+        query_usage_breakdown(&state, scope),
     )?;
     let daily = build_daily_usage(daily_rows, &query)?;
 
-    let period_total = parse_aggregate_for_percentage(&totals.total_tokens);
+    let lifetime_total = parse_aggregate_for_percentage(&totals.total_tokens);
     let models = model_rows
         .into_iter()
         .map(|row| UsageModelPoint {
-            percentage: token_percentage(&row.total_tokens_text, period_total),
+            percentage: token_percentage(&row.total_tokens_text, lifetime_total),
             provider: row.provider,
             model: row.model,
             total_tokens: row.total_tokens_text,
@@ -219,7 +219,7 @@ async fn get_usage(
         .api_keys
         .into_iter()
         .map(|row| UsageApiKeyPoint {
-            percentage: token_percentage(&row.total_tokens_text, period_total),
+            percentage: token_percentage(&row.total_tokens_text, lifetime_total),
             name: row.api_key_name_text,
             total_tokens: row.total_tokens_text,
             request_count: row.request_count.to_string(),
@@ -229,7 +229,7 @@ async fn get_usage(
         .users
         .into_iter()
         .map(|row| UsageUserPoint {
-            percentage: token_percentage(&row.total_tokens_text, period_total),
+            percentage: token_percentage(&row.total_tokens_text, lifetime_total),
             username: if row.username.is_empty() {
                 users
                     .usernames_by_id
@@ -249,11 +249,11 @@ async fn get_usage(
         actor_user_id = %current_user.id,
         usage_scope = scope.as_str(),
         scoped_user_id = ?scope.user_id(),
-        start_at = %query.start_at,
-        end_at = %query.end_at,
+        annual_start_at = %query.start_at,
+        annual_end_at = %query.end_at,
         timezone = %query.timezone,
-        total_tokens = %totals.total_tokens,
-        request_count = totals.request_count,
+        lifetime_total_tokens = %totals.total_tokens,
+        lifetime_request_count = totals.request_count,
         daily_points = daily.len(),
         active_days = daily.iter().filter(|point| point.total_tokens != "0").count(),
         model_groups = models.len(),
@@ -269,7 +269,7 @@ async fn get_usage(
         start_at: query.start_at,
         end_at: query.end_at,
         timezone: query.timezone,
-        period: UsagePeriodResponse {
+        lifetime: UsageLifetimeResponse {
             total_tokens: totals.total_tokens,
             request_count: totals.request_count.to_string(),
         },
@@ -388,25 +388,17 @@ async fn load_usage_user_directory(
     })
 }
 
-async fn query_usage_totals(
-    state: &AppState,
-    scope: UsageScope,
-    query: &NormalizedUsageRange,
-) -> AppResult<UsageTotalsRow> {
+async fn query_usage_totals(state: &AppState, scope: UsageScope) -> AppResult<UsageTotalsRow> {
     let current_user_sql = "SELECT \
         toString(sum(total_tokens)) AS total_tokens, \
         count() AS request_count \
         FROM ? \
-        WHERE user_id = ? \
-          AND request_started_at >= fromUnixTimestamp64Milli(?, 'UTC') \
-          AND request_started_at < fromUnixTimestamp64Milli(?, 'UTC')";
+        WHERE user_id = ?";
     let all_users_sql = "SELECT \
         toString(sum(total_tokens)) AS total_tokens, \
         count() AS request_count \
         FROM ? \
-        WHERE user_id IS NOT NULL \
-          AND request_started_at >= fromUnixTimestamp64Milli(?, 'UTC') \
-          AND request_started_at < fromUnixTimestamp64Milli(?, 'UTC')";
+        WHERE user_id IS NOT NULL";
 
     let request = state
         .clickhouse()
@@ -420,11 +412,9 @@ async fn query_usage_totals(
         UsageScope::AllUsers => request,
     };
     request
-        .bind(query.start_at.timestamp_millis())
-        .bind(query.end_at.timestamp_millis())
         .fetch_one::<UsageTotalsRow>()
         .await
-        .map_err(|source| usage_query_error("period_totals", scope, query, source))
+        .map_err(|source| usage_query_error("lifetime_totals", scope, source))
 }
 
 async fn query_usage_daily(
@@ -472,14 +462,10 @@ async fn query_usage_daily(
         .bind(query.end_at.timestamp_millis())
         .fetch_all::<UsageDailyRow>()
         .await
-        .map_err(|source| usage_query_error("daily", scope, query, source))
+        .map_err(|source| usage_daily_query_error(scope, query, source))
 }
 
-async fn query_usage_models(
-    state: &AppState,
-    scope: UsageScope,
-    query: &NormalizedUsageRange,
-) -> AppResult<Vec<UsageModelRow>> {
+async fn query_usage_models(state: &AppState, scope: UsageScope) -> AppResult<Vec<UsageModelRow>> {
     // ClickHouse 的 SELECT 别名在 HAVING/ORDER BY 中可见。如果字符串结果也命名为
     // total_tokens，后面的 sum(total_tokens) 会被解析为对 String 别名再次聚合。内部使用
     // 独立别名，确保聚合表达式始终引用请求日志的 Int64 原始列。
@@ -490,8 +476,6 @@ async fn query_usage_models(
         count() AS request_count \
         FROM ? \
         WHERE user_id = ? \
-          AND request_started_at >= fromUnixTimestamp64Milli(?, 'UTC') \
-          AND request_started_at < fromUnixTimestamp64Milli(?, 'UTC') \
         GROUP BY provider, model \
         HAVING sum(total_tokens) > 0 \
         ORDER BY sum(total_tokens) DESC";
@@ -502,8 +486,6 @@ async fn query_usage_models(
         count() AS request_count \
         FROM ? \
         WHERE user_id IS NOT NULL \
-          AND request_started_at >= fromUnixTimestamp64Milli(?, 'UTC') \
-          AND request_started_at < fromUnixTimestamp64Milli(?, 'UTC') \
         GROUP BY provider, model \
         HAVING sum(total_tokens) > 0 \
         ORDER BY sum(total_tokens) DESC";
@@ -520,35 +502,28 @@ async fn query_usage_models(
         UsageScope::AllUsers => request,
     };
     request
-        .bind(query.start_at.timestamp_millis())
-        .bind(query.end_at.timestamp_millis())
         .fetch_all::<UsageModelRow>()
         .await
-        .map_err(|source| usage_query_error("model_distribution", scope, query, source))
+        .map_err(|source| usage_query_error("lifetime_model_distribution", scope, source))
 }
 
 async fn query_usage_breakdown(
     state: &AppState,
     scope: UsageScope,
-    query: &NormalizedUsageRange,
 ) -> AppResult<UsageBreakdownRows> {
     match scope {
         UsageScope::CurrentUser(user_id) => Ok(UsageBreakdownRows {
-            api_keys: query_usage_api_keys(state, user_id, query).await?,
+            api_keys: query_usage_api_keys(state, user_id).await?,
             users: Vec::new(),
         }),
         UsageScope::AllUsers => Ok(UsageBreakdownRows {
             api_keys: Vec::new(),
-            users: query_usage_users(state, query).await?,
+            users: query_usage_users(state).await?,
         }),
     }
 }
 
-async fn query_usage_api_keys(
-    state: &AppState,
-    user_id: Uuid,
-    query: &NormalizedUsageRange,
-) -> AppResult<Vec<UsageApiKeyRow>> {
+async fn query_usage_api_keys(state: &AppState, user_id: Uuid) -> AppResult<Vec<UsageApiKeyRow>> {
     // API Key 名称在单个用户内唯一且不支持改名，普通用户视图可以直接按名称聚合。
     let sql = "SELECT \
         ifNull(api_key_name, '未记录') AS api_key_name_text, \
@@ -556,8 +531,6 @@ async fn query_usage_api_keys(
         count() AS request_count \
         FROM ? \
         WHERE user_id = ? \
-          AND request_started_at >= fromUnixTimestamp64Milli(?, 'UTC') \
-          AND request_started_at < fromUnixTimestamp64Milli(?, 'UTC') \
         GROUP BY api_key_name_text \
         HAVING sum(total_tokens) > 0 \
         ORDER BY sum(total_tokens) DESC";
@@ -567,24 +540,18 @@ async fn query_usage_api_keys(
         .query(sql)
         .bind(Identifier(state.config().request_log_table.as_str()))
         .bind(user_id)
-        .bind(query.start_at.timestamp_millis())
-        .bind(query.end_at.timestamp_millis())
         .fetch_all::<UsageApiKeyRow>()
         .await
         .map_err(|source| {
             usage_query_error(
-                "api_key_distribution",
+                "lifetime_api_key_distribution",
                 UsageScope::CurrentUser(user_id),
-                query,
                 source,
             )
         })
 }
 
-async fn query_usage_users(
-    state: &AppState,
-    query: &NormalizedUsageRange,
-) -> AppResult<Vec<UsageUserRow>> {
+async fn query_usage_users(state: &AppState) -> AppResult<Vec<UsageUserRow>> {
     let sql = "SELECT \
         assumeNotNull(user_id) AS user_id, \
         ifNull(any(username), '') AS username, \
@@ -592,8 +559,6 @@ async fn query_usage_users(
         count() AS request_count \
         FROM ? \
         WHERE user_id IS NOT NULL \
-          AND request_started_at >= fromUnixTimestamp64Milli(?, 'UTC') \
-          AND request_started_at < fromUnixTimestamp64Milli(?, 'UTC') \
         GROUP BY user_id \
         HAVING sum(total_tokens) > 0 \
         ORDER BY sum(total_tokens) DESC";
@@ -602,19 +567,16 @@ async fn query_usage_users(
         .clickhouse()
         .query(sql)
         .bind(Identifier(state.config().request_log_table.as_str()))
-        .bind(query.start_at.timestamp_millis())
-        .bind(query.end_at.timestamp_millis())
         .fetch_all::<UsageUserRow>()
         .await
         .map_err(|source| {
-            usage_query_error("user_distribution", UsageScope::AllUsers, query, source)
+            usage_query_error("lifetime_user_distribution", UsageScope::AllUsers, source)
         })
 }
 
 fn usage_query_error(
     query_kind: &'static str,
     scope: UsageScope,
-    query: &NormalizedUsageRange,
     source: clickhouse::error::Error,
 ) -> AppError {
     error!(
@@ -622,13 +584,30 @@ fn usage_query_error(
         query_kind,
         usage_scope = scope.as_str(),
         scoped_user_id = ?scope.user_id(),
-        start_at = %query.start_at,
-        end_at = %query.end_at,
-        timezone = %query.timezone,
-        "Dashboard 查询 ClickHouse token 用量统计失败"
+        "Dashboard 查询 ClickHouse 全历史 token 用量统计失败"
     );
     AppError::DbQuery {
         message: format!("查询 ClickHouse token 用量统计失败: {source}"),
+    }
+}
+
+fn usage_daily_query_error(
+    scope: UsageScope,
+    query: &NormalizedUsageRange,
+    source: clickhouse::error::Error,
+) -> AppError {
+    error!(
+        error = %source,
+        query_kind = "annual_daily",
+        usage_scope = scope.as_str(),
+        scoped_user_id = ?scope.user_id(),
+        start_at = %query.start_at,
+        end_at = %query.end_at,
+        timezone = %query.timezone,
+        "Dashboard 查询 ClickHouse 年度每日 token 用量统计失败"
+    );
+    AppError::DbQuery {
+        message: format!("查询 ClickHouse 年度每日 token 用量统计失败: {source}"),
     }
 }
 
@@ -695,10 +674,10 @@ fn parse_aggregate_for_percentage(value: &str) -> f64 {
     value.parse::<f64>().unwrap_or(0.0).max(0.0)
 }
 
-fn token_percentage(value: &str, period_total: f64) -> f64 {
-    if period_total <= 0.0 {
+fn token_percentage(value: &str, lifetime_total: f64) -> f64 {
+    if lifetime_total <= 0.0 {
         return 0.0;
     }
     let value = parse_aggregate_for_percentage(value);
-    ((value / period_total * 10_000.0).round() / 100.0).clamp(0.0, 100.0)
+    ((value / lifetime_total * 10_000.0).round() / 100.0).clamp(0.0, 100.0)
 }

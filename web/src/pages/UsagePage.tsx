@@ -2,7 +2,7 @@ import { Loader2, RotateCcw } from "lucide-react";
 import { type ReactNode, useMemo, useState } from "react";
 import { EChart, type EChartOption } from "../components/EChart";
 import { Metric } from "../components/Metric";
-import { formatTokenCount } from "../lib/format";
+import { formatCompactTokenAmount, formatTokenCount } from "../lib/format";
 import { panelClass, spinnerClass } from "../lib/ui";
 import type {
   DashboardTheme,
@@ -10,7 +10,6 @@ import type {
   UsageDailyPoint,
   UsageModelPoint,
   UsageResponse,
-  UsageUserPoint,
 } from "../types";
 
 interface UsagePageProps {
@@ -53,7 +52,6 @@ const CONTRIBUTION_PALETTES = {
 const OTHER_MODEL_PROVIDER = "all";
 const OTHER_MODEL_NAME = "其他模型";
 const OTHER_API_KEY_NAME = "其他 API Key";
-const OTHER_USERNAME = "其他用户";
 
 export function UsagePage({
   theme,
@@ -64,7 +62,8 @@ export function UsagePage({
   const [contributionViewRevision, setContributionViewRevision] = useState(0);
   const modelPoints = useMemo(() => compactModelPoints(usage?.models ?? []), [usage]);
   const apiKeyPoints = useMemo(() => compactApiKeyPoints(usage?.api_keys ?? []), [usage]);
-  const userPoints = useMemo(() => compactUserPoints(usage?.users ?? []), [usage]);
+  // 管理员排行展示真实的前八名用户，不把剩余用户汇总成一个会干扰名次的“其他用户”。
+  const userRankPoints = useMemo(() => (usage?.users ?? []).slice(0, 8), [usage]);
   const usageScope = usage?.scope ?? "current_user";
   const allUsers = usageScope === "all_users";
   const contributionOption = useMemo(
@@ -75,23 +74,30 @@ export function UsagePage({
     () => buildModelShareOption(modelPoints, darkMode),
     [darkMode, modelPoints],
   );
-  const consumerShareOption = useMemo(
+  const apiKeyShareOption = useMemo(
+    () => buildConsumerShareOption(apiKeyPoints, "API Key Token", darkMode),
+    [apiKeyPoints, darkMode],
+  );
+  const rankOption = useMemo(
     () =>
       allUsers
-        ? buildConsumerShareOption(
-            userPoints.map((point) => ({
+        ? buildRankOption(
+            userRankPoints.map((point) => ({
               name: point.username,
               total_tokens: point.total_tokens,
             })),
-            "用户 Token",
+            CONSUMER_COLORS,
             darkMode,
           )
-        : buildConsumerShareOption(apiKeyPoints, "API Key Token", darkMode),
-    [allUsers, apiKeyPoints, darkMode, userPoints],
-  );
-  const modelRankOption = useMemo(
-    () => buildModelRankOption(modelPoints, darkMode),
-    [darkMode, modelPoints],
+        : buildRankOption(
+            modelPoints.map((point) => ({
+              name: modelLabel(point),
+              total_tokens: point.total_tokens,
+            })),
+            MODEL_COLORS,
+            darkMode,
+          ),
+    [allUsers, darkMode, modelPoints, userRankPoints],
   );
   return (
     <section className="grid gap-4">
@@ -103,21 +109,24 @@ export function UsagePage({
               value={formatTokenCount(usage.remaining_tokens)}
               tone="good"
               title={usage.remaining_tokens}
+              cornerValue={formatCompactTokenAmount(usage.remaining_tokens)}
             />
             <Metric
               label={allUsers ? "全体累计消耗" : "累计消耗"}
               value={formatTokenCount(usage.consumed_tokens)}
               title={usage.consumed_tokens}
+              cornerValue={formatCompactTokenAmount(usage.consumed_tokens)}
             />
             <Metric
-              label={allUsers ? "全体近一年消耗" : "近一年消耗"}
-              value={formatTokenCount(usage.period.total_tokens)}
-              title={usage.period.total_tokens}
+              label={allUsers ? "全体历史日志 Token" : "历史日志 Token"}
+              value={formatTokenCount(usage.lifetime.total_tokens)}
+              title={usage.lifetime.total_tokens}
+              cornerValue={formatCompactTokenAmount(usage.lifetime.total_tokens)}
             />
             <Metric
-              label={allUsers ? "全体近一年请求" : "近一年请求"}
-              value={formatTokenCount(usage.period.request_count)}
-              title={usage.period.request_count}
+              label={allUsers ? "全体历史请求次数" : "历史请求次数"}
+              value={formatTokenCount(usage.lifetime.request_count)}
+              title={usage.lifetime.request_count}
             />
           </>
         )}
@@ -158,8 +167,8 @@ export function UsagePage({
             />
           </article>
           <article className={`${panelClass} grid gap-3 p-4`}>
-            <ChartHeading title="消耗占比" />
-            <div className="grid gap-4 sm:grid-cols-2">
+            <ChartHeading title="全历史消耗占比" />
+            <div className={allUsers ? "grid gap-4" : "grid gap-4 sm:grid-cols-2"}>
               <section className="min-w-0">
                 <h3 className="mb-2 text-center text-xs font-semibold text-slate-500 dark:text-slate-400">模型</h3>
                 {modelPoints.length > 0 ? (
@@ -172,28 +181,29 @@ export function UsagePage({
                   <ShareChartEmptyState />
                 )}
               </section>
-              <section className="min-w-0">
-                <h3 className="mb-2 text-center text-xs font-semibold text-slate-500 dark:text-slate-400">{allUsers ? "用户" : "API Key"}</h3>
-                {(allUsers ? userPoints.length : apiKeyPoints.length) > 0 ? (
-                  <EChart
-                    option={consumerShareOption}
-                    ariaLabel={
-                      allUsers
-                        ? "用户 Token 使用占比环形图"
-                        : "API Key Token 使用占比环形图"
-                    }
-                    className="h-72 min-h-64 w-full"
-                  />
-                ) : (
-                  <ShareChartEmptyState />
-                )}
-              </section>
+              {!allUsers && (
+                <section className="min-w-0">
+                  <h3 className="mb-2 text-center text-xs font-semibold text-slate-500 dark:text-slate-400">API Key</h3>
+                  {apiKeyPoints.length > 0 ? (
+                    <EChart
+                      option={apiKeyShareOption}
+                      ariaLabel="API Key Token 使用占比环形图"
+                      className="h-72 min-h-64 w-full"
+                    />
+                  ) : (
+                    <ShareChartEmptyState />
+                  )}
+                </section>
+              )}
             </div>
           </article>
           <article className={`${panelClass} grid gap-3 p-4`}>
-            <ChartHeading title="模型消耗排行" />
-            {modelPoints.length > 0 ? (
-              <EChart option={modelRankOption} ariaLabel="模型 Token 消耗排行柱状图" />
+            <ChartHeading title={allUsers ? "全历史用户消耗排行" : "全历史模型消耗排行"} />
+            {(allUsers ? userRankPoints.length : modelPoints.length) > 0 ? (
+              <EChart
+                option={rankOption}
+                ariaLabel={allUsers ? "用户 Token 消耗排行柱状图" : "模型 Token 消耗排行柱状图"}
+              />
             ) : (
               <ChartEmptyState />
             )}
@@ -224,7 +234,7 @@ function ChartHeading({
 }
 
 function ChartEmptyState() {
-  return <div className="flex min-h-72 items-center justify-center px-5 text-center text-sm text-slate-500 dark:text-slate-400">近一年还没有 Token 用量</div>;
+  return <div className="flex min-h-72 items-center justify-center px-5 text-center text-sm text-slate-500 dark:text-slate-400">暂无历史 Token 用量</div>;
 }
 
 function ShareChartEmptyState() {
@@ -573,12 +583,16 @@ function buildConsumerShareOption(
   };
 }
 
-function buildModelRankOption(points: UsageModelPoint[], darkMode: boolean): EChartOption {
+function buildRankOption(
+  points: Array<{ name: string; total_tokens: string }>,
+  palette: readonly string[],
+  darkMode: boolean,
+): EChartOption {
   const colors = chartThemeColors(darkMode);
-  // 排行图只有一个 bar series，必须给每个数据项显式分配颜色，才能与占比图及趋势图
-  // 按模型一一对应；只设置 series color 会让全部柱子使用同一种颜色。
+  // 排行图只有一个 bar series，为每个条目显式分色。管理员传入用户数据，普通用户传入
+  // 模型数据，两种角色复用完全一致的数值轴与 Tooltip 行为。
   const ordered = points
-    .map((point, index) => ({ point, color: MODEL_COLORS[index % MODEL_COLORS.length] }))
+    .map((point, index) => ({ point, color: palette[index % palette.length] }))
     .reverse();
   return {
     aria: { enabled: true },
@@ -599,7 +613,7 @@ function buildModelRankOption(points: UsageModelPoint[], darkMode: boolean): ECh
     },
     yAxis: {
       type: "category",
-      data: ordered.map(({ point }) => modelLabel(point)),
+      data: ordered.map(({ point }) => point.name),
       axisLabel: { color: colors.text, width: 108, overflow: "truncate" },
       axisLine: { lineStyle: { color: colors.axis } },
       axisTick: { show: false },
@@ -669,35 +683,6 @@ function compactApiKeyPoints(points: UsageApiKeyPoint[]) {
     ...visible,
     {
       name: OTHER_API_KEY_NAME,
-      total_tokens: otherTokens.toString(),
-      request_count: otherRequests.toString(),
-      percentage: otherPercentage,
-    },
-  ];
-}
-
-/** admin 用户分布与普通用户 API Key 分布使用相同的前七项展示规则。 */
-function compactUserPoints(points: UsageUserPoint[]) {
-  if (points.length <= 8) {
-    return points;
-  }
-
-  const visible = points.slice(0, 7);
-  const remaining = points.slice(7);
-  const otherTokens = remaining.reduce(
-    (total, point) => total + parseTokenCount(point.total_tokens),
-    0n,
-  );
-  const otherRequests = remaining.reduce(
-    (total, point) => total + parseTokenCount(point.request_count),
-    0n,
-  );
-  const otherPercentage = remaining.reduce((total, point) => total + point.percentage, 0);
-  return [
-    ...visible,
-    {
-      user_id: "",
-      username: OTHER_USERNAME,
       total_tokens: otherTokens.toString(),
       request_count: otherRequests.toString(),
       percentage: otherPercentage,

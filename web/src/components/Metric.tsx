@@ -5,13 +5,15 @@ interface MetricProps {
   value: string;
   tone?: "good" | "warn";
   title?: string;
+  cornerValue?: string;
 }
 
-export function Metric({ label, value, tone, title }: MetricProps) {
+export function Metric({ label, value, tone, title, cornerValue }: MetricProps) {
   return (
     <div
       className={cx(
         metricClass,
+        cornerValue && "relative pb-9",
         tone === "good"
           ? "border-emerald-200 bg-emerald-50/40 dark:border-emerald-900 dark:bg-emerald-950/30"
           : tone === "warn"
@@ -33,6 +35,11 @@ export function Metric({ label, value, tone, title }: MetricProps) {
       >
         {value}
       </strong>
+      {cornerValue && (
+        <span className="absolute right-4 bottom-3.5 text-[11px] font-medium tabular-nums text-slate-400 dark:text-slate-500">
+          {cornerValue}
+        </span>
+      )}
     </div>
   );
 }

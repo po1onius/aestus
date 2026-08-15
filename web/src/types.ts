@@ -339,7 +339,7 @@ export interface ListRequestLogsResponse {
 
 export type UsageScope = "current_user" | "all_users";
 
-export interface UsagePeriod {
+export interface UsageLifetime {
   total_tokens: string;
   request_count: string;
 }
@@ -380,7 +380,7 @@ export interface UsageResponse {
   start_at: string;
   end_at: string;
   timezone: string;
-  period: UsagePeriod;
+  lifetime: UsageLifetime;
   daily: UsageDailyPoint[];
   models: UsageModelPoint[];
   api_keys: UsageApiKeyPoint[];

@@ -40,6 +40,24 @@ export function formatTokenCount(value: string) {
   }
 }
 
+const compactTokenFormatter = new Intl.NumberFormat("en-US", {
+  notation: "compact",
+  minimumFractionDigits: 1,
+  maximumFractionDigits: 1,
+});
+
+/**
+ * 为概览卡片生成带 Token 单位的紧凑数值，例如 1.2M Token。
+ * 直接向 Intl 传递 BigInt，在后端累计值超过 JavaScript 安全整数上限时仍能保持正确量级。
+ */
+export function formatCompactTokenAmount(value: string) {
+  try {
+    return `${compactTokenFormatter.format(BigInt(value))} Token`;
+  } catch {
+    return `${value} Token`;
+  }
+}
+
 export function formatDuration(durationMs: number | null) {
   if (durationMs === null) {
     return "未记录";
