@@ -28,7 +28,6 @@ export const pluginsPath = "/dash/plugins";
 export const providerGroupsPath = "/dash/provider-groups";
 export const requestLogsPath = "/dash/request-logs";
 export const usagePath = "/dash/usage";
-export const usageTimelinePath = "/dash/usage/timeline";
 export const usersPath = "/dash/users";
 export const authTokenStorageKey = "aestus_dashboard_token";
 export const themeStorageKey = "aestus_dashboard_theme";

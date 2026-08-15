@@ -12,9 +12,12 @@ use crate::err::{AppError, AppResult};
 use super::lifecycle::FinalizedRequestLogEntry;
 
 const REQUEST_LOG_QUEUE_CAPACITY: usize = 4096;
-const REQUEST_LOG_BATCH_MAX_ROWS: usize = 256;
+// 常规批次累计到 1,000 行后立即提交，减少小批量同步 INSERT 产生的 data part 数量和
+// ClickHouse 后台 merge 压力。字节上限仍独立生效，避免少量超大错误正文占用过多内存。
+const REQUEST_LOG_BATCH_MAX_ROWS: usize = 1_000;
 const REQUEST_LOG_BATCH_MAX_ESTIMATED_BYTES: usize = 2 * 1024 * 1024;
-const REQUEST_LOG_BATCH_FLUSH_INTERVAL_MS: u64 = 200;
+// 低流量下最多等待 2 秒便提交已有日志，在合批效率和 Dashboard 可见延迟之间保持平衡。
+const REQUEST_LOG_BATCH_FLUSH_INTERVAL_MS: u64 = 2_000;
 
 /// ClickHouse 请求日志存储行。
 ///

@@ -9,6 +9,7 @@ base64 = "0.22.1"
 bcrypt = "0.19.2"
 bytes = "1.11.1"
 chrono = { version = "0.4.45", features = ["serde"] }
+chrono-tz = "0.10.4"
 clickhouse = { version = "0.15.1", features = ["chrono", "uuid"] }
 diesel = { version = "2.3.10", features = ["postgres", "chrono", "uuid", "serde_json"] }
 diesel-async = { version = "0.9.1", features = ["postgres", "deadpool"] }

@@ -28,7 +28,6 @@ import {
   requestLogPageSize,
   requestLogsPath,
   usagePath,
-  usageTimelinePath,
   usersPath,
   themeStorageKey,
 } from "./config";
@@ -59,12 +58,7 @@ import {
   pageFromPath,
   routesForUser,
 } from "./lib/routing";
-import {
-  daysAgoInputValue,
-  localDateIntervalIso,
-  localDateRangeIso,
-  todayInputValue,
-} from "./lib/format";
+import { localDateRangeIso, todayInputValue } from "./lib/format";
 import { AccountsPage } from "./pages/AccountsPage";
 import { ApiKeysPage } from "./pages/ApiKeysPage";
 import { PluginsPage } from "./pages/PluginsPage";
@@ -102,9 +96,7 @@ import type {
   RequestOverride,
   RequestOverrideTarget,
   UpstreamApiKeyProvider,
-  UsagePointCount,
   UsageResponse,
-  UsageTimelineResponse,
   UnassignedProviderResource,
 } from "./types";
 
@@ -122,7 +114,6 @@ const UsagePage = lazy(() =>
 );
 
 const usageLoadErrorToastId = "usage-load-error";
-const usageDateRangeToastId = "usage-date-range-error";
 
 export function App() {
   const [currentPath, setCurrentPath] = useState(() => normalizeDashboardPath(window.location.pathname));
@@ -179,10 +170,6 @@ export function App() {
   const [requestLogCurrentCursor, setRequestLogCurrentCursor] = useState<RequestLogCursor | null>(null);
   const [requestLogAutoLoadedKey, setRequestLogAutoLoadedKey] = useState<string | null>(null);
   const [usage, setUsage] = useState<UsageResponse | null>(null);
-  const [usageTimeline, setUsageTimeline] = useState<UsageTimelineResponse | null>(null);
-  const [usageStartDate, setUsageStartDate] = useState(() => daysAgoInputValue(6));
-  const [usageEndDate, setUsageEndDate] = useState(() => todayInputValue());
-  const [usagePointCount, setUsagePointCount] = useState<UsagePointCount>(20);
   const [loading, setLoading] = useState(true);
   const [usersLoading, setUsersLoading] = useState(false);
   const [apiKeysLoading, setApiKeysLoading] = useState(true);
@@ -192,7 +179,6 @@ export function App() {
     useState(false);
   const [requestLogsLoading, setRequestLogsLoading] = useState(false);
   const [usageLoading, setUsageLoading] = useState(false);
-  const [usageTimelineLoading, setUsageTimelineLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [apiKeySaving, setApiKeySaving] = useState(false);
   const [pluginSavingId, setPluginSavingId] = useState<string | null>(null);
@@ -240,8 +226,6 @@ export function App() {
   const [confirmationSubmitting, setConfirmationSubmitting] = useState(false);
   const usageAutoLoadedKeyRef = useRef<string | null>(null);
   const usageRequestSequenceRef = useRef(0);
-  const usageTimelineAutoLoadedKeyRef = useRef<string | null>(null);
-  const usageTimelineRequestSequenceRef = useRef(0);
   const unassignedProviderResourcesRequestSequenceRef = useRef(0);
 
   const activeAccountProviderMeta =
@@ -311,26 +295,15 @@ export function App() {
       return;
     }
 
-    const queryKey = `${currentUser.id}:${usageStartDate}:${usageEndDate}`;
+    // 固定年度窗口每天会向前滚动一天；把本地日期纳入缓存键，跨午夜后重新进入页面时
+    // 自动请求新的 365 天窗口，而不是继续复用上一自然日的结果。
+    const queryKey = `${currentUser.id}:${todayInputValue()}`;
     if (usageAutoLoadedKeyRef.current === queryKey) {
       return;
     }
     usageAutoLoadedKeyRef.current = queryKey;
     void loadUsage();
-  }, [activePage, authToken, currentUser, usageStartDate, usageEndDate]);
-
-  useEffect(() => {
-    if (activePage !== "usage" || !currentUser || !authToken) {
-      return;
-    }
-
-    const queryKey = `${currentUser.id}:${usageStartDate}:${usageEndDate}:${usagePointCount}`;
-    if (usageTimelineAutoLoadedKeyRef.current === queryKey) {
-      return;
-    }
-    usageTimelineAutoLoadedKeyRef.current = queryKey;
-    void loadUsageTimeline();
-  }, [activePage, authToken, currentUser, usageStartDate, usageEndDate, usagePointCount]);
+  }, [activePage, authToken, currentUser]);
 
   useEffect(() => {
     if (activePage !== "requestLogs" || !currentUser || !authToken) {
@@ -537,14 +510,8 @@ export function App() {
     setRequestLogCursorStack([]);
     setRequestLogCurrentCursor(null);
     setUsage(null);
-    setUsageTimeline(null);
-    setUsageStartDate(daysAgoInputValue(6));
-    setUsageEndDate(todayInputValue());
-    setUsagePointCount(20);
     usageAutoLoadedKeyRef.current = null;
     usageRequestSequenceRef.current += 1;
-    usageTimelineAutoLoadedKeyRef.current = null;
-    usageTimelineRequestSequenceRef.current += 1;
     unassignedProviderResourcesRequestSequenceRef.current += 1;
     setConfirmationRequest(null);
     setConfirmationSubmitting(false);
@@ -716,23 +683,6 @@ export function App() {
     }
   }
 
-  /**
-   * 日期输入框允许用户键盘录入暂时违反 min/max 的值，因此请求前统一校验自然日区间。
-   * 总览和趋势会并行读取同一区间，固定 Toast ID 可以把两次校验合并为一条提示。
-   */
-  function currentUsageDateInterval() {
-    if (usageStartDate > usageEndDate) {
-      toast.error("统计时间无效", {
-        description: "开始日期不能晚于结束日期。",
-        id: usageDateRangeToastId,
-      });
-      return null;
-    }
-
-    toast.dismiss(usageDateRangeToastId);
-    return localDateIntervalIso(usageStartDate, usageEndDate);
-  }
-
   async function loadUsage() {
     const token = authToken;
     if (!token || !currentUser) {
@@ -742,14 +692,7 @@ export function App() {
     }
 
     const requestSequence = ++usageRequestSequenceRef.current;
-    const range = currentUsageDateInterval();
-    if (!range) {
-      setUsageLoading(false);
-      return;
-    }
     const params = new URLSearchParams({
-      start_at: range.startAt,
-      end_at: range.endAt,
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
     });
 
@@ -771,58 +714,6 @@ export function App() {
     } finally {
       if (isActiveAuthToken(token) && requestSequence === usageRequestSequenceRef.current) {
         setUsageLoading(false);
-      }
-    }
-  }
-
-  async function loadUsageTimeline() {
-    const token = authToken;
-    if (!token || !currentUser) {
-      setUsageTimeline(null);
-      setUsageTimelineLoading(false);
-      return;
-    }
-
-    const requestSequence = ++usageTimelineRequestSequenceRef.current;
-    const range = currentUsageDateInterval();
-    if (!range) {
-      setUsageTimelineLoading(false);
-      return;
-    }
-    const params = new URLSearchParams({
-      start_at: range.startAt,
-      end_at: range.endAt,
-      point_count: String(usagePointCount),
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
-    });
-
-    setUsageTimelineLoading(true);
-    try {
-      const data = await requestJson<UsageTimelineResponse>(
-        `${usageTimelinePath}?${params.toString()}`,
-        undefined,
-        token,
-      );
-      if (
-        !isActiveAuthToken(token) ||
-        requestSequence !== usageTimelineRequestSequenceRef.current
-      ) {
-        return;
-      }
-      setUsageTimeline(data);
-    } catch (error) {
-      if (
-        isActiveAuthToken(token) &&
-        requestSequence === usageTimelineRequestSequenceRef.current
-      ) {
-        showErrorToast("用量数据加载失败", error, usageLoadErrorToastId);
-      }
-    } finally {
-      if (
-        isActiveAuthToken(token) &&
-        requestSequence === usageTimelineRequestSequenceRef.current
-      ) {
-        setUsageTimelineLoading(false);
       }
     }
   }
@@ -1002,7 +893,7 @@ export function App() {
 
   async function refreshActiveTab() {
     if (activePage === "usage") {
-      await Promise.all([loadUsage(), loadUsageTimeline()]);
+      await loadUsage();
       return;
     }
 
@@ -2390,7 +2281,7 @@ export function App() {
         pluginsLoading,
         apiKeysLoading,
         requestLogsLoading,
-        usageLoading || usageTimelineLoading,
+        usageLoading,
       )}
       overlays={
         <AnimatePresence>
@@ -2579,19 +2470,7 @@ export function App() {
           <UsagePage
             theme={theme}
             usage={usage}
-            timeline={usageTimeline}
             loading={usageLoading}
-            timelineLoading={usageTimelineLoading}
-            startDate={usageStartDate}
-            endDate={usageEndDate}
-            pointCount={usagePointCount}
-            onStartDateChange={setUsageStartDate}
-            onEndDateChange={setUsageEndDate}
-            onPointCountChange={setUsagePointCount}
-            onRangeChange={(startDate, endDate) => {
-              setUsageStartDate(startDate);
-              setUsageEndDate(endDate);
-            }}
           />
         </Suspense>
       ) : activePage === "accounts" ? (

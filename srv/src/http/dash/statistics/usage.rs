@@ -2,8 +2,8 @@
 //!
 //! 普通用户只统计自己的余额与请求日志，admin 统计 PostgreSQL 中全部用户的余额及
 //! ClickHouse 中全部已归属用户的请求日志。额度属于附属能力，允许极端故障下少量统计
-//! 缺失，因此这里不引入账单流水或跨库事务。总量/模型分布与时间趋势使用独立接口，
-//! 使趋势密度切换不会重复查询其他统计数据。
+//! 缺失，因此这里不引入账单流水或跨库事务。用量概览固定统计调用方时区下包含今天的
+//! 最近 365 个自然日，并一次返回总量、分布与每日明细。
 
 use std::collections::HashMap;
 
@@ -12,7 +12,8 @@ use axum::{
     extract::{Query, State},
     routing::get,
 };
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Datelike, Days, LocalResult, NaiveDate, TimeZone, Utc};
+use chrono_tz::Tz;
 use clickhouse::{Row, sql::Identifier};
 use serde::{Deserialize, Serialize};
 use tracing::{error, info};
@@ -26,25 +27,12 @@ use crate::{
     user,
 };
 
-const MAX_TIME_RANGE_DAYS: i64 = 31;
 const MAX_TIMEZONE_BYTES: usize = 64;
-const DEFAULT_TIMELINE_POINT_COUNT: u16 = 20;
-const DENSE_TIMELINE_POINT_COUNT: u16 = 50;
+const USAGE_YEAR_DAYS: u64 = 365;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UsageQuery {
-    start_at: Option<DateTime<Utc>>,
-    end_at: Option<DateTime<Utc>>,
-    timezone: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct UsageTimelineQuery {
-    start_at: Option<DateTime<Utc>>,
-    end_at: Option<DateTime<Utc>>,
-    point_count: Option<u16>,
     timezone: Option<String>,
 }
 
@@ -52,19 +40,9 @@ struct UsageTimelineQuery {
 struct NormalizedUsageRange {
     start_at: DateTime<Utc>,
     end_at: DateTime<Utc>,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
     timezone: String,
-}
-
-impl NormalizedUsageRange {
-    fn duration_millis(&self) -> i64 {
-        (self.end_at - self.start_at).num_milliseconds()
-    }
-}
-
-#[derive(Debug)]
-struct NormalizedUsageTimelineQuery {
-    range: NormalizedUsageRange,
-    point_count: u16,
 }
 
 /// 用量查询的数据边界由已认证用户角色唯一决定，不接受调用方通过 query 参数自行扩大。
@@ -112,11 +90,10 @@ struct UsageTotalsRow {
 }
 
 #[derive(Debug, Deserialize, Row)]
-struct UsageTimelineRow {
-    bucket_index: u64,
-    provider: String,
-    model: String,
+struct UsageDailyRow {
+    usage_date: String,
     total_tokens_text: String,
+    request_count: u64,
 }
 
 #[derive(Debug, Deserialize, Row)]
@@ -158,20 +135,10 @@ struct UsageOverviewResponse {
     end_at: DateTime<Utc>,
     timezone: String,
     period: UsagePeriodResponse,
+    daily: Vec<UsageDailyPoint>,
     models: Vec<UsageModelPoint>,
     api_keys: Vec<UsageApiKeyPoint>,
     users: Vec<UsageUserPoint>,
-    generated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Serialize)]
-struct UsageTimelineResponse {
-    scope: &'static str,
-    start_at: DateTime<Utc>,
-    end_at: DateTime<Utc>,
-    point_count: u16,
-    timezone: String,
-    timeline: Vec<UsageTimelineBucket>,
     generated_at: DateTime<Utc>,
 }
 
@@ -182,18 +149,10 @@ struct UsagePeriodResponse {
 }
 
 #[derive(Debug, Serialize)]
-struct UsageTimelineBucket {
-    index: u16,
-    started_at: DateTime<Utc>,
-    ended_at: DateTime<Utc>,
-    models: Vec<UsageTimelineModelPoint>,
-}
-
-#[derive(Debug, Serialize)]
-struct UsageTimelineModelPoint {
-    provider: String,
-    model: String,
+struct UsageDailyPoint {
+    date: NaiveDate,
     total_tokens: String,
+    request_count: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -223,9 +182,7 @@ struct UsageUserPoint {
 }
 
 pub(super) fn router() -> Router<AppState> {
-    Router::new()
-        .route("/", get(get_usage))
-        .route("/timeline", get(get_usage_timeline))
+    Router::new().route("/", get(get_usage))
 }
 
 async fn get_usage(
@@ -233,17 +190,19 @@ async fn get_usage(
     auth::CurrentUser(current_user): auth::CurrentUser,
     Query(query): Query<UsageQuery>,
 ) -> AppResult<Json<UsageOverviewResponse>> {
-    let query = normalize_usage_range(query.start_at, query.end_at, query.timezone)?;
+    let query = normalize_usage_range(query.timezone)?;
     let scope = UsageScope::from_user(&current_user);
 
-    // PostgreSQL 用户快照、总量、模型分布与角色对应的 Key/用户分布彼此独立，并行查询
-    // 可以避免全局日志量或用户量较大时串行延长 Dashboard 首屏等待时间。
-    let (users, totals, model_rows, breakdown_rows) = tokio::try_join!(
+    // PostgreSQL 用户快照、总量、每日聚合、模型分布与 Key/用户分布彼此独立，并行查询，
+    // 避免固定一年窗口扩大后把 ClickHouse 查询串行叠加到 Dashboard 首屏延迟上。
+    let (users, totals, daily_rows, model_rows, breakdown_rows) = tokio::try_join!(
         load_usage_user_directory(&state, &current_user, scope),
         query_usage_totals(&state, scope, &query),
+        query_usage_daily(&state, scope, &query),
         query_usage_models(&state, scope, &query),
         query_usage_breakdown(&state, scope, &query),
     )?;
+    let daily = build_daily_usage(daily_rows, &query)?;
 
     let period_total = parse_aggregate_for_percentage(&totals.total_tokens);
     let models = model_rows
@@ -295,6 +254,8 @@ async fn get_usage(
         timezone = %query.timezone,
         total_tokens = %totals.total_tokens,
         request_count = totals.request_count,
+        daily_points = daily.len(),
+        active_days = daily.iter().filter(|point| point.total_tokens != "0").count(),
         model_groups = models.len(),
         api_key_groups = api_keys.len(),
         user_groups = user_points.len(),
@@ -312,6 +273,7 @@ async fn get_usage(
             total_tokens: totals.total_tokens,
             request_count: totals.request_count.to_string(),
         },
+        daily,
         models,
         api_keys,
         users: user_points,
@@ -319,124 +281,65 @@ async fn get_usage(
     }))
 }
 
-async fn get_usage_timeline(
-    State(state): State<AppState>,
-    auth::CurrentUser(current_user): auth::CurrentUser,
-    Query(query): Query<UsageTimelineQuery>,
-) -> AppResult<Json<UsageTimelineResponse>> {
-    let query = normalize_usage_timeline_query(query)?;
-    let scope = UsageScope::from_user(&current_user);
-    let timeline_rows = query_usage_timeline(&state, scope, &query).await?;
-    let timeline = build_usage_timeline(timeline_rows, &query)?;
-    let timeline_model_groups = timeline
-        .iter()
-        .map(|bucket| bucket.models.len())
-        .sum::<usize>();
-    let non_empty_timeline_points = timeline
-        .iter()
-        .filter(|bucket| !bucket.models.is_empty())
-        .count();
-
-    info!(
-        actor_user_id = %current_user.id,
-        usage_scope = scope.as_str(),
-        scoped_user_id = ?scope.user_id(),
-        start_at = %query.range.start_at,
-        end_at = %query.range.end_at,
-        point_count = query.point_count,
-        timezone = %query.range.timezone,
-        timeline_points = timeline.len(),
-        non_empty_timeline_points,
-        timeline_model_groups,
-        "Dashboard token 用量趋势聚合完成"
-    );
-
-    Ok(Json(UsageTimelineResponse {
-        scope: scope.as_str(),
-        start_at: query.range.start_at,
-        end_at: query.range.end_at,
-        point_count: query.point_count,
-        timezone: query.range.timezone,
-        timeline,
-        generated_at: Utc::now(),
-    }))
-}
-
-fn normalize_usage_range(
-    start_at: Option<DateTime<Utc>>,
-    end_at: Option<DateTime<Utc>>,
-    timezone: Option<String>,
-) -> AppResult<NormalizedUsageRange> {
-    let (start_at, end_at) = match (start_at, end_at) {
-        (Some(start_at), Some(end_at)) => (start_at, end_at),
-        (None, None) => {
-            let end_at = Utc::now();
-            (end_at - Duration::days(7), end_at)
-        }
-        _ => {
-            return Err(AppError::BadRequest {
-                message: "start_at 和 end_at 必须同时传入".to_owned(),
-            });
-        }
-    };
-    if start_at >= end_at {
-        return Err(AppError::BadRequest {
-            message: "start_at 必须早于 end_at".to_owned(),
-        });
-    }
-    if end_at - start_at > Duration::days(MAX_TIME_RANGE_DAYS) {
-        return Err(AppError::BadRequest {
-            message: format!("用量统计时间跨度不能超过 {MAX_TIME_RANGE_DAYS} 天"),
-        });
-    }
-
-    let timezone = normalize_timezone(timezone)?;
+fn normalize_usage_range(timezone: Option<String>) -> AppResult<NormalizedUsageRange> {
+    let (timezone_name, timezone) = normalize_timezone(timezone)?;
+    let today = Utc::now().with_timezone(&timezone).date_naive();
+    let start_date = today
+        .checked_sub_days(Days::new(USAGE_YEAR_DAYS - 1))
+        .ok_or_else(|| AppError::BadRequest {
+            message: "计算近一年用量开始日期时超出支持范围".to_owned(),
+        })?;
+    let end_date = today
+        .checked_add_days(Days::new(1))
+        .ok_or_else(|| AppError::BadRequest {
+            message: "计算近一年用量结束日期时超出支持范围".to_owned(),
+        })?;
 
     Ok(NormalizedUsageRange {
-        start_at,
-        end_at,
-        timezone,
+        start_at: local_day_start_utc(timezone, start_date)?,
+        end_at: local_day_start_utc(timezone, end_date)?,
+        start_date,
+        end_date,
+        timezone: timezone_name,
     })
 }
 
-fn normalize_usage_timeline_query(
-    query: UsageTimelineQuery,
-) -> AppResult<NormalizedUsageTimelineQuery> {
-    let range = normalize_usage_range(query.start_at, query.end_at, query.timezone)?;
-    let point_count = query.point_count.unwrap_or(DEFAULT_TIMELINE_POINT_COUNT);
-    if !matches!(
-        point_count,
-        DEFAULT_TIMELINE_POINT_COUNT | DENSE_TIMELINE_POINT_COUNT
-    ) {
-        return Err(AppError::BadRequest {
-            message: format!(
-                "point_count 只支持 {DEFAULT_TIMELINE_POINT_COUNT} 或 {DENSE_TIMELINE_POINT_COUNT}"
-            ),
-        });
-    }
-    if range.duration_millis() < i64::from(point_count) {
-        return Err(AppError::BadRequest {
-            message: format!("统计时间跨度必须至少包含 {point_count} 毫秒"),
-        });
-    }
-
-    Ok(NormalizedUsageTimelineQuery { range, point_count })
-}
-
-fn normalize_timezone(timezone: Option<String>) -> AppResult<String> {
+/// 不再只校验字符串外形：解析为 chrono-tz 的真实时区，确保 Rust 计算出的自然日边界与
+/// ClickHouse 按日分组使用完全相同的 IANA 名称。
+fn normalize_timezone(timezone: Option<String>) -> AppResult<(String, Tz)> {
     let timezone = timezone.unwrap_or_else(|| "UTC".to_owned());
     let timezone = timezone.trim();
-    let valid = !timezone.is_empty()
-        && timezone.len() <= MAX_TIMEZONE_BYTES
-        && timezone
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'_' | b'-' | b'+'));
-    if !valid {
+    if timezone.is_empty() || timezone.len() > MAX_TIMEZONE_BYTES {
         return Err(AppError::BadRequest {
             message: "timezone 必须是合法且不超过 64 字节的 IANA 时区名称".to_owned(),
         });
     }
-    Ok(timezone.to_owned())
+    let parsed = timezone.parse::<Tz>().map_err(|_| AppError::BadRequest {
+        message: format!("timezone 不是有效的 IANA 时区名称: {timezone}"),
+    })?;
+    Ok((timezone.to_owned(), parsed))
+}
+
+fn local_day_start_utc(timezone: Tz, date: NaiveDate) -> AppResult<DateTime<Utc>> {
+    // 少数 IANA 时区会恰好在午夜向前切换，使 00:00 不存在。逐分钟寻找该日期第一次
+    // 出现的本地时间，既能覆盖整点和半小时切换，也不会用固定 24 小时假设破坏自然日。
+    for minute_of_day in 0..(24 * 60) {
+        let hour = minute_of_day / 60;
+        let minute = minute_of_day % 60;
+        let local =
+            timezone.with_ymd_and_hms(date.year(), date.month(), date.day(), hour, minute, 0);
+        match local {
+            LocalResult::Single(value) => return Ok(value.with_timezone(&Utc)),
+            // 午夜回拨产生两个同名本地时刻时，取较早的绝对时间作为自然日开端。
+            LocalResult::Ambiguous(first, second) => {
+                return Ok(first.min(second).with_timezone(&Utc));
+            }
+            LocalResult::None => {}
+        }
+    }
+    Err(AppError::BadRequest {
+        message: format!("时区 {timezone} 中不存在本地日期 {date}"),
+    })
 }
 
 async fn load_usage_user_directory(
@@ -521,47 +424,36 @@ async fn query_usage_totals(
         .bind(query.end_at.timestamp_millis())
         .fetch_one::<UsageTotalsRow>()
         .await
-        .map_err(|source| usage_query_error("period_totals", scope, query, None, source))
+        .map_err(|source| usage_query_error("period_totals", scope, query, source))
 }
 
-async fn query_usage_timeline(
+async fn query_usage_daily(
     state: &AppState,
     scope: UsageScope,
-    query: &NormalizedUsageTimelineQuery,
-) -> AppResult<Vec<UsageTimelineRow>> {
-    // 将选定区间从 start_at 起严格等分为 point_count 个桶。使用相对毫秒位置计算桶序号，
-    // 不再对齐自然小时或自然日；这样无论选择一天还是三天，X 轴都完整覆盖原区间。
-    // provider 必须参与分组，避免不同厂商恰好使用同名模型时被错误合并。
+    query: &NormalizedUsageRange,
+) -> AppResult<Vec<UsageDailyRow>> {
+    // 时间过滤仍使用 UTC 索引友好的原始列边界；分组日期显式转换到用户时区，确保夏令时
+    // 切换日即使只有 23/25 小时也只形成一个正确的本地自然日。
     let current_user_sql = "SELECT \
-            toUInt64(intDiv(\
-                (toUnixTimestamp64Milli(request_started_at) - ?) * ?, \
-                ?\
-            )) AS bucket_index, \
-            provider, \
-            ifNull(model, '未记录') AS model, \
-            toString(sum(total_tokens)) AS total_tokens_text \
+            toString(toDate(request_started_at, ?)) AS usage_date, \
+            toString(sum(total_tokens)) AS total_tokens_text, \
+            count() AS request_count \
          FROM ? \
          WHERE user_id = ? \
            AND request_started_at >= fromUnixTimestamp64Milli(?, 'UTC') \
            AND request_started_at < fromUnixTimestamp64Milli(?, 'UTC') \
-         GROUP BY bucket_index, provider, model \
-         HAVING sum(total_tokens) > 0 \
-         ORDER BY bucket_index, sum(total_tokens) DESC";
+         GROUP BY usage_date \
+         ORDER BY usage_date";
     let all_users_sql = "SELECT \
-            toUInt64(intDiv(\
-                (toUnixTimestamp64Milli(request_started_at) - ?) * ?, \
-                ?\
-            )) AS bucket_index, \
-            provider, \
-            ifNull(model, '未记录') AS model, \
-            toString(sum(total_tokens)) AS total_tokens_text \
+            toString(toDate(request_started_at, ?)) AS usage_date, \
+            toString(sum(total_tokens)) AS total_tokens_text, \
+            count() AS request_count \
          FROM ? \
          WHERE user_id IS NOT NULL \
            AND request_started_at >= fromUnixTimestamp64Milli(?, 'UTC') \
            AND request_started_at < fromUnixTimestamp64Milli(?, 'UTC') \
-         GROUP BY bucket_index, provider, model \
-         HAVING sum(total_tokens) > 0 \
-         ORDER BY bucket_index, sum(total_tokens) DESC";
+         GROUP BY usage_date \
+         ORDER BY usage_date";
 
     let request = state
         .clickhouse()
@@ -569,28 +461,18 @@ async fn query_usage_timeline(
             UsageScope::CurrentUser(_) => current_user_sql,
             UsageScope::AllUsers => all_users_sql,
         })
-        .bind(query.range.start_at.timestamp_millis())
-        .bind(i64::from(query.point_count))
-        .bind(query.range.duration_millis())
+        .bind(query.timezone.as_str())
         .bind(Identifier(state.config().request_log_table.as_str()));
     let request = match scope {
         UsageScope::CurrentUser(user_id) => request.bind(user_id),
         UsageScope::AllUsers => request,
     };
     request
-        .bind(query.range.start_at.timestamp_millis())
-        .bind(query.range.end_at.timestamp_millis())
-        .fetch_all::<UsageTimelineRow>()
+        .bind(query.start_at.timestamp_millis())
+        .bind(query.end_at.timestamp_millis())
+        .fetch_all::<UsageDailyRow>()
         .await
-        .map_err(|source| {
-            usage_query_error(
-                "timeline",
-                scope,
-                &query.range,
-                Some(query.point_count),
-                source,
-            )
-        })
+        .map_err(|source| usage_query_error("daily", scope, query, source))
 }
 
 async fn query_usage_models(
@@ -642,7 +524,7 @@ async fn query_usage_models(
         .bind(query.end_at.timestamp_millis())
         .fetch_all::<UsageModelRow>()
         .await
-        .map_err(|source| usage_query_error("model_distribution", scope, query, None, source))
+        .map_err(|source| usage_query_error("model_distribution", scope, query, source))
 }
 
 async fn query_usage_breakdown(
@@ -694,7 +576,6 @@ async fn query_usage_api_keys(
                 "api_key_distribution",
                 UsageScope::CurrentUser(user_id),
                 query,
-                None,
                 source,
             )
         })
@@ -726,13 +607,7 @@ async fn query_usage_users(
         .fetch_all::<UsageUserRow>()
         .await
         .map_err(|source| {
-            usage_query_error(
-                "user_distribution",
-                UsageScope::AllUsers,
-                query,
-                None,
-                source,
-            )
+            usage_query_error("user_distribution", UsageScope::AllUsers, query, source)
         })
 }
 
@@ -740,7 +615,6 @@ fn usage_query_error(
     query_kind: &'static str,
     scope: UsageScope,
     query: &NormalizedUsageRange,
-    point_count: Option<u16>,
     source: clickhouse::error::Error,
 ) -> AppError {
     error!(
@@ -750,7 +624,6 @@ fn usage_query_error(
         scoped_user_id = ?scope.user_id(),
         start_at = %query.start_at,
         end_at = %query.end_at,
-        point_count,
         timezone = %query.timezone,
         "Dashboard 查询 ClickHouse token 用量统计失败"
     );
@@ -759,77 +632,63 @@ fn usage_query_error(
     }
 }
 
-fn build_usage_timeline(
-    rows: Vec<UsageTimelineRow>,
-    query: &NormalizedUsageTimelineQuery,
-) -> AppResult<Vec<UsageTimelineBucket>> {
-    let point_count_i64 = i64::from(query.point_count);
-    let start_millis = query.range.start_at.timestamp_millis();
-    let duration_millis = query.range.duration_millis();
-    let division_rounding = point_count_i64 - 1;
-
-    // 先生成完整桶集合，再填充 ClickHouse 返回的非空模型分组。即使整个区间没有请求，
-    // 响应也稳定包含 point_count 个桶，前端无需根据已有数据猜测 X 轴范围。
-    let mut timeline = (0..query.point_count)
-        .map(|index| {
-            // SQL 使用 floor(relative_millis * point_count / duration) 计算桶序号，因此
-            // 第 i 个桶的整数毫秒边界应为 ceil(duration * i / point_count)。两者采用同一
-            // 取整规则后，即使区间长度不能整除点数，边界毫秒也不会落入相邻桶。
-            let started_at_millis = start_millis
-                + (duration_millis * i64::from(index) + division_rounding) / point_count_i64;
-            let ended_at_millis = start_millis
-                + (duration_millis * i64::from(index + 1) + division_rounding) / point_count_i64;
-            let started_at =
-                DateTime::from_timestamp_millis(started_at_millis).ok_or_else(|| {
-                    AppError::DbQuery {
-                        message: format!("用量时间桶起点超出支持范围: {started_at_millis}"),
-                    }
-                })?;
-            let ended_at = DateTime::from_timestamp_millis(ended_at_millis).ok_or_else(|| {
-                AppError::DbQuery {
-                    message: format!("用量时间桶终点超出支持范围: {ended_at_millis}"),
-                }
-            })?;
-            Ok(UsageTimelineBucket {
-                index,
-                started_at,
-                ended_at,
-                models: Vec::new(),
-            })
-        })
-        .collect::<AppResult<Vec<_>>>()?;
-
+fn build_daily_usage(
+    rows: Vec<UsageDailyRow>,
+    query: &NormalizedUsageRange,
+) -> AppResult<Vec<UsageDailyPoint>> {
+    let mut rows_by_date = HashMap::with_capacity(rows.len());
     for row in rows {
-        let index = usize::try_from(row.bucket_index).map_err(|_| AppError::DbQuery {
-            message: format!(
-                "ClickHouse 用量时间桶序号超出支持范围: {}",
-                row.bucket_index
-            ),
-        })?;
-        let Some(bucket) = timeline.get_mut(index) else {
+        let date = NaiveDate::parse_from_str(&row.usage_date, "%Y-%m-%d").map_err(|source| {
             error!(
-                bucket_index = row.bucket_index,
-                point_count = query.point_count,
-                start_at = %query.range.start_at,
-                end_at = %query.range.end_at,
-                "ClickHouse 返回了选定时间范围之外的用量桶"
+                error = %source,
+                usage_date = %row.usage_date,
+                timezone = %query.timezone,
+                "ClickHouse 返回了无法解析的每日用量日期"
+            );
+            AppError::DbQuery {
+                message: format!("ClickHouse 返回无效的每日用量日期 {}", row.usage_date),
+            }
+        })?;
+        if date < query.start_date || date >= query.end_date {
+            error!(
+                usage_date = %date,
+                start_date = %query.start_date,
+                end_date = %query.end_date,
+                timezone = %query.timezone,
+                "ClickHouse 返回了固定年度范围之外的每日用量日期"
             );
             return Err(AppError::DbQuery {
-                message: format!(
-                    "ClickHouse 返回无效用量桶序号 {}，最大允许 {}",
-                    row.bucket_index,
-                    query.point_count - 1
-                ),
+                message: format!("ClickHouse 返回年度范围之外的每日用量日期 {date}"),
             });
-        };
-        bucket.models.push(UsageTimelineModelPoint {
-            provider: row.provider,
-            model: row.model,
-            total_tokens: row.total_tokens_text,
-        });
+        }
+        if rows_by_date.insert(date, row).is_some() {
+            return Err(AppError::DbQuery {
+                message: format!("ClickHouse 返回重复的每日用量日期 {date}"),
+            });
+        }
     }
 
-    Ok(timeline)
+    // 响应始终包含连续 365 天。零值补齐放在后端完成，前端只负责把稳定的数据契约映射
+    // 为 53×7 网格，避免不同时区或跨年时由浏览器再次推导日期产生偏差。
+    (0..USAGE_YEAR_DAYS)
+        .map(|offset| {
+            let date = query
+                .start_date
+                .checked_add_days(Days::new(offset))
+                .ok_or_else(|| AppError::DbQuery {
+                    message: format!("补齐每日用量日期时超出支持范围: offset={offset}"),
+                })?;
+            let row = rows_by_date.remove(&date);
+            Ok(UsageDailyPoint {
+                date,
+                total_tokens: row
+                    .as_ref()
+                    .map_or_else(|| "0".to_owned(), |row| row.total_tokens_text.clone()),
+                request_count: row
+                    .map_or_else(|| "0".to_owned(), |row| row.request_count.to_string()),
+            })
+        })
+        .collect()
 }
 
 fn parse_aggregate_for_percentage(value: &str) -> f64 {

@@ -12,13 +12,6 @@ export function todayInputValue() {
   return dateInputValue(new Date());
 }
 
-/** 返回本地日期输入框使用的若干天前日期，0 表示今天。 */
-export function daysAgoInputValue(daysAgo: number) {
-  const date = new Date();
-  date.setDate(date.getDate() - Math.max(0, Math.trunc(daysAgo)));
-  return dateInputValue(date);
-}
-
 function dateInputValue(value: Date) {
   const year = value.getFullYear();
   const month = String(value.getMonth() + 1).padStart(2, "0");
@@ -30,18 +23,6 @@ export function localDateRangeIso(dateValue: string) {
   const selectedDate = dateValue || todayInputValue();
   const start = new Date(`${selectedDate}T00:00:00`);
   const end = new Date(start);
-  end.setDate(end.getDate() + 1);
-
-  return {
-    startAt: start.toISOString(),
-    endAt: end.toISOString(),
-  };
-}
-
-/** 将两个本地日期转换为左闭右开的 UTC ISO 区间，结束日期按完整自然日计算。 */
-export function localDateIntervalIso(startDateValue: string, endDateValue: string) {
-  const start = new Date(`${startDateValue}T00:00:00`);
-  const end = new Date(`${endDateValue}T00:00:00`);
   end.setDate(end.getDate() + 1);
 
   return {

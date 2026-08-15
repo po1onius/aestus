@@ -337,7 +337,6 @@ export interface ListRequestLogsResponse {
   next_cursor: RequestLogCursor | null;
 }
 
-export type UsagePointCount = 20 | 50;
 export type UsageScope = "current_user" | "all_users";
 
 export interface UsagePeriod {
@@ -345,17 +344,10 @@ export interface UsagePeriod {
   request_count: string;
 }
 
-export interface UsageTimelineModelPoint {
-  provider: string;
-  model: string;
+export interface UsageDailyPoint {
+  date: string;
   total_tokens: string;
-}
-
-export interface UsageTimelineBucket {
-  index: number;
-  started_at: string;
-  ended_at: string;
-  models: UsageTimelineModelPoint[];
+  request_count: string;
 }
 
 export interface UsageModelPoint {
@@ -389,19 +381,10 @@ export interface UsageResponse {
   end_at: string;
   timezone: string;
   period: UsagePeriod;
+  daily: UsageDailyPoint[];
   models: UsageModelPoint[];
   api_keys: UsageApiKeyPoint[];
   users: UsageUserPoint[];
-  generated_at: string;
-}
-
-export interface UsageTimelineResponse {
-  scope: UsageScope;
-  start_at: string;
-  end_at: string;
-  point_count: UsagePointCount;
-  timezone: string;
-  timeline: UsageTimelineBucket[];
   generated_at: string;
 }
 
