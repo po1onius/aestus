@@ -242,6 +242,13 @@ export function App() {
       : gptAccountsPage;
 
   useEffect(() => {
+    // 刷新页面时 currentUser 会先短暂为 null。如果此时按普通用户路由归一化，管理员专属
+    // 地址会先被改写为 /dashboard/usage，待身份恢复后又回退到 /admin/accounts。必须等
+    // /dash/auth/me 完成后再按真实角色校验 URL，才能正确保留刷新前的管理员页面。
+    if (authLoading) {
+      return;
+    }
+
     const normalized = normalizeDashboardPath(window.location.pathname, visibleRoutes);
     if (normalized !== window.location.pathname) {
       window.history.replaceState(null, "", normalized);
@@ -254,7 +261,7 @@ export function App() {
 
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
-  }, [visibleRoutes]);
+  }, [authLoading, visibleRoutes]);
 
   useEffect(() => {
     setAuthExpiredHandler((token, error) => expireDashboardSession(token, error));

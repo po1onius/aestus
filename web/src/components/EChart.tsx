@@ -1,18 +1,15 @@
-import { BarChart, PieChart } from "echarts/charts";
+import { BarChart, HeatmapChart, PieChart } from "echarts/charts";
 import { AriaComponent, GridComponent, LegendComponent, TooltipComponent } from "echarts/components";
 import * as echarts from "echarts/core";
 import type { ECharts, EChartsCoreOption } from "echarts/core";
 import { CanvasRenderer } from "echarts/renderers";
-import { Bar3DChart } from "echarts-gl/charts";
-import { Grid3DComponent } from "echarts-gl/components";
 import { useEffect, useRef } from "react";
 
 // 只注册用量页实际使用的图表和组件，避免把完整 ECharts 打入普通用户首屏资源。
 echarts.use([
   BarChart,
+  HeatmapChart,
   PieChart,
-  Bar3DChart,
-  Grid3DComponent,
   AriaComponent,
   GridComponent,
   LegendComponent,

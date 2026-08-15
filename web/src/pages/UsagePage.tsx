@@ -1,4 +1,4 @@
-import { Loader2, RotateCcw } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { type ReactNode, useMemo, useState } from "react";
 import { EChart, type EChartOption } from "../components/EChart";
 import { Metric } from "../components/Metric";
@@ -52,6 +52,12 @@ const CONTRIBUTION_PALETTES = {
 const OTHER_MODEL_PROVIDER = "all";
 const OTHER_MODEL_NAME = "其他模型";
 const OTHER_API_KEY_NAME = "其他 API Key";
+const USAGE_PERIODS = [
+  { value: "year", label: "年", days: 365 },
+  { value: "month", label: "月", days: 30 },
+  { value: "week", label: "周", days: 7 },
+] as const;
+type UsagePeriod = (typeof USAGE_PERIODS)[number]["value"];
 
 export function UsagePage({
   theme,
@@ -59,16 +65,23 @@ export function UsagePage({
   loading,
 }: UsagePageProps) {
   const darkMode = theme === "dark";
-  const [contributionViewRevision, setContributionViewRevision] = useState(0);
+  const [usagePeriod, setUsagePeriod] = useState<UsagePeriod>("year");
   const modelPoints = useMemo(() => compactModelPoints(usage?.models ?? []), [usage]);
   const apiKeyPoints = useMemo(() => compactApiKeyPoints(usage?.api_keys ?? []), [usage]);
   // 管理员排行展示真实的前八名用户，不把剩余用户汇总成一个会干扰名次的“其他用户”。
   const userRankPoints = useMemo(() => (usage?.users ?? []).slice(0, 8), [usage]);
   const usageScope = usage?.scope ?? "current_user";
   const allUsers = usageScope === "all_users";
-  const contributionOption = useMemo(
-    () => buildContributionOption(usage?.daily ?? [], darkMode),
-    [darkMode, usage],
+  const usageActivityOption = useMemo(
+    () => {
+      const daily = usage?.daily ?? [];
+      if (usagePeriod === "year") {
+        return buildContributionOption(daily, darkMode);
+      }
+      const days = USAGE_PERIODS.find((period) => period.value === usagePeriod)?.days ?? 7;
+      return buildDailyBarOption(daily.slice(-days), darkMode);
+    },
+    [darkMode, usage, usagePeriod],
   );
   const modelShareOption = useMemo(
     () => buildModelShareOption(modelPoints, darkMode),
@@ -141,29 +154,21 @@ export function UsagePage({
         <div className="grid gap-4 xl:grid-cols-2" aria-busy={loading}>
           <article className={`${panelClass} grid gap-3 p-4 xl:col-span-2`}>
             <ChartHeading
-              title="近一年 Token 活跃度"
+              title={<UsagePeriodTabs value={usagePeriod} onChange={setUsagePeriod} />}
               controls={
-                <div className="flex flex-wrap items-center justify-end gap-3">
-                  <ContributionLegend darkMode={darkMode} />
-                  <span className="text-xs text-slate-500 dark:text-slate-400">
-                    拖动旋转 · 滚轮缩放 · 高度为对数比例
-                  </span>
-                  <button
-                    type="button"
-                    className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 text-xs font-medium text-slate-600 transition hover:border-slate-300 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:border-slate-600 dark:hover:bg-slate-800"
-                    onClick={() => setContributionViewRevision((current) => current + 1)}
-                  >
-                    <RotateCcw size={14} />
-                    重置视角
-                  </button>
-                </div>
+                usagePeriod === "year" ? <ContributionLegend darkMode={darkMode} /> : undefined
               }
             />
             <EChart
-              key={contributionViewRevision}
-              option={contributionOption}
-              ariaLabel="最近 365 天每日 Token 用量三维贡献图"
-              className="h-[34rem] min-h-[30rem] w-full"
+              option={usageActivityOption}
+              ariaLabel={
+                usagePeriod === "year"
+                  ? "最近 365 天每日 Token 用量贡献热力图"
+                  : usagePeriod === "month"
+                    ? "最近 30 天每日 Token 用量柱状图"
+                    : "最近 7 天每日 Token 用量柱状图"
+              }
+              className={usagePeriod === "year" ? "h-56 min-h-52 w-full" : "h-72 min-h-64 w-full"}
             />
           </article>
           <article className={`${panelClass} grid gap-3 p-4`}>
@@ -218,17 +223,57 @@ function ChartHeading({
   title,
   controls,
 }: {
-  title: string;
+  title: ReactNode;
   controls?: ReactNode;
 }) {
   return (
     <div className="flex min-h-8 flex-wrap items-center justify-between gap-3">
-      <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">{title}</h2>
+      {typeof title === "string" ? (
+        <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">{title}</h2>
+      ) : (
+        title
+      )}
       {controls && (
         <div className="flex items-center gap-2 text-slate-500 dark:text-slate-400">
           {controls}
         </div>
       )}
+    </div>
+  );
+}
+
+function UsagePeriodTabs({
+  value,
+  onChange,
+}: {
+  value: UsagePeriod;
+  onChange: (period: UsagePeriod) => void;
+}) {
+  return (
+    <div
+      className="inline-flex rounded-lg bg-slate-100 p-1 dark:bg-slate-800"
+      role="tablist"
+      aria-label="Token 用量统计周期"
+    >
+      {USAGE_PERIODS.map((period) => {
+        const selected = value === period.value;
+        return (
+          <button
+            key={period.value}
+            type="button"
+            role="tab"
+            aria-selected={selected}
+            className={`min-w-11 rounded-md px-3 py-1.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600/30 dark:focus-visible:ring-indigo-400/35 ${
+              selected
+                ? "bg-white text-indigo-700 shadow-sm dark:bg-slate-950 dark:text-indigo-300"
+                : "text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100"
+            }`}
+            onClick={() => onChange(period.value)}
+          >
+            {period.label}
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -294,22 +339,29 @@ function chartTooltip(darkMode: boolean) {
 const WEEKDAY_LABELS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 
 interface ContributionChartDatum {
-  value: [string, string, number];
+  value: [number, number, number];
   date: string;
   totalTokens: string;
   requestCount: string;
-  activeRank: number | null;
-  itemStyle: { color: string; opacity: number };
-  label?: {
-    show: boolean;
-    formatter: string;
-    textStyle: { color: string; fontSize: number; fontWeight: number };
+  itemStyle: {
+    color: string;
+    borderColor: string;
+    borderWidth: number;
+    borderRadius: number;
   };
 }
 
+interface DailyBarChartDatum {
+  value: number;
+  date: string;
+  totalTokens: string;
+  requestCount: string;
+  itemStyle: { color: string; borderRadius: [number, number, number, number] };
+}
+
 /**
- * 将后端连续 365 个自然日映射为 GitHub 风格的“周 × 星期”地形。
- * Z 轴使用 log10(token + 1)，既保留峰谷趋势，也避免单个异常高峰压扁其余日期；Tooltip
+ * 将后端连续 365 个自然日映射为 GitHub 风格的“周 × 星期”二维贡献网格。
+ * 色阶使用相对于年度最小活跃日的对数比例，避免单个异常高峰吞掉常规用量差异；Tooltip
  * 始终展示原始精确值，不把视觉变换误当成业务数据。
  */
 function buildContributionOption(points: UsageDailyPoint[], darkMode: boolean): EChartOption {
@@ -322,13 +374,16 @@ function buildContributionOption(points: UsageDailyPoint[], darkMode: boolean): 
   const weekCategories = Array.from({ length: weekCount }, (_, index) => String(index));
   const monthLabels = Array.from({ length: weekCount }, () => "");
   const tokenValues = parsedPoints.map(({ point }) => parseTokenCount(point.total_tokens));
-  const heightValues = tokenValues.map(logarithmicTokenHeight);
-  const maxHeight = Math.max(0, ...heightValues);
+  const activeTokenValues = tokenValues.filter((tokens) => tokens > 0n);
+  const minimumActiveTokens = activeTokenValues.reduce<bigint | null>(
+    (minimum, tokens) => (minimum === null || tokens < minimum ? tokens : minimum),
+    null,
+  );
+  const intensityValues = tokenValues.map((tokens) =>
+    relativeLogarithmicTokenIntensity(tokens, minimumActiveTokens),
+  );
+  const maxIntensity = Math.max(0, ...intensityValues);
   const palette = CONTRIBUTION_PALETTES[darkMode ? "dark" : "light"];
-  const activeRanks = [...parsedPoints]
-    .filter(({ point }) => parseTokenCount(point.total_tokens) > 0n)
-    .sort((left, right) => compareTokenCounts(right.point.total_tokens, left.point.total_tokens));
-  const rankByDate = new Map(activeRanks.map(({ point }, index) => [point.date, index + 1]));
 
   const data: ContributionChartDatum[] = parsedPoints.map(({ point, date }, index) => {
     const weekdayIndex = mondayBasedWeekday(date);
@@ -338,29 +393,27 @@ function buildContributionOption(points: UsageDailyPoint[], darkMode: boolean): 
       monthLabels[weekIndex] = month === 1 ? `${date.getUTCFullYear()}年1月` : `${month}月`;
     }
     const tokenValue = tokenValues[index];
-    const height = heightValues[index];
-    const colorLevel = contributionColorLevel(tokenValue, height, maxHeight);
+    const intensity = intensityValues[index];
+    const colorLevel = contributionColorLevel(tokenValue, intensity, maxIntensity);
     const isToday = index === parsedPoints.length - 1;
     return {
-      value: [String(weekIndex), WEEKDAY_LABELS[weekdayIndex], height],
+      value: [weekIndex, weekdayIndex, intensity],
       date: point.date,
       totalTokens: point.total_tokens,
       requestCount: point.request_count,
-      activeRank: rankByDate.get(point.date) ?? null,
-      itemStyle: { color: palette[colorLevel], opacity: isToday ? 1 : 0.94 },
-      ...(isToday
-        ? {
-            label: {
-              show: true,
-              formatter: "今天",
-              textStyle: {
-                color: darkMode ? "#f8fafc" : "#334155",
-                fontSize: 11,
-                fontWeight: 600,
-              },
-            },
-          }
-        : {}),
+      itemStyle: {
+        color: palette[colorLevel],
+        // 今天使用主题强调色描边，既能定位当前日期，也不会覆盖 GitHub 风格的用量色阶。
+        borderColor: isToday
+          ? darkMode
+            ? "#a5b4fc"
+            : "#4f46e5"
+          : darkMode
+            ? "#0f172a"
+            : "#ffffff",
+        borderWidth: isToday ? 2 : 1.5,
+        borderRadius: 2,
+      },
     };
   });
 
@@ -376,86 +429,142 @@ function buildContributionOption(points: UsageDailyPoint[], darkMode: boolean): 
         if (!datum) {
           return "";
         }
-        const rank = datum.activeRank === null ? "" : `<br/>活跃日排名：第 ${datum.activeRank} 名`;
-        return `${formatContributionDate(datum.date)}<br/>Token：${formatTokenCount(datum.totalTokens)}<br/>请求：${formatTokenCount(datum.requestCount)} 次${rank}`;
+        return `${formatContributionDate(datum.date)}<br/>Token：${formatTokenCount(datum.totalTokens)}<br/>请求：${formatTokenCount(datum.requestCount)} 次`;
       },
     },
-    grid3D: {
-      left: 24,
-      right: 24,
-      top: 0,
-      bottom: 12,
-      boxWidth: 220,
-      boxDepth: 46,
-      boxHeight: 72,
-      environment: darkMode ? "#0f172a" : "#ffffff",
-      axisPointer: { show: false },
-      viewControl: {
-        projection: "perspective",
-        alpha: 28,
-        beta: -32,
-        distance: 255,
-        minDistance: 165,
-        maxDistance: 360,
-        minAlpha: 12,
-        maxAlpha: 65,
-        minBeta: -70,
-        maxBeta: 20,
-        rotateSensitivity: 0.75,
-        zoomSensitivity: 0.8,
-        panSensitivity: 0,
-        autoRotate: false,
-      },
-      light: {
-        main: { intensity: darkMode ? 1.3 : 1.15, alpha: 38, beta: -30, shadow: false },
-        ambient: { intensity: darkMode ? 0.65 : 0.8 },
-      },
+    grid: {
+      left: 42,
+      right: 12,
+      top: 34,
+      height: 140,
     },
-    xAxis3D: {
+    xAxis: {
       type: "category",
-      name: "月份 / 周",
       data: weekCategories,
+      position: "top",
       axisLabel: {
         interval: 0,
         formatter: (_value: string, index: number) => monthLabels[index] ?? "",
-        textStyle: { color: colors.mutedText, fontSize: 10 },
+        color: colors.mutedText,
+        fontSize: 10,
+        margin: 10,
       },
-      axisLine: { lineStyle: { color: colors.axis, width: 1 } },
+      axisLine: { show: false },
       axisTick: { show: false },
       splitLine: { show: false },
     },
-    yAxis3D: {
+    yAxis: {
       type: "category",
-      name: "星期",
       data: WEEKDAY_LABELS,
-      axisLabel: { textStyle: { color: colors.mutedText, fontSize: 10 } },
-      axisLine: { lineStyle: { color: colors.axis, width: 1 } },
+      inverse: true,
+      axisLabel: {
+        color: colors.mutedText,
+        fontSize: 10,
+        formatter: (value: string) => (["周一", "周三", "周五"].includes(value) ? value : ""),
+      },
+      axisLine: { show: false },
       axisTick: { show: false },
-      splitLine: { lineStyle: { color: darkMode ? "#334155" : "#e2e8f0", width: 1 } },
-    },
-    zAxis3D: {
-      type: "value",
-      name: "Token 强度（log）",
-      min: 0,
-      max: Math.max(1, Math.ceil(maxHeight * 1.15)),
-      axisLabel: { show: false },
-      axisLine: { lineStyle: { color: colors.axis, width: 1 } },
-      axisTick: { show: false },
-      splitLine: { lineStyle: { color: darkMode ? "#334155" : "#e2e8f0", width: 1 } },
+      splitLine: { show: false },
     },
     series: [
       {
         name: "每日 Token",
-        type: "bar3D",
-        coordinateSystem: "cartesian3D",
+        type: "heatmap",
         data,
-        minHeight: 0.7,
-        bevelSize: 0.12,
-        bevelSmoothness: 2,
-        shading: "lambert",
+        progressive: 0,
+        itemStyle: {
+          color: palette[0],
+          borderColor: darkMode ? "#0f172a" : "#ffffff",
+          borderWidth: 1.5,
+          borderRadius: 2,
+        },
         emphasis: {
-          label: { show: false },
-          itemStyle: { opacity: 1 },
+          itemStyle: {
+            borderColor: darkMode ? "#e2e8f0" : "#334155",
+            borderWidth: 2,
+          },
+        },
+      },
+    ],
+  };
+}
+
+/**
+ * 月、周视图直接截取年度接口中的连续日数据，不发起新的请求。柱高使用原始 Token 数量，
+ * 色阶继续沿用年度贡献图的相对对数强度，从而保持三个周期之间一致的视觉语义。
+ */
+function buildDailyBarOption(points: UsageDailyPoint[], darkMode: boolean): EChartOption {
+  const colors = chartThemeColors(darkMode);
+  const palette = CONTRIBUTION_PALETTES[darkMode ? "dark" : "light"];
+  const tokenValues = points.map((point) => parseTokenCount(point.total_tokens));
+  const minimumActiveTokens = tokenValues.reduce<bigint | null>(
+    (minimum, tokens) =>
+      tokens > 0n && (minimum === null || tokens < minimum) ? tokens : minimum,
+    null,
+  );
+  const intensityValues = tokenValues.map((tokens) =>
+    relativeLogarithmicTokenIntensity(tokens, minimumActiveTokens),
+  );
+  const maxIntensity = Math.max(0, ...intensityValues);
+  const data: DailyBarChartDatum[] = points.map((point, index) => ({
+    value: chartValue(point.total_tokens),
+    date: point.date,
+    totalTokens: point.total_tokens,
+    requestCount: point.request_count,
+    itemStyle: {
+      color: palette[
+        contributionColorLevel(tokenValues[index], intensityValues[index], maxIntensity)
+      ],
+      borderRadius: [4, 4, 0, 0],
+    },
+  }));
+
+  return {
+    aria: { enabled: true },
+    animationDuration: 350,
+    textStyle: { fontFamily: CHART_FONT_FAMILY },
+    grid: { top: 18, right: 20, bottom: 42, left: 68 },
+    tooltip: {
+      ...chartTooltip(darkMode),
+      trigger: "item",
+      formatter: (parameter: { data?: DailyBarChartDatum }) => {
+        const datum = parameter.data;
+        if (!datum) {
+          return "";
+        }
+        return `${formatContributionDate(datum.date)}<br/>Token：${formatTokenCount(datum.totalTokens)}<br/>请求：${formatTokenCount(datum.requestCount)} 次`;
+      },
+    },
+    xAxis: {
+      type: "category",
+      data: points.map((point) => point.date),
+      axisLabel: {
+        color: colors.mutedText,
+        interval: points.length <= 7 ? 0 : 4,
+        formatter: (value: string) => formatShortUsageDate(value),
+      },
+      axisLine: { lineStyle: { color: colors.axis } },
+      axisTick: { show: false },
+    },
+    yAxis: {
+      type: "value",
+      minInterval: 1,
+      axisLabel: {
+        color: colors.mutedText,
+        formatter: (value: number) => chartNumberFormatter.format(value),
+      },
+      splitLine: { lineStyle: { color: colors.grid } },
+    },
+    series: [
+      {
+        name: "每日 Token",
+        type: "bar",
+        data,
+        barMaxWidth: points.length <= 7 ? 52 : 22,
+        showBackground: true,
+        backgroundStyle: {
+          color: darkMode ? "rgba(39, 49, 61, 0.45)" : "rgba(229, 231, 235, 0.55)",
+          borderRadius: [4, 4, 0, 0],
         },
       },
     ],
@@ -475,24 +584,21 @@ function mondayBasedWeekday(date: Date) {
   return (date.getUTCDay() + 6) % 7;
 }
 
-function logarithmicTokenHeight(tokens: bigint) {
-  if (tokens <= 0n) {
+function relativeLogarithmicTokenIntensity(tokens: bigint, minimumActiveTokens: bigint | null) {
+  if (tokens <= 0n || minimumActiveTokens === null) {
     return 0;
   }
-  return Math.log10(Number(tokens) + 1);
+
+  // 与年度最小活跃日计算比值，可以在保留对数抗极值能力的同时，让常规用量分布到多个
+  // 绿色等级；零用量始终独占灰色等级，不会与最低活跃日混淆。
+  return Math.log10(Number(tokens) / Number(minimumActiveTokens) + 1);
 }
 
-function contributionColorLevel(tokens: bigint, height: number, maxHeight: number) {
-  if (tokens <= 0n || maxHeight <= 0) {
+function contributionColorLevel(tokens: bigint, intensity: number, maxIntensity: number) {
+  if (tokens <= 0n || maxIntensity <= 0) {
     return 0;
   }
-  return Math.min(4, Math.max(1, Math.ceil((height / maxHeight) * 4)));
-}
-
-function compareTokenCounts(left: string, right: string) {
-  const leftValue = parseTokenCount(left);
-  const rightValue = parseTokenCount(right);
-  return leftValue > rightValue ? 1 : leftValue < rightValue ? -1 : 0;
+  return Math.min(4, Math.max(1, Math.ceil((intensity / maxIntensity) * 4)));
 }
 
 function formatContributionDate(value: string) {
@@ -507,6 +613,11 @@ function formatContributionDate(value: string) {
     day: "numeric",
     weekday: "long",
   }).format(date);
+}
+
+function formatShortUsageDate(value: string) {
+  const date = parseUsageDate(value);
+  return date ? `${date.getUTCMonth() + 1}/${date.getUTCDate()}` : value;
 }
 
 function buildModelShareOption(points: UsageModelPoint[], darkMode: boolean): EChartOption {
