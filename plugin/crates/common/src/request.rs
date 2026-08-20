@@ -14,7 +14,6 @@ const SPARK_IMAGE_UNSUPPORTED_MARKER: &str = "<sub2api-codex-spark-image-unsuppo
 const SPARK_IMAGE_UNSUPPORTED_INSTRUCTIONS: &str = "<sub2api-codex-spark-image-unsupported>\nThe current model is gpt-5.3-codex-spark, which does not support image generation, image editing, image input, the `image_generation` tool, or Codex `image_gen`/`$imagegen` workflows. If the user asks for image generation or image editing, clearly explain this model limitation and ask them to switch to a non-Spark Codex model such as gpt-5.3-codex or gpt-5.4. Do not claim that the local environment merely lacks image_gen tooling, and do not suggest CLI fallback as the primary fix while the model remains Spark.\n</sub2api-codex-spark-image-unsupported>";
 const UNSUPPORTED_OAUTH_FIELDS: &[&str] = &[
     "max_output_tokens",
-    "max_completion_tokens",
     "temperature",
     "top_p",
     "frequency_penalty",
@@ -46,8 +45,8 @@ pub fn transform_oauth_body(body: &[u8]) -> Result<OAuthTransformOutput, String>
 
     let original_model = require_model(object)?.to_owned();
     reject_previous_response_id(object)?;
-    // 是否需要保留 item_reference/id 必须在 tools/tool_choice 被归一化前判定，
-    // 与 sub2api 的 OAuth HTTP/SSE 路径保持同一时点和同一组信号。
+    // 是否需要保留 item_reference/id 必须在 namespace 工具被平铺前判定，确保只依据
+    // 调用方提交的标准 Responses 请求决定续接语义。
     let preserve_references = needs_tool_continuation(object);
     // sub2api 的 HTTP/SSE OAuth 路径在其余 Codex 字段归一化之前摊平 namespace。
     // 映射不能放进上游 body/header，只通过宿主的 opaque attempt context 回到响应组件。
@@ -67,9 +66,6 @@ pub fn transform_oauth_body(body: &[u8]) -> Result<OAuthTransformOutput, String>
     }
 
     normalize_reasoning(object, inferred_effort);
-    convert_legacy_functions(object);
-    normalize_tools(object);
-    normalize_tool_choice(object);
     normalize_service_tier(object);
     strip_unsupported_verbosity(object);
 
@@ -94,9 +90,9 @@ pub fn transform_oauth_body(body: &[u8]) -> Result<OAuthTransformOutput, String>
     })
 }
 
-/// 把 Codex 私有 namespace declaration 转成 ChatGPT HTTP Responses 可接受的平铺 function。
-/// `image_gen` 是上游原生内建 namespace，必须保持原样。所有碰撞在发送前显式拒绝，不能
-/// 让响应阶段根据字符串猜测原始归属。
+/// 把标准 Responses namespace declaration 转成 ChatGPT Codex HTTP 接口可接受的平铺
+/// function。`image_gen` 是上游原生内建 namespace，必须保持原样。所有碰撞在发送前
+/// 显式拒绝，不能让响应阶段根据字符串猜测原始归属。
 fn flatten_response_namespaces(
     request: &mut Map<String, Value>,
 ) -> Result<BTreeMap<String, NamespaceToolName>, String> {
@@ -222,43 +218,15 @@ fn flatten_response_namespaces(
     if let Some(input) = request.get_mut("input") {
         rewrite_namespace_qualified_input_calls(input, &names);
     }
-    let namespace_choice = request
-        .get("tool_choice")
-        .and_then(Value::as_object)
-        .is_some_and(|choice| {
-            choice.get("type").and_then(Value::as_str).map(str::trim) == Some("namespace")
-                && non_empty_string(choice.get("name")).as_deref() != Some("image_gen")
-        });
-    if namespace_choice {
-        request.insert("tool_choice".to_owned(), Value::String("auto".to_owned()));
-    } else if let Some(Value::Object(choice)) = request.get_mut("tool_choice") {
-        rewrite_namespace_qualified_call(choice, &names);
-    }
     Ok(names)
 }
 
 fn namespace_children(tool: &Map<String, Value>) -> Option<&Vec<Value>> {
-    if let Some(children) = tool.get("tools").and_then(Value::as_array)
-        && !children.is_empty()
-    {
-        return Some(children);
-    }
-    tool.get("children").and_then(Value::as_array)
+    tool.get("tools").and_then(Value::as_array)
 }
 
-/// 取得 namespace 的有效 children 数组所有权。读取规则必须与 namespace_children
-/// 完全一致：非空 tools 优先，否则回退到 children。
 fn take_namespace_children(tool: &mut Map<String, Value>) -> Vec<Value> {
-    let key = if tool
-        .get("tools")
-        .and_then(Value::as_array)
-        .is_some_and(|children| !children.is_empty())
-    {
-        "tools"
-    } else {
-        "children"
-    };
-    match tool.remove(key) {
+    match tool.remove("tools") {
         Some(Value::Array(children)) => children,
         _ => Vec::new(),
     }
@@ -547,28 +515,14 @@ fn normalize_reasoning(object: &mut Map<String, Value>, inferred_effort: Option<
     }
 }
 
-/// sub2api 默认 fast policy 没有匹配规则时只做标准 tier 归一化：`fast` 是
-/// `priority` 的别名，未知值删除，OpenAI 文档中的合法值保留。
+/// 官方 Responses 将 `fast` 定义为 `priority` 的请求别名，响应也统一回显
+/// `priority`。这里只转换这一组等价标准值；其他值保持原样，由上游按自身能力校验。
 fn normalize_service_tier(object: &mut Map<String, Value>) {
-    let Some(raw) = object.get("service_tier").and_then(Value::as_str) else {
-        return;
-    };
-    let normalized = match raw.trim().to_ascii_lowercase().as_str() {
-        "fast" => Some("priority"),
-        "priority" => Some("priority"),
-        "flex" => Some("flex"),
-        "auto" => Some("auto"),
-        "default" => Some("default"),
-        "scale" => Some("scale"),
-        _ => None,
-    };
-    match normalized {
-        Some(value) => {
-            object.insert("service_tier".to_owned(), Value::String(value.to_owned()));
-        }
-        None => {
-            object.remove("service_tier");
-        }
+    if object.get("service_tier").and_then(Value::as_str) == Some("fast") {
+        object.insert(
+            "service_tier".to_owned(),
+            Value::String("priority".to_owned()),
+        );
     }
 }
 
@@ -611,172 +565,6 @@ fn model_supports_verbosity(model: &str) -> bool {
         .is_ok_and(|minor| minor >= 3)
 }
 
-fn convert_legacy_functions(object: &mut Map<String, Value>) {
-    if let Some(Value::Array(functions)) = object.remove("functions") {
-        object.insert(
-            "tools".to_owned(),
-            Value::Array(
-                functions
-                    .into_iter()
-                    .map(|function| json!({"type": "function", "function": function}))
-                    .collect(),
-            ),
-        );
-    }
-    if let Some(function_call) = object.remove("function_call") {
-        match function_call {
-            Value::String(mode) => {
-                object.insert("tool_choice".to_owned(), Value::String(mode));
-            }
-            Value::Object(mut choice) => {
-                if let Some(Value::String(name)) = choice.remove("name")
-                    && !name.trim().is_empty()
-                {
-                    object.insert(
-                        "tool_choice".to_owned(),
-                        json!({"type": "function", "name": name}),
-                    );
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-fn normalize_tools(object: &mut Map<String, Value>) {
-    let Some(Value::Array(tools)) = object.get_mut("tools") else {
-        return;
-    };
-    let mut normalized = Vec::with_capacity(tools.len());
-    for mut tool in std::mem::take(tools) {
-        let Some(tool_object) = tool.as_object_mut() else {
-            normalized.push(tool);
-            continue;
-        };
-        normalize_image_tool_fields(tool_object);
-        if tool_object.get("type").and_then(Value::as_str) != Some("function") {
-            normalized.push(tool);
-            continue;
-        }
-
-        let has_name = tool_object
-            .get("name")
-            .and_then(Value::as_str)
-            .is_some_and(|name| !name.trim().is_empty());
-        if !has_name {
-            let Some(Value::Object(mut function)) = tool_object.remove("function") else {
-                // 上游无法执行无名称 function；与 sub2api 一样丢弃非法声明。
-                continue;
-            };
-            let Some(name) = function
-                .get("name")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-            else {
-                continue;
-            };
-            tool_object.insert("name".to_owned(), Value::String(name.to_owned()));
-            for field in ["description", "parameters", "strict"] {
-                if !tool_object.contains_key(field)
-                    && let Some(value) = function.remove(field)
-                {
-                    // legacy wrapper 已从 tool 中移出，字段可以直接搬到 Responses
-                    // 结构；parameters 可能是大型 schema，不能在这里深拷贝。
-                    tool_object.insert(field.to_owned(), value);
-                }
-            }
-        } else {
-            // 已是 Responses 形态时删除多余的 Chat Completions wrapper，避免 internal
-            // endpoint 同时收到两套 schema。
-            tool_object.remove("function");
-        }
-        normalized.push(tool);
-    }
-    *tools = normalized;
-}
-
-fn normalize_image_tool_fields(tool: &mut Map<String, Value>) {
-    if !tool.contains_key("output_format") {
-        if let Some(value) = tool.remove("format") {
-            tool.insert("output_format".to_owned(), value);
-        }
-    } else {
-        tool.remove("format");
-    }
-    if !tool.contains_key("output_compression") {
-        if let Some(value) = tool.remove("compression") {
-            tool.insert("output_compression".to_owned(), value);
-        }
-    } else {
-        tool.remove("compression");
-    }
-}
-
-fn normalize_tool_choice(object: &mut Map<String, Value>) {
-    let tool_names = object
-        .get("tools")
-        .and_then(Value::as_array)
-        .map(|tools| {
-            tools
-                .iter()
-                .filter_map(Value::as_object)
-                .filter_map(|tool| {
-                    Some((
-                        tool.get("type")?.as_str()?.to_owned(),
-                        tool.get("name")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_owned(),
-                    ))
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let Some(Value::Object(choice)) = object.get_mut("tool_choice") else {
-        return;
-    };
-    let choice_type = choice
-        .get("type")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or_default()
-        .to_owned();
-    if choice_type.is_empty() {
-        return;
-    }
-    if choice_type == "function" {
-        let nested_name = choice
-            .get("function")
-            .and_then(Value::as_object)
-            .and_then(|function| function.get("name"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .unwrap_or_default();
-        let name = choice
-            .get("name")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .unwrap_or(nested_name)
-            .to_owned();
-        if name.is_empty()
-            || !tool_names
-                .iter()
-                .any(|(kind, tool)| kind == "function" && tool == &name)
-        {
-            object.insert("tool_choice".to_owned(), Value::String("auto".to_owned()));
-            return;
-        }
-        choice.insert("name".to_owned(), Value::String(name));
-        choice.remove("function");
-        return;
-    }
-    if !tool_names.iter().any(|(kind, _)| kind == &choice_type) {
-        object.insert("tool_choice".to_owned(), Value::String("auto".to_owned()));
-    }
-}
-
 fn normalize_input(object: &mut Map<String, Value>, preserve_references: bool) {
     if matches!(object.get("input"), Some(Value::String(_))) {
         let Some(Value::String(input)) = object.remove("input") else {
@@ -804,38 +592,6 @@ fn normalize_input(object: &mut Map<String, Value>, preserve_references: bool) {
             normalized.push(item);
             continue;
         };
-        if item_object.get("role").and_then(Value::as_str) == Some("tool") {
-            let call_id = ["call_id", "tool_call_id", "id"]
-                .iter()
-                .find_map(|field| item_object.get(*field).and_then(Value::as_str))
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned);
-            if let Some(call_id) = call_id {
-                let output = item_object
-                    .get("content")
-                    .map(content_to_text)
-                    .filter(|text| !text.is_empty())
-                    .or_else(|| {
-                        item_object
-                            .get("output")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned)
-                    })
-                    .unwrap_or_default();
-                normalized.push(json!({
-                    "type": "function_call_output",
-                    "call_id": normalize_call_id(&call_id),
-                    "output": output,
-                }));
-            } else {
-                item_object.insert("role".to_owned(), Value::String("user".to_owned()));
-                item_object.remove("tool_call_id");
-                normalized.push(item);
-            }
-            continue;
-        }
-
         let item_type = item_object
             .get("type")
             .and_then(Value::as_str)
@@ -870,49 +626,12 @@ fn normalize_input(object: &mut Map<String, Value>, preserve_references: bool) {
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-                .or_else(|| {
-                    item_object
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .map(str::to_owned)
-                });
+                .map(str::to_owned);
             if let Some(call_id) = call_id {
                 item_object.insert(
                     "call_id".to_owned(),
                     Value::String(normalize_call_id(&call_id)),
                 );
-            }
-        } else {
-            // 普通 message/reasoning 的 call_id 没有工具语义，不能仅凭字段名误改。
-            item_object.remove("call_id");
-        }
-
-        if input_item_requires_name(&item_type) {
-            let has_name = item_object
-                .get("name")
-                .and_then(Value::as_str)
-                .is_some_and(|name| !name.trim().is_empty());
-            if !has_name {
-                let name = item_object
-                    .get("tool_name")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|name| !name.is_empty())
-                    .or_else(|| {
-                        item_object
-                            .get("function")
-                            .and_then(Value::as_object)
-                            .and_then(|function| function.get("name"))
-                            .and_then(Value::as_str)
-                            .map(str::trim)
-                            .filter(|name| !name.is_empty())
-                    })
-                    .unwrap_or("tool")
-                    .to_owned();
-                item_object.insert("name".to_owned(), Value::String(name));
             }
         }
 
@@ -936,9 +655,6 @@ fn normalize_input(object: &mut Map<String, Value>, preserve_references: bool) {
             }
         }
 
-        if item_type == "message" {
-            normalize_message_content(item_object);
-        }
         normalized.push(item);
     }
     *input = normalized;
@@ -967,13 +683,10 @@ fn is_tool_call_item_type(kind: &str) -> bool {
     matches!(
         kind,
         "function_call"
-            | "tool_call"
             | "local_shell_call"
             | "tool_search_call"
             | "custom_tool_call"
-            | "mcp_tool_call"
             | "function_call_output"
-            | "mcp_tool_call_output"
             | "custom_tool_call_output"
             | "tool_search_output"
     )
@@ -982,34 +695,8 @@ fn is_tool_call_item_type(kind: &str) -> bool {
 fn is_tool_call_input_type(kind: &str) -> bool {
     matches!(
         kind,
-        "function_call"
-            | "tool_call"
-            | "local_shell_call"
-            | "tool_search_call"
-            | "custom_tool_call"
-            | "mcp_tool_call"
+        "function_call" | "local_shell_call" | "tool_search_call" | "custom_tool_call"
     )
-}
-
-fn input_item_requires_name(kind: &str) -> bool {
-    matches!(kind, "function_call" | "custom_tool_call" | "mcp_tool_call")
-}
-
-fn normalize_message_content(message: &mut Map<String, Value>) {
-    let Some(Value::Array(parts)) = message.get_mut("content") else {
-        return;
-    };
-    for part in parts {
-        let Some(part) = part.as_object_mut() else {
-            continue;
-        };
-        let Some(text) = part.get_mut("text") else {
-            continue;
-        };
-        if !text.is_string() {
-            *text = Value::String(stringify_json_value(text));
-        }
-    }
 }
 
 fn promote_system_messages(object: &mut Map<String, Value>) {
@@ -1152,29 +839,8 @@ fn is_image_generation_tool(tool: &Map<String, Value>) -> bool {
 
 fn tool_choice_selects_image_generation(choice: &Value) -> bool {
     match choice {
-        Value::String(choice) => choice.trim() == "image_generation",
         Value::Object(choice) => {
-            let kind = choice
-                .get("type")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .unwrap_or_default();
-            kind == "image_generation"
-                || (kind == "namespace"
-                    && ["name", "namespace"].into_iter().any(|field| {
-                        choice.get(field).and_then(Value::as_str).map(str::trim)
-                            == Some("image_gen")
-                    }))
-                || choice
-                    .get("tool")
-                    .is_some_and(tool_choice_selects_image_generation)
-                || choice
-                    .get("function")
-                    .and_then(Value::as_object)
-                    .and_then(|function| function.get("name"))
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    == Some("image_generation")
+            choice.get("type").and_then(Value::as_str).map(str::trim) == Some("image_generation")
         }
         _ => false,
     }
@@ -1188,22 +854,14 @@ fn content_to_text(content: &Value) -> String {
             .filter_map(Value::as_object)
             .filter_map(|part| {
                 let kind = part.get("type").and_then(Value::as_str)?;
-                matches!(kind, "text" | "input_text" | "output_text")
-                    .then(|| part.get("text").map(stringify_json_value))
+                (kind == "input_text")
+                    .then(|| part.get("text").and_then(Value::as_str).map(str::to_owned))
                     .flatten()
             })
             .collect::<Vec<_>>()
             .join(""),
         Value::Null => String::new(),
-        value => stringify_json_value(value),
-    }
-}
-
-fn stringify_json_value(value: &Value) -> String {
-    match value {
-        Value::String(text) => text.clone(),
-        Value::Null => String::new(),
-        value => serde_json::to_string(value).unwrap_or_default(),
+        _ => String::new(),
     }
 }
 
@@ -1261,7 +919,7 @@ mod tests {
     }
 
     #[test]
-    fn oauth_body_applies_codex_compatibility_fields() {
+    fn oauth_body_applies_codex_request_transforms() {
         let body = br#"{
             "model":"gpt-5.4-high",
             "stream":false,
@@ -1270,12 +928,10 @@ mod tests {
             "user":"u",
             "input":[
                 {"type":"message","role":"system","content":"system rule"},
-                {"type":"reasoning","id":"rs_1","encrypted_content":"secret"},
-                {"role":"tool","tool_call_id":"call_abc","content":{"ok":true}},
-                {"type":"message","role":"user","content":[{"type":"input_text","text":{"a":1}}]}
+                {"type":"reasoning","id":"rs_1","encrypted_content":"secret"}
             ],
-            "tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],
-            "tool_choice":{"type":"function","function":{"name":"lookup"}}
+            "tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],
+            "tool_choice":{"type":"function","name":"lookup"}
         }"#;
         let output = transform_oauth_body(body).unwrap();
         assert!(output.response_context.is_none());
@@ -1294,9 +950,6 @@ mod tests {
         assert_eq!(value["input"][0]["role"], "developer");
         assert_eq!(value["input"][1]["summary"], json!([]));
         assert!(value["input"][1].get("id").is_none());
-        assert_eq!(value["input"][2]["type"], "function_call_output");
-        assert_eq!(value["input"][2]["call_id"], "fc_abc");
-        assert_eq!(value["input"][3]["content"][0]["text"], r#"{"a":1}"#);
         let instructions = value["instructions"].as_str().unwrap();
         assert!(instructions.starts_with("system rule\n\nYou are Codex"));
         assert!(instructions.contains("# Personality"));
@@ -1305,7 +958,7 @@ mod tests {
     #[test]
     fn input_string_and_empty_image_are_normalized() {
         let output = transform_oauth_body(
-            br#"{"model":"gpt-5.3","input":"hello","tools":[{"type":"image_generation","format":"png","compression":80}]}"#,
+            br#"{"model":"gpt-5.3","input":"hello","tools":[{"type":"image_generation","output_format":"png","output_compression":80}]}"#,
         )
         .unwrap();
         let value: Value = serde_json::from_slice(&output.body).unwrap();
@@ -1338,7 +991,6 @@ mod tests {
                     {"type":"namespace","name":"image_gen","tools":[{"type":"function","name":"imagegen"}]},
                     {"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"spawn_agent","parameters":{"type":"object"}}]}
                 ],
-                "tool_choice":{"type":"function","name":"spawn_agent","namespace":"collaboration"},
                 "input":[{"type":"function_call","name":"spawn_agent","namespace":"collaboration","arguments":"{}"}]
             }"#,
         )
@@ -1348,8 +1000,6 @@ mod tests {
         assert_eq!(value["tools"][1]["type"], "namespace");
         assert_eq!(value["tools"][1]["name"], "image_gen");
         assert_eq!(value["tools"][2]["name"], "collaboration__spawn_agent");
-        assert_eq!(value["tool_choice"]["name"], "collaboration__spawn_agent");
-        assert!(value["tool_choice"].get("namespace").is_none());
         assert_eq!(value["input"][0]["name"], "collaboration__spawn_agent");
         assert!(value["input"][0].get("namespace").is_none());
 
@@ -1483,9 +1133,8 @@ mod tests {
             "tools": [{"type":"function", "name":"lookup"}],
             "input": [
                 {"type":"item_reference", "id":"call_ref"},
-                {"type":"message", "role":"user", "id":"item_message", "call_id":"must_drop", "content":"hello"},
-                {"type":"function_call", "id":"item_call", "call_id":long_call_id, "arguments":"{}"},
-                {"type":"mcp_tool_call", "tool_name":"remote", "id":"fc_real", "arguments":"{}"},
+                {"type":"message", "role":"user", "id":"item_message", "content":"hello"},
+                {"type":"function_call", "id":"item_call", "call_id":long_call_id, "name":"lookup", "arguments":"{}"},
                 {"type":"reasoning", "id":"rs_1", "encrypted_content":"secret"}
             ]
         });
@@ -1493,17 +1142,14 @@ mod tests {
         let value: Value = serde_json::from_slice(&output.body).unwrap();
         assert_eq!(value["input"][0]["id"], "fc_ref");
         assert!(value["input"][1].get("id").is_none());
-        assert!(value["input"][1].get("call_id").is_none());
         assert!(value["input"][2].get("id").is_none());
         let compacted = value["input"][2]["call_id"].as_str().unwrap();
         assert_eq!(
             compacted,
             "fc_c799a41af85be7b0a2ca4f40b252062d5d2c6710dbdda85985547caa83ceb"
         );
-        assert_eq!(value["input"][3]["id"], "fc_real");
-        assert_eq!(value["input"][3]["name"], "remote");
-        assert!(value["input"][4].get("id").is_none());
-        assert_eq!(value["input"][4]["summary"], json!([]));
+        assert!(value["input"][3].get("id").is_none());
+        assert_eq!(value["input"][3]["summary"], json!([]));
     }
 
     #[test]
@@ -1511,7 +1157,7 @@ mod tests {
         let output = transform_oauth_body(
             br#"{
                 "model":"gpt-5.2",
-                "service_tier":" FAST ",
+                "service_tier":"fast",
                 "text":{"verbosity":"high","format":{"type":"text"}},
                 "input":"hello"
             }"#,
