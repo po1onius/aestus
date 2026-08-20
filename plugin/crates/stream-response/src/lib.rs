@@ -7,7 +7,6 @@ use gpt_codex_plugin_common::{
     Effects as CommonEffects, Feedback as CommonFeedback, Header as CommonHeader,
     LimitFeedback as CommonLimitFeedback, StreamFailure as CommonStreamFailure,
     Usage as CommonUsage,
-    context::{ResponseContext, decode_response_context},
     headers::{ResponseHeaderMode, sanitize_response_headers},
     response::{effects_from_raw_json, is_terminal_event, transform_response_value},
     sse::JsonSseItem,
@@ -26,7 +25,6 @@ use aestus::stream_response_transformer::common_types::{
 struct StreamState {
     started: bool,
     feedback_emitted: bool,
-    request_context: Option<ResponseContext>,
 }
 
 thread_local! {
@@ -39,17 +37,11 @@ struct GptCodexStreamResponsePlugin;
 
 impl Guest for GptCodexStreamResponsePlugin {
     fn start(input: StartInput) -> Result<ResponseHead, TransformError> {
-        let StartInput {
-            head,
-            request_context,
-        } = input;
-        let request_context = decode_response_context(request_context.as_deref())
-            .map_err(|message| plugin_error("invalid_request_context", message))?;
+        let StartInput { head, .. } = input;
         STATE.with(|state| {
             *state.borrow_mut() = StreamState {
                 started: true,
                 feedback_emitted: false,
-                request_context,
             };
         });
         Ok(ResponseHead {
@@ -105,10 +97,7 @@ impl Guest for GptCodexStreamResponsePlugin {
             }
         });
 
-        let changed = STATE.with(|state| {
-            let state = state.borrow();
-            transform_response_value(parsed.value_mut(), state.request_context.as_ref())
-        });
+        let changed = transform_response_value(parsed.value_mut());
         let item = if changed {
             parsed
                 .render()

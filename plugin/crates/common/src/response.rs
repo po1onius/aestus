@@ -1,9 +1,6 @@
 use serde_json::Value;
 
-use crate::{
-    Effects, Feedback, LimitFeedback, StreamFailure, Usage,
-    context::{ResponseContext, restore_namespace_calls},
-};
+use crate::{Effects, Feedback, LimitFeedback, StreamFailure, Usage};
 
 /// 必须在修改 JSON 之前调用：response.failed 的下游瘦身会删除 `response.usage`，
 /// maintenance/usage/failure 则必须依据上游原始事实生成。
@@ -30,13 +27,9 @@ pub fn effects_from_raw_json(value: &Value, status: Option<u16>, stream: bool) -
 
 /// 对非流式 Responses JSON 和单个 SSE data JSON 复用同一组字段修正。原生工具调用的
 /// 名称与参数属于 Responses 协议载荷，必须原样保留；这里只处理 sub2api 的 Responses
-/// 路径确实执行的图片状态修正、namespace 身份恢复和失败响应瘦身。
-pub fn transform_response_value(
-    value: &mut Value,
-    request_context: Option<&ResponseContext>,
-) -> bool {
+/// 路径确实执行的图片状态修正和失败响应瘦身。
+pub fn transform_response_value(value: &mut Value) -> bool {
     let mut changed = normalize_image_generation_status(value);
-    changed |= restore_namespace_calls(value, request_context);
     changed |= sanitize_failed_response(value);
     changed
 }
@@ -350,7 +343,7 @@ mod tests {
         ));
         assert_eq!(effects.failure.unwrap().kind, "usage_not_included");
 
-        transform_response_value(&mut value, None);
+        transform_response_value(&mut value);
         assert!(value.pointer("/response/usage").is_none());
         assert!(value.pointer("/response/output").is_none());
         assert_eq!(
@@ -371,7 +364,7 @@ mod tests {
                 ]
             }
         });
-        transform_response_value(&mut value, None);
+        transform_response_value(&mut value);
         assert_eq!(value["response"]["output"][0]["status"], "completed");
         assert_eq!(value["response"]["output"][1]["name"], "apply_patch");
         assert_eq!(value["response"]["output"][1]["arguments"], duplicated);
@@ -394,7 +387,7 @@ mod tests {
             "type":"response.output_text.delta",
             "delta":"keep original SSE bytes"
         });
-        assert!(!transform_response_value(&mut value, None));
+        assert!(!transform_response_value(&mut value));
     }
 
     #[test]

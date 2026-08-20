@@ -45,7 +45,7 @@ impl Guest for GptCodexRequestPlugin {
             headers: headers.into_iter().map(from_common_header).collect(),
             body: transformed.body,
             response_mode,
-            response_context: transformed.response_context,
+            response_context: None,
         })
     }
 }

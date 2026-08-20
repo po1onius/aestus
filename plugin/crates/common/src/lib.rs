@@ -4,7 +4,6 @@
 //! response 三个 world 之间互相耦合。各组件入口只负责 ABI 类型转换，字段语义、
 //! header 安全规则、usage/maintenance 判定都集中在本 crate，确保流式与非流式行为一致。
 
-pub mod context;
 pub mod headers;
 pub mod request;
 pub mod response;

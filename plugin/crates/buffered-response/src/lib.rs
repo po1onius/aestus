@@ -4,7 +4,6 @@
 use gpt_codex_plugin_common::{
     Effects as CommonEffects, Feedback as CommonFeedback, Header as CommonHeader,
     LimitFeedback as CommonLimitFeedback, Usage as CommonUsage,
-    context::decode_response_context,
     headers::{ResponseHeaderMode, sanitize_response_headers},
     response::{effects_from_raw_json, transform_response_value},
     responses_sse::convert_responses_sse_to_json,
@@ -25,16 +24,8 @@ struct GptCodexBufferedResponsePlugin;
 impl Guest for GptCodexBufferedResponsePlugin {
     fn transform(input: TransformInput) -> Result<TransformOutput, TransformError> {
         let TransformInput {
-            response: input,
-            request_context,
+            response: input, ..
         } = input;
-        let request_context =
-            decode_response_context(request_context.as_deref()).map_err(|message| {
-                TransformError {
-                    code: "invalid_request_context".to_owned(),
-                    message,
-                }
-            })?;
         let Response {
             status: upstream_status,
             headers,
@@ -60,7 +51,7 @@ impl Guest for GptCodexBufferedResponsePlugin {
         };
 
         let body = if let Some(value) = parsed.as_mut() {
-            let transformed = transform_response_value(value, request_context.as_ref());
+            let transformed = transform_response_value(value);
             if converted_from_sse || transformed {
                 serde_json::to_vec(value).map_err(|error| TransformError {
                     code: "serialize_response_failed".to_owned(),

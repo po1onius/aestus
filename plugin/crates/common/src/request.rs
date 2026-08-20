@@ -1,17 +1,11 @@
-use std::collections::{BTreeMap, BTreeSet};
-
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
-
-use crate::context::{NamespaceToolName, encode_namespace_context};
 
 const CODEX_INSTRUCTIONS: &str = include_str!("instructions/codex.txt");
 const GPT_5_1_INSTRUCTIONS: &str = include_str!("instructions/gpt5_1.txt");
 const GPT_5_2_INSTRUCTIONS: &str = include_str!("instructions/gpt5_2.txt");
 const GPT_5_5_INSTRUCTIONS: &str = include_str!("instructions/gpt5_5.txt");
 const REASONING_ENCRYPTED_CONTENT: &str = "reasoning.encrypted_content";
-const SPARK_IMAGE_UNSUPPORTED_MARKER: &str = "<sub2api-codex-spark-image-unsupported>";
-const SPARK_IMAGE_UNSUPPORTED_INSTRUCTIONS: &str = "<sub2api-codex-spark-image-unsupported>\nThe current model is gpt-5.3-codex-spark, which does not support image generation, image editing, image input, the `image_generation` tool, or Codex `image_gen`/`$imagegen` workflows. If the user asks for image generation or image editing, clearly explain this model limitation and ask them to switch to a non-Spark Codex model such as gpt-5.3-codex or gpt-5.4. Do not claim that the local environment merely lacks image_gen tooling, and do not suggest CLI fallback as the primary fix while the model remains Spark.\n</sub2api-codex-spark-image-unsupported>";
 const UNSUPPORTED_OAUTH_FIELDS: &[&str] = &[
     "max_output_tokens",
     "temperature",
@@ -32,7 +26,6 @@ pub struct OAuthTransformOutput {
     /// 调用方原始请求是否要求 SSE。OAuth 上游 body 随后仍会固定为 `stream=true`，
     /// 因此这个值必须在覆盖字段前保存，供请求插件选择下游响应交付模式。
     pub downstream_streaming: bool,
-    pub response_context: Option<Vec<u8>>,
 }
 
 pub fn transform_oauth_body(body: &[u8]) -> Result<OAuthTransformOutput, String> {
@@ -45,12 +38,7 @@ pub fn transform_oauth_body(body: &[u8]) -> Result<OAuthTransformOutput, String>
 
     let original_model = require_model(object)?.to_owned();
     reject_previous_response_id(object)?;
-    // 是否需要保留 item_reference/id 必须在 namespace 工具被平铺前判定，确保只依据
-    // 调用方提交的标准 Responses 请求决定续接语义。
-    let preserve_references = needs_tool_continuation(object);
-    // sub2api 的 HTTP/SSE OAuth 路径在其余 Codex 字段归一化之前摊平 namespace。
-    // 映射不能放进上游 body/header，只通过宿主的 opaque attempt context 回到响应组件。
-    let namespace_names = flatten_response_namespaces(object)?;
+    let preserve_references = has_continuation_input(object);
     let inferred_effort = effort_suffix(&original_model);
     object.insert(
         "model".to_owned(),
@@ -73,231 +61,15 @@ pub fn transform_oauth_body(body: &[u8]) -> Result<OAuthTransformOutput, String>
     // 再提升 system 消息，才能得到“system 文本 + base prompt”的相同顺序。
     ensure_instructions(object, &original_model);
     promote_system_messages(object);
-    if is_codex_spark_model(object) {
-        append_spark_image_unsupported_instructions(object);
-        strip_spark_image_generation_tools(object);
-    }
     normalize_input(object, preserve_references);
     sanitize_empty_base64_images(object);
 
     let body =
         serde_json::to_vec(&value).map_err(|error| format!("改造后的请求体无法序列化: {error}"))?;
-    let response_context = encode_namespace_context(namespace_names)?;
     Ok(OAuthTransformOutput {
         body,
         downstream_streaming,
-        response_context,
     })
-}
-
-/// 把标准 Responses namespace declaration 转成 ChatGPT Codex HTTP 接口可接受的平铺
-/// function。`image_gen` 是上游原生内建 namespace，必须保持原样。所有碰撞在发送前
-/// 显式拒绝，不能让响应阶段根据字符串猜测原始归属。
-fn flatten_response_namespaces(
-    request: &mut Map<String, Value>,
-) -> Result<BTreeMap<String, NamespaceToolName>, String> {
-    // 第一阶段只借用原始 tools 做映射与冲突校验。普通 OpenAI function 请求不包含
-    // namespace，这条最常见路径必须保持零深拷贝；工具 schema 往往很大，提前 clone
-    // 整棵数组会让 WIT body、JSON Value 和序列化输出同时挤占 WASM 线性内存。
-    let Some(Value::Array(tools)) = request.get("tools") else {
-        return Ok(BTreeMap::new());
-    };
-    if tools.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-
-    let top_level = tools
-        .iter()
-        .filter_map(Value::as_object)
-        .filter(|tool| {
-            matches!(
-                tool.get("type").and_then(Value::as_str).map(str::trim),
-                Some("function" | "custom")
-            )
-        })
-        .filter_map(|tool| non_empty_string(tool.get("name")))
-        .collect::<BTreeSet<_>>();
-
-    let mut names = BTreeMap::<String, NamespaceToolName>::new();
-    for tool in tools.iter().filter_map(Value::as_object) {
-        if tool.get("type").and_then(Value::as_str).map(str::trim) != Some("namespace") {
-            continue;
-        }
-        let Some(namespace) = non_empty_string(tool.get("name")) else {
-            continue;
-        };
-        if namespace == "image_gen" {
-            continue;
-        }
-        for child in namespace_children(tool).into_iter().flatten() {
-            let Some(child) = child.as_object() else {
-                continue;
-            };
-            if child.get("type").and_then(Value::as_str).map(str::trim) != Some("function") {
-                continue;
-            }
-            let Some(name) = non_empty_string(child.get("name")) else {
-                continue;
-            };
-            let flattened = flatten_namespace_tool_name(&namespace, &name);
-            let original = NamespaceToolName {
-                namespace: namespace.clone(),
-                name,
-            };
-            if top_level.contains(&flattened) {
-                return Err(format!(
-                    "namespace 工具 {}/{} 摊平为 {flattened} 后与同名顶层工具冲突",
-                    original.namespace, original.name
-                ));
-            }
-            if let Some(previous) = names.get(&flattened)
-                && previous != &original
-            {
-                return Err(format!(
-                    "namespace 工具 {}/{} 与 {}/{} 都摊平为 {flattened}",
-                    previous.namespace, previous.name, original.namespace, original.name
-                ));
-            }
-            names.insert(flattened, original);
-        }
-    }
-    if names.is_empty() {
-        return Ok(names);
-    }
-
-    // 第二阶段只有在确实发现需要摊平的 namespace 后才取得数组所有权。mem::take
-    // 只移动 Vec，不复制其中的 description/parameters 等大型字符串和对象。
-    let tools = request
-        .get_mut("tools")
-        .and_then(Value::as_array_mut)
-        .map(std::mem::take)
-        .expect("tools 已在只读扫描阶段确认是 array");
-    let mut flattened_tools = Vec::with_capacity(tools.len() + names.len());
-    let mut seen = BTreeSet::new();
-    for tool in tools {
-        match tool {
-            Value::Object(mut tool_object)
-                if tool_object
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    == Some("namespace") =>
-            {
-                let namespace = non_empty_string(tool_object.get("name")).unwrap_or_default();
-                if namespace == "image_gen" {
-                    flattened_tools.push(Value::Object(tool_object));
-                    continue;
-                }
-
-                // namespace wrapper 不会发给上游，因此直接移出其 children。每个有效
-                // function child 只修改 name 后移动进新数组，避免再次 clone schema。
-                for child in take_namespace_children(&mut tool_object) {
-                    let Value::Object(mut child) = child else {
-                        continue;
-                    };
-                    if child.get("type").and_then(Value::as_str).map(str::trim) != Some("function")
-                    {
-                        continue;
-                    }
-                    let Some(name) = non_empty_string(child.get("name")) else {
-                        continue;
-                    };
-                    let flattened = flatten_namespace_tool_name(&namespace, &name);
-                    if !seen.insert(flattened.clone()) {
-                        continue;
-                    }
-                    child.insert("name".to_owned(), Value::String(flattened));
-                    flattened_tools.push(Value::Object(child));
-                }
-            }
-            tool => flattened_tools.push(tool),
-        }
-    }
-    request.insert("tools".to_owned(), Value::Array(flattened_tools));
-
-    if let Some(input) = request.get_mut("input") {
-        rewrite_namespace_qualified_input_calls(input, &names);
-    }
-    Ok(names)
-}
-
-fn namespace_children(tool: &Map<String, Value>) -> Option<&Vec<Value>> {
-    tool.get("tools").and_then(Value::as_array)
-}
-
-fn take_namespace_children(tool: &mut Map<String, Value>) -> Vec<Value> {
-    match tool.remove("tools") {
-        Some(Value::Array(children)) => children,
-        _ => Vec::new(),
-    }
-}
-
-/// OpenAI Responses 的 input 是顶层 item 数组，function_call 也只会作为其中的 item。
-/// 只访问协议定义的位置，避免为了兼容非标准嵌套结构而递归遍历用户内容和工具输出。
-fn rewrite_namespace_qualified_input_calls(
-    value: &mut Value,
-    names: &BTreeMap<String, NamespaceToolName>,
-) {
-    let Some(items) = value.as_array_mut() else {
-        return;
-    };
-    for item in items {
-        let Some(object) = item.as_object_mut() else {
-            continue;
-        };
-        if object.get("type").and_then(Value::as_str).map(str::trim) == Some("function_call") {
-            rewrite_namespace_qualified_call(object, names);
-        }
-    }
-}
-
-fn rewrite_namespace_qualified_call(
-    call: &mut Map<String, Value>,
-    names: &BTreeMap<String, NamespaceToolName>,
-) -> bool {
-    let Some(namespace) = non_empty_string(call.get("namespace")) else {
-        return false;
-    };
-    let Some(name) = non_empty_string(call.get("name")) else {
-        return false;
-    };
-    let flattened = flatten_namespace_tool_name(&namespace, &name);
-    let Some(original) = names.get(&flattened) else {
-        return false;
-    };
-    if original.namespace != namespace || original.name != name {
-        return false;
-    }
-    call.insert("name".to_owned(), Value::String(flattened));
-    call.remove("namespace");
-    true
-}
-
-fn flatten_namespace_tool_name(namespace: &str, name: &str) -> String {
-    const MAX_BYTES: usize = 64;
-    let full = format!("{namespace}__{name}");
-    if full.len() <= MAX_BYTES {
-        return full;
-    }
-    let digest = Sha256::digest(full.as_bytes());
-    let suffix = format!("__{}", hex::encode(&digest[..4]));
-    let prefix_bytes = MAX_BYTES - suffix.len();
-    let mut prefix = String::with_capacity(prefix_bytes);
-    for character in full.chars() {
-        if prefix.len() + character.len_utf8() > prefix_bytes {
-            break;
-        }
-        prefix.push(character);
-    }
-    prefix + &suffix
-}
-
-fn non_empty_string(value: Option<&Value>) -> Option<String> {
-    value
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
 }
 
 fn require_model(object: &Map<String, Value>) -> Result<&str, String> {
@@ -345,17 +117,8 @@ fn looks_like_message_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
-fn needs_tool_continuation(object: &Map<String, Value>) -> bool {
-    let has_tools = object
-        .get("tools")
-        .and_then(Value::as_array)
-        .is_some_and(|tools| !tools.is_empty());
-    let has_tool_choice = match object.get("tool_choice") {
-        Some(Value::String(choice)) => !choice.trim().is_empty(),
-        Some(Value::Object(choice)) => !choice.is_empty(),
-        _ => false,
-    };
-    let has_input_signal = object
+fn has_continuation_input(object: &Map<String, Value>) -> bool {
+    object
         .get("input")
         .and_then(Value::as_array)
         .is_some_and(|input| {
@@ -366,8 +129,7 @@ fn needs_tool_continuation(object: &Map<String, Value>) -> bool {
                         is_tool_call_item_type(kind.trim()) || kind.trim() == "item_reference"
                     })
             })
-        });
-    has_tools || has_tool_choice || has_input_signal
+        })
 }
 
 /// 对齐 sub2api 当前 Codex alias：只归一化已知模型，未知模型保留调用方值，避免插件
@@ -407,7 +169,6 @@ pub fn normalize_codex_model(model: &str) -> String {
         | "gpt-5.3-codex-medium"
         | "gpt-5.3-codex-high"
         | "gpt-5.3-codex-xhigh" => Some("gpt-5.3-codex"),
-        "gpt-5.3-codex-spark" => Some("gpt-5.3-codex-spark"),
         "gpt-5.2" | "gpt-5.2-none" | "gpt-5.2-low" | "gpt-5.2-medium" | "gpt-5.2-high"
         | "gpt-5.2-xhigh" | "gpt-5.2-codex" => Some("gpt-5.2"),
         "gpt-5" | "gpt-5-mini" | "gpt-5-nano" | "gpt-5.1" => Some("gpt-5.4"),
@@ -423,7 +184,6 @@ pub fn normalize_codex_model(model: &str) -> String {
         ("gpt-5.6-sol", "gpt-5.6-sol"),
         ("gpt-5.6-terra", "gpt-5.6-terra"),
         ("gpt-5.6-luna", "gpt-5.6-luna"),
-        ("gpt-5.3-codex-spark", "gpt-5.3-codex-spark"),
         ("gpt-5.3-codex", "gpt-5.3-codex"),
         ("gpt-5.4-mini", "gpt-5.4-mini"),
         ("gpt-5.4-nano", "gpt-5.4-nano"),
@@ -766,86 +526,6 @@ fn codex_instructions_for_model(model: &str) -> &'static str {
     }
 }
 
-fn is_codex_spark_model(object: &Map<String, Value>) -> bool {
-    object.get("model").and_then(Value::as_str) == Some("gpt-5.3-codex-spark")
-}
-
-fn append_spark_image_unsupported_instructions(object: &mut Map<String, Value>) {
-    let existing = object
-        .get("instructions")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if existing.contains(SPARK_IMAGE_UNSUPPORTED_MARKER) {
-        return;
-    }
-    let existing = existing.trim_end();
-    object.insert(
-        "instructions".to_owned(),
-        Value::String(if existing.trim().is_empty() {
-            SPARK_IMAGE_UNSUPPORTED_INSTRUCTIONS.to_owned()
-        } else {
-            format!("{existing}\n\n{SPARK_IMAGE_UNSUPPORTED_INSTRUCTIONS}")
-        }),
-    );
-}
-
-fn strip_spark_image_generation_tools(object: &mut Map<String, Value>) {
-    strip_image_generation_tool_list(object, "tools");
-
-    if let Some(Value::Array(input)) = object.get_mut("input") {
-        input.retain_mut(|item| {
-            let Some(item) = item.as_object_mut() else {
-                return true;
-            };
-            if item.get("type").and_then(Value::as_str).map(str::trim) != Some("additional_tools") {
-                return true;
-            }
-            let removed = strip_image_generation_tool_list(item, "tools");
-            !removed || item.contains_key("tools")
-        });
-    }
-
-    if object
-        .get("tool_choice")
-        .is_some_and(tool_choice_selects_image_generation)
-    {
-        object.remove("tool_choice");
-    }
-}
-
-fn strip_image_generation_tool_list(container: &mut Map<String, Value>, key: &str) -> bool {
-    let Some(Value::Array(tools)) = container.get_mut(key) else {
-        return false;
-    };
-    let original_len = tools.len();
-    tools.retain(|tool| !tool.as_object().is_some_and(is_image_generation_tool));
-    let removed = tools.len() != original_len;
-    if removed && tools.is_empty() {
-        container.remove(key);
-    }
-    removed
-}
-
-fn is_image_generation_tool(tool: &Map<String, Value>) -> bool {
-    let kind = tool
-        .get("type")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or_default();
-    kind == "image_generation"
-        || (kind == "namespace"
-            && tool.get("name").and_then(Value::as_str).map(str::trim) == Some("image_gen"))
-}
-
-fn tool_choice_selects_image_generation(choice: &Value) -> bool {
-    match choice {
-        Value::Object(choice) => {
-            choice.get("type").and_then(Value::as_str).map(str::trim) == Some("image_generation")
-        }
-        _ => false,
-    }
-}
-
 fn content_to_text(content: &Value) -> String {
     match content {
         Value::String(text) => text.clone(),
@@ -934,7 +614,6 @@ mod tests {
             "tool_choice":{"type":"function","name":"lookup"}
         }"#;
         let output = transform_oauth_body(body).unwrap();
-        assert!(output.response_context.is_none());
         let value: Value = serde_json::from_slice(&output.body).unwrap();
         assert_eq!(value["model"], "gpt-5.4");
         assert_eq!(value["stream"], true);
@@ -982,7 +661,7 @@ mod tests {
     }
 
     #[test]
-    fn namespace_tools_are_flattened_and_context_is_emitted() {
+    fn namespace_tools_and_qualified_calls_are_preserved() {
         let output = transform_oauth_body(
             br#"{
                 "model":"gpt-5.4",
@@ -999,97 +678,11 @@ mod tests {
         assert_eq!(value["tools"][0]["name"], "plain");
         assert_eq!(value["tools"][1]["type"], "namespace");
         assert_eq!(value["tools"][1]["name"], "image_gen");
-        assert_eq!(value["tools"][2]["name"], "collaboration__spawn_agent");
-        assert_eq!(value["input"][0]["name"], "collaboration__spawn_agent");
-        assert!(value["input"][0].get("namespace").is_none());
-
-        let context =
-            crate::context::decode_response_context(output.response_context.as_deref()).unwrap();
-        let mut response = json!({
-            "type":"response.output_item.done",
-            "item":{"type":"function_call","name":"collaboration__spawn_agent"}
-        });
-        assert!(crate::context::restore_namespace_calls(
-            &mut response,
-            context.as_ref()
-        ));
-        assert_eq!(response["item"]["name"], "spawn_agent");
-        assert_eq!(response["item"]["namespace"], "collaboration");
-    }
-
-    #[test]
-    fn namespace_flattening_moves_large_tool_payloads_without_cloning() {
-        // 用堆字符串地址验证所有权是从原 tools 移动到结果，而不是深拷贝。真实调用方的
-        // parameters 往往包含很大的 JSON Schema，这正是 WASM 内存放大的主要来源。
-        let plain_description = "plain-".repeat(8 * 1024);
-        let child_description = "child-".repeat(8 * 1024);
-        let mut request = json!({
-            "tools": [
-                {
-                    "type": "function",
-                    "name": "plain",
-                    "description": plain_description
-                },
-                {
-                    "type": "namespace",
-                    "name": "collaboration",
-                    "tools": [{
-                        "type": "function",
-                        "name": "spawn_agent",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "message": {"type": "string", "description": child_description}
-                            }
-                        }
-                    }]
-                }
-            ]
-        });
-        let plain_pointer = request["tools"][0]["description"]
-            .as_str()
-            .unwrap()
-            .as_ptr();
-        let child_pointer = request["tools"][1]["tools"][0]["parameters"]["properties"]["message"]
-            ["description"]
-            .as_str()
-            .unwrap()
-            .as_ptr();
-
-        let names = flatten_response_namespaces(request.as_object_mut().unwrap()).unwrap();
-
-        assert_eq!(names.len(), 1);
-        assert_eq!(request["tools"][1]["name"], "collaboration__spawn_agent");
-        assert!(std::ptr::eq(
-            plain_pointer,
-            request["tools"][0]["description"]
-                .as_str()
-                .unwrap()
-                .as_ptr()
-        ));
-        assert!(std::ptr::eq(
-            child_pointer,
-            request["tools"][1]["parameters"]["properties"]["message"]["description"]
-                .as_str()
-                .unwrap()
-                .as_ptr()
-        ));
-    }
-
-    #[test]
-    fn namespace_flat_name_collision_is_rejected() {
-        let error = transform_oauth_body(
-            br#"{
-                "model":"gpt-5.4",
-                "tools":[
-                    {"type":"function","name":"collaboration__spawn_agent"},
-                    {"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"spawn_agent"}]}
-                ]
-            }"#,
-        )
-        .err()
-        .unwrap();
-        assert!(error.contains("同名顶层工具冲突"));
+        assert_eq!(value["tools"][2]["type"], "namespace");
+        assert_eq!(value["tools"][2]["name"], "collaboration");
+        assert_eq!(value["tools"][2]["tools"][0]["name"], "spawn_agent");
+        assert_eq!(value["input"][0]["name"], "spawn_agent");
+        assert_eq!(value["input"][0]["namespace"], "collaboration");
     }
 
     #[test]
@@ -1153,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn model_specific_fields_and_spark_image_tools_are_normalized() {
+    fn model_specific_fields_are_normalized() {
         let output = transform_oauth_body(
             br#"{
                 "model":"gpt-5.2",
@@ -1172,26 +765,6 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .starts_with("You are GPT-5.2 running in the Codex CLI")
-        );
-
-        let output = transform_oauth_body(
-            br#"{
-                "model":"gpt-5.3-codex-spark",
-                "tools":[{"type":"image_generation"},{"type":"function","name":"keep"}],
-                "tool_choice":{"type":"image_generation"},
-                "input":"hello"
-            }"#,
-        )
-        .unwrap();
-        let value: Value = serde_json::from_slice(&output.body).unwrap();
-        assert_eq!(value["tools"].as_array().unwrap().len(), 1);
-        assert_eq!(value["tools"][0]["name"], "keep");
-        assert!(value.get("tool_choice").is_none());
-        assert!(
-            value["instructions"]
-                .as_str()
-                .unwrap()
-                .contains(SPARK_IMAGE_UNSUPPORTED_MARKER)
         );
     }
 }
