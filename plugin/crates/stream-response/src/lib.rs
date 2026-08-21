@@ -7,9 +7,10 @@ use gpt_codex_plugin_common::{
     Effects as CommonEffects, Feedback as CommonFeedback, Header as CommonHeader,
     LimitFeedback as CommonLimitFeedback, StreamFailure as CommonStreamFailure,
     Usage as CommonUsage,
-    headers::{ResponseHeaderMode, sanitize_response_headers},
-    response::{effects_from_raw_json, is_terminal_event, transform_response_value},
-    sse::JsonSseItem,
+    functions::{
+        ResponseHead as CommonResponseHead, StreamResponseTransformer,
+        StreamStartInput as CommonStartInput,
+    },
 };
 
 wit_bindgen::generate!({
@@ -21,111 +22,59 @@ use aestus::stream_response_transformer::common_types::{
     Header, LimitFeedback, ResponseEffects, StreamFailure, TokenUsage, UpstreamFeedback,
 };
 
-#[derive(Default)]
-struct StreamState {
-    started: bool,
-    feedback_emitted: bool,
-}
-
 thread_local! {
     /// 宿主为每条上游响应实例化独立 Component；thread-local 仅承载该实例内部的
     /// start/item/finish 生命周期状态，不在请求之间共享任何业务数据。
-    static STATE: RefCell<StreamState> = RefCell::new(StreamState::default());
+    static TRANSFORMER: RefCell<StreamResponseTransformer> =
+        RefCell::new(StreamResponseTransformer::default());
 }
 
 struct GptCodexStreamResponsePlugin;
 
 impl Guest for GptCodexStreamResponsePlugin {
     fn start(input: StartInput) -> Result<ResponseHead, TransformError> {
-        let StartInput { head, .. } = input;
-        STATE.with(|state| {
-            *state.borrow_mut() = StreamState {
-                started: true,
-                feedback_emitted: false,
-            };
+        let transformed = TRANSFORMER.with(|transformer| {
+            transformer.borrow_mut().start(CommonStartInput {
+                head: CommonResponseHead {
+                    status: input.head.status,
+                    headers: input
+                        .head
+                        .headers
+                        .into_iter()
+                        .map(to_common_header)
+                        .collect(),
+                },
+                request_context: input.request_context,
+            })
         });
+        let transformed = transformed.map_err(from_common_error)?;
         Ok(ResponseHead {
-            status: head.status,
-            headers: sanitize_response_headers(
-                head.headers.into_iter().map(to_common_header).collect(),
-                ResponseHeaderMode::EventStream,
-            )
-            .into_iter()
-            .map(from_common_header)
-            .collect(),
+            status: transformed.status,
+            headers: transformed
+                .headers
+                .into_iter()
+                .map(from_common_header)
+                .collect(),
         })
     }
 
     fn transform_item(item: Vec<u8>) -> Result<ItemOutput, TransformError> {
-        let started = STATE.with(|state| state.borrow().started);
-        if !started {
-            return Err(plugin_error(
-                "stream_not_started",
-                "宿主必须先调用 start，再迭代 SSE item",
-            ));
-        }
-
-        let Some(mut parsed) = JsonSseItem::parse(&item).map_err(|message| {
-            plugin_error(
-                "invalid_sse_item",
-                format!("无法解析完整 SSE item: {message}"),
-            )
-        })?
-        else {
-            return Ok(ItemOutput {
-                item: Some(item),
-                effects: empty_effects(),
-            });
-        };
-
-        // usage、maintenance 和 failure 必须先读取原始上游 JSON；随后 response.failed
-        // 可以安全删除下游不需要的大字段，且宿主不需要二次扫描改造后的 item。
-        let mut effects = effects_from_raw_json(parsed.value(), Some(200), true);
-        if !is_terminal_event(parsed.value()) {
-            // 标准 Responses 只有终止事件的 usage 是累计快照。忽略中间扩展字段，避免
-            // 某些兼容上游发送 delta usage 时违反宿主的单调累计约束。
-            effects.usage = None;
-        }
-        STATE.with(|state| {
-            let mut state = state.borrow_mut();
-            if effects.feedback.is_some() {
-                if state.feedback_emitted {
-                    effects.feedback = None;
-                } else {
-                    state.feedback_emitted = true;
-                }
-            }
-        });
-
-        let changed = transform_response_value(parsed.value_mut());
-        let item = if changed {
-            parsed
-                .render()
-                .map_err(|message| plugin_error("serialize_sse_item_failed", message))?
-        } else {
-            item
-        };
+        let transformed = TRANSFORMER
+            .with(|transformer| transformer.borrow_mut().transform_item(item))
+            .map_err(from_common_error)?;
         Ok(ItemOutput {
-            item: Some(item),
-            effects: from_common_effects(effects),
+            item: transformed.item,
+            effects: from_common_effects(transformed.effects),
         })
     }
 
     fn finish() -> Result<FinishOutput, TransformError> {
-        let started = STATE.with(|state| {
-            let started = state.borrow().started;
-            *state.borrow_mut() = StreamState::default();
-            started
-        });
-        if !started {
-            return Err(plugin_error(
-                "stream_not_started",
-                "宿主必须先调用 start，再调用 finish",
-            ));
-        }
+        let transformed = TRANSFORMER
+            .with(|transformer| transformer.borrow_mut().finish())
+            .map_err(from_common_error)?;
         Ok(FinishOutput {
-            items: Vec::new(),
-            effects: empty_effects(),
+            items: transformed.items,
+            effects: from_common_effects(transformed.effects),
         })
     }
 }
@@ -141,14 +90,6 @@ fn from_common_header(header: CommonHeader) -> Header {
     Header {
         name: header.name,
         value: header.value,
-    }
-}
-
-fn empty_effects() -> ResponseEffects {
-    ResponseEffects {
-        feedback: None,
-        usage: None,
-        failure: None,
     }
 }
 
@@ -203,10 +144,10 @@ fn from_common_failure(failure: CommonStreamFailure) -> StreamFailure {
     }
 }
 
-fn plugin_error(code: impl Into<String>, message: impl Into<String>) -> TransformError {
+fn from_common_error(error: gpt_codex_plugin_common::functions::PluginError) -> TransformError {
     TransformError {
-        code: code.into(),
-        message: message.into(),
+        code: error.code,
+        message: error.message,
     }
 }
 

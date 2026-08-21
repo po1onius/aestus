@@ -36,6 +36,26 @@ pub fn for_each_json_data_value(body: &[u8], mut visit: impl FnMut(Value)) -> bo
     saw_data
 }
 
+/// 按 SSE 空行边界切分一个完整响应体，并保留每个 item 的原始换行风格和终止空行。
+/// 测试服务用它模拟宿主交给流式插件的“完整 SSE item”输入，避免自行复制事件转换逻辑。
+pub fn split_sse_items(body: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    let text =
+        std::str::from_utf8(body).map_err(|error| format!("SSE 响应体不是合法 UTF-8: {error}"))?;
+    let mut items = Vec::new();
+    let mut current = String::new();
+    for line in split_lines(text) {
+        current.push_str(&line.content);
+        current.push_str(line.ending);
+        if line.content.is_empty() && !current.is_empty() {
+            items.push(std::mem::take(&mut current).into_bytes());
+        }
+    }
+    if !current.is_empty() {
+        items.push(current.into_bytes());
+    }
+    Ok(items)
+}
+
 fn emit_json_data_values(lines: &[&str], visit: &mut impl FnMut(Value)) {
     if lines.is_empty() {
         return;

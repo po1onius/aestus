@@ -9,5 +9,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 gpt-codex-plugin-common = { path = "../common" }
-serde_json.workspace = true
 wit-bindgen.workspace = true

@@ -4,9 +4,10 @@
 use gpt_codex_plugin_common::{
     Effects as CommonEffects, Feedback as CommonFeedback, Header as CommonHeader,
     LimitFeedback as CommonLimitFeedback, Usage as CommonUsage,
-    headers::{ResponseHeaderMode, sanitize_response_headers},
-    response::{effects_from_raw_json, transform_response_value},
-    responses_sse::convert_responses_sse_to_json,
+    functions::{
+        BufferedDisposition as CommonDisposition, BufferedTransformInput as CommonTransformInput,
+        HttpResponse as CommonResponse, transform_buffered_response,
+    },
 };
 
 wit_bindgen::generate!({
@@ -23,69 +24,50 @@ struct GptCodexBufferedResponsePlugin;
 
 impl Guest for GptCodexBufferedResponsePlugin {
     fn transform(input: TransformInput) -> Result<TransformOutput, TransformError> {
-        let TransformInput {
-            response: input, ..
-        } = input;
-        let Response {
-            status: upstream_status,
-            headers,
-            body,
-        } = input;
-        let mut status = upstream_status;
-        let mut converted_from_sse = false;
-        let parsed_json = serde_json::from_slice::<serde_json::Value>(&body).ok();
-        let (mut parsed, effects) = if let Some(value) = parsed_json {
-            let effects = effects_from_raw_json(&value, Some(upstream_status), false);
-            (Some(value), effects)
-        } else if (200..300).contains(&upstream_status)
-            && let Some(converted) = convert_responses_sse_to_json(&body, upstream_status)
-        {
-            status = converted.status;
-            converted_from_sse = true;
-            (Some(converted.value), converted.effects)
-        } else {
-            (
-                None,
-                effects_from_raw_json(&serde_json::Value::Null, Some(upstream_status), false),
-            )
-        };
-
-        let body = if let Some(value) = parsed.as_mut() {
-            let transformed = transform_response_value(value);
-            if converted_from_sse || transformed {
-                serde_json::to_vec(value).map_err(|error| TransformError {
-                    code: "serialize_response_failed".to_owned(),
-                    message: format!("改造后的非流式响应无法序列化: {error}"),
-                })?
-            } else {
-                body
+        let transformed = transform_buffered_response(to_common_input(input)).map_err(|error| {
+            TransformError {
+                code: error.code,
+                message: error.message,
             }
-        } else {
-            // 非 JSON 错误页或空 body 不臆测业务协议，但 header 仍由插件安全过滤，HTTP
-            // status 仍可通过 effects 生成 maintenance 回执。
-            body
+        })?;
+        let disposition = match transformed.disposition {
+            CommonDisposition::Respond(response) => {
+                BufferedDisposition::Respond(from_common_response(response))
+            }
         };
-        let header_mode = if converted_from_sse {
-            ResponseHeaderMode::Json
-        } else {
-            ResponseHeaderMode::Preserve
-        };
-        let headers = sanitize_response_headers(
-            headers.into_iter().map(to_common_header).collect(),
-            header_mode,
-        )
-        .into_iter()
-        .map(from_common_header)
-        .collect();
 
         Ok(TransformOutput {
-            disposition: BufferedDisposition::Respond(Response {
-                status,
-                headers,
-                body,
-            }),
-            effects: from_common_effects(effects),
+            disposition,
+            effects: from_common_effects(transformed.effects),
         })
+    }
+}
+
+fn to_common_input(input: TransformInput) -> CommonTransformInput {
+    CommonTransformInput {
+        response: CommonResponse {
+            status: input.response.status,
+            headers: input
+                .response
+                .headers
+                .into_iter()
+                .map(to_common_header)
+                .collect(),
+            body: input.response.body,
+        },
+        request_context: input.request_context,
+    }
+}
+
+fn from_common_response(response: CommonResponse) -> Response {
+    Response {
+        status: response.status,
+        headers: response
+            .headers
+            .into_iter()
+            .map(from_common_header)
+            .collect(),
+        body: response.body,
     }
 }
 

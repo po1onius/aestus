@@ -3,7 +3,11 @@
 #![allow(clippy::too_many_arguments)]
 
 use gpt_codex_plugin_common::{
-    Header as CommonHeader, headers::build_account_headers, request::transform_oauth_body,
+    Header as CommonHeader,
+    functions::{
+        AccountResource as CommonAccountResource, RequestTransformInput as CommonTransformInput,
+        ResponseMode as CommonResponseMode, transform_request,
+    },
 };
 
 wit_bindgen::generate!({
@@ -17,36 +21,35 @@ struct GptCodexRequestPlugin;
 
 impl Guest for GptCodexRequestPlugin {
     fn transform(input: TransformInput) -> Result<TransformOutput, TransformError> {
-        let TransformInput {
-            account,
-            headers,
-            body,
-        } = input;
-        let headers = headers.into_iter().map(to_common_header).collect();
-
-        let transformed = transform_oauth_body(&body)
-            .map_err(|message| plugin_error("invalid_oauth_responses_body", message))?;
-        let headers = build_account_headers(
-            headers,
-            &account.access_token,
-            account.chatgpt_account_id.as_deref(),
-            account.chatgpt_account_is_fedramp,
-        );
-        // ChatGPT Codex internal HTTP Responses 固定使用 SSE，但 response-mode
-        // 描述的是下游交付方式：原始 stream=false 时宿主必须完整收集上游 SSE，
-        // 再交给 buffered 插件转换成一个 Responses JSON。
-        let response_mode = if transformed.downstream_streaming {
-            ResponseMode::Stream
-        } else {
-            ResponseMode::Buffered
+        let transformed = transform_request(to_common_input(input))
+            .map_err(|error| plugin_error(error.code, error.message))?;
+        let response_mode = match transformed.response_mode {
+            CommonResponseMode::Stream => ResponseMode::Stream,
+            CommonResponseMode::Buffered => ResponseMode::Buffered,
         };
 
         Ok(TransformOutput {
-            headers: headers.into_iter().map(from_common_header).collect(),
+            headers: transformed
+                .headers
+                .into_iter()
+                .map(from_common_header)
+                .collect(),
             body: transformed.body,
             response_mode,
-            response_context: None,
+            response_context: transformed.response_context,
         })
+    }
+}
+
+fn to_common_input(input: TransformInput) -> CommonTransformInput {
+    CommonTransformInput {
+        account: CommonAccountResource {
+            access_token: input.account.access_token,
+            chatgpt_account_id: input.account.chatgpt_account_id,
+            chatgpt_account_is_fedramp: input.account.chatgpt_account_is_fedramp,
+        },
+        headers: input.headers.into_iter().map(to_common_header).collect(),
+        body: input.body,
     }
 }
 

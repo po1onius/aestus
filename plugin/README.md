@@ -13,6 +13,18 @@ Responses 路径，不包含 `/chat/completions` 兼容、心跳、重试或计�
 | 非流式响应插件 | `target/gpt-codex-buffered-response.component.wasm` | 原始上游 HTTP 响应 |
 | 流式响应插件 | `target/gpt-codex-stream-response.component.wasm` | 响应头及每个完整 SSE item |
 
+## 函数调用接口
+
+实际转换能力集中在 `gpt-codex-plugin-common::functions`，不依赖 WASM 或 WIT 类型，可由
+普通 Rust 程序直接调用：
+
+- `transform_request`：改造 OAuth 请求 header/body，并返回下游响应模式；
+- `transform_buffered_response`：处理非流式 JSON、错误响应以及完整 SSE 到 JSON 的转换；
+- `StreamResponseTransformer::{start, transform_item, finish}`：处理一条流式响应的完整生命周期。
+
+三个 WASM Component 只负责 WIT 类型映射，内部也调用上述函数，因此函数调用和上传到
+Dashboard 的组件不会形成两套业务实现。
+
 ## 请求字段
 
 OAuth Account 分支会：
@@ -104,6 +116,33 @@ usage 从最终 response 或终止 SSE event 的 `usage` 读取，`cached_tokens
 make check
 make build
 ```
+
+## 测试服务
+
+`gpt-codex-plugin-test-server` 提供本地 `POST /v1/responses`，真实调用 Codex 账号端点并依次
+执行请求、缓冲响应或流式响应插件函数。它会在返回前检查最终 JSON/SSE 是否符合 Responses
+API 的核心结构；校验失败返回 `502` 和 `plugin_test_error`，日志会记录具体字段错误，但不会
+记录 access token 或完整 prompt。
+
+启动时必须传入 Codex 登录态的 access token：
+
+```bash
+cargo run -p gpt-codex-plugin-test-server -- \
+  --access-token "$CODEX_ACCESS_TOKEN"
+```
+
+多账号 token 可以额外传入 `--chatgpt-account-id <ACCOUNT_ID>`，监听地址默认为
+`127.0.0.1:3000`。非流式验证示例：
+
+```bash
+curl http://127.0.0.1:3000/v1/responses \
+  -H 'content-type: application/json' \
+  -d '{"model":"gpt-5.6-sol","input":"只回复 OK","stream":false}'
+```
+
+流式验证只需把请求中的 `stream` 改为 `true`。测试服务为了能在写出 HTTP 响应前完成整条
+事件序列和终止事件校验，会先收集完整上游 SSE，再以 `text/event-stream` 返回；它用于验证
+插件协议转换，不用于测量首 token 延迟。
 
 在 Dashboard 的“插件”页面选择 Provider `GPT`，把三个产物上传到对应插槽后，以
 同一个套件版本发布。创建网关 API Key 时选择该套件版本即可。调用方原始请求的 inspection、
