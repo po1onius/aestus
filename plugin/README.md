@@ -22,7 +22,7 @@ OAuth Account 分支会：
 - 把 `reasoning.effort=minimal` 改为 `none`，reasoning 非空时补上 `include:["reasoning.encrypted_content"]`；
 - 把 legacy `functions/function_call` 转成 `tools/tool_choice`，并把嵌套的 Chat Completions function schema 拉平为 Responses schema；
 - 把 string input 转为 user message 数组，把 `role=tool` 转为 `function_call_output`；按续链信号过滤 `item_reference/id`，只修正工具 item 的 call ID，并用与 sub2api 相同的 SHA-256 规则压缩超长 ID；
-- 把 system message 改为 developer，并将其文本提升到 `instructions`；instructions 为空时按原始 model 写入同版本的完整 Codex base prompt；
+- 把 system message 原位改为 developer，不重复复制到 `instructions`；instructions 为空时按原始 model 写入对应的 Codex base prompt；
 - 归一化 `service_tier`，按模型能力过滤 `text.verbosity`；Spark 模型追加图片能力说明并删除其不支持的图片工具声明；
 - 把图片工具的 `format/compression` 改为 `output_format/output_compression`，删除空 base64 input image；
 - 把除内建 `image_gen` 外的 namespace 子工具摊平为 function；名称超过 64 字节时按 sub2api 规则截断并追加 SHA-256 短哈希，发现顶层或 namespace 间撞名时在发送前拒绝；
@@ -49,8 +49,9 @@ sub2api 的 Responses WebSocket v2。`prompt_cache_key` 保持下游原值，不
 - `response.failed` 发给下游前删除 output、usage、instructions、tools 等冗余请求回显，但保留 error 身份和消息。
 
 下游请求 `stream=false` 时，buffered 插件按 sub2api 默认 OAuth HTTP 路径把完整上游 SSE
-转换成一个 Responses JSON：优先提取首个 `response.completed/response.done` 的 `response`
-对象；终止对象的 `output` 为空时，优先按到达顺序保留 `response.output_item.done` 的完整
+转换成一个 Responses JSON：优先提取首个
+`response.completed/response.done/response.incomplete` 的 `response` 对象；终止对象的
+`output` 为空时，优先按到达顺序保留 `response.output_item.done` 的完整
 原始 item，以免丢失 encrypted content、未来字段或未知 item 类型；完全没有 done item 时，
 才累计文本 delta、reasoning delta、function item 与参数 delta 重建 output。终止事件中的
 usage 在改造前通过 effects 上报；`response.failed` 转成 502 JSON 错误并保留 maintenance

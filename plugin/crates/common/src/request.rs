@@ -57,10 +57,10 @@ pub fn transform_oauth_body(body: &[u8]) -> Result<OAuthTransformOutput, String>
     normalize_service_tier(object);
     strip_unsupported_verbosity(object);
 
-    // sub2api 在进入 OAuth transform 前已按原始模型补齐 base instructions。先补默认值、
-    // 再提升 system 消息，才能得到“system 文本 + base prompt”的相同顺序。
+    // 顶层 instructions 只承载调用方显式指令或 Codex base prompt；system 输入消息单独
+    // 转成 developer，不能再复制到 instructions，否则同一条高优先级指令会进入上下文两次。
     ensure_instructions(object, &original_model);
-    promote_system_messages(object);
+    normalize_system_messages(object);
     normalize_input(object, preserve_references);
     sanitize_empty_base64_images(object);
 
@@ -459,11 +459,12 @@ fn is_tool_call_input_type(kind: &str) -> bool {
     )
 }
 
-fn promote_system_messages(object: &mut Map<String, Value>) {
+/// ChatGPT Codex 输入历史统一使用 developer 表达高优先级消息。这里仅改 role 并保留消息
+/// 在原始位置，不把文本提升到顶层 instructions，避免改变顺序或重复注入同一内容。
+fn normalize_system_messages(object: &mut Map<String, Value>) {
     let Some(Value::Array(input)) = object.get_mut("input") else {
         return;
     };
-    let mut texts = Vec::new();
     for item in input {
         let Some(item) = item.as_object_mut() else {
             continue;
@@ -471,29 +472,8 @@ fn promote_system_messages(object: &mut Map<String, Value>) {
         if item.get("role").and_then(Value::as_str) != Some("system") {
             continue;
         }
-        if let Some(content) = item.get("content") {
-            let text = content_to_text(content);
-            if !text.trim().is_empty() {
-                texts.push(text);
-            }
-        }
         item.insert("role".to_owned(), Value::String("developer".to_owned()));
     }
-    if texts.is_empty() {
-        return;
-    }
-    let promoted = texts.join("\n\n");
-    let existing = object
-        .get("instructions")
-        .and_then(Value::as_str)
-        .filter(|text| !text.trim().is_empty());
-    object.insert(
-        "instructions".to_owned(),
-        Value::String(match existing {
-            Some(existing) => format!("{promoted}\n\n{existing}"),
-            None => promoted,
-        }),
-    );
 }
 
 fn ensure_instructions(object: &mut Map<String, Value>, model: &str) {
@@ -523,25 +503,6 @@ fn codex_instructions_for_model(model: &str) -> &'static str {
         GPT_5_1_INSTRUCTIONS
     } else {
         GPT_5_5_INSTRUCTIONS
-    }
-}
-
-fn content_to_text(content: &Value) -> String {
-    match content {
-        Value::String(text) => text.clone(),
-        Value::Array(parts) => parts
-            .iter()
-            .filter_map(Value::as_object)
-            .filter_map(|part| {
-                let kind = part.get("type").and_then(Value::as_str)?;
-                (kind == "input_text")
-                    .then(|| part.get("text").and_then(Value::as_str).map(str::to_owned))
-                    .flatten()
-            })
-            .collect::<Vec<_>>()
-            .join(""),
-        Value::Null => String::new(),
-        _ => String::new(),
     }
 }
 
@@ -630,7 +591,8 @@ mod tests {
         assert_eq!(value["input"][1]["summary"], json!([]));
         assert!(value["input"][1].get("id").is_none());
         let instructions = value["instructions"].as_str().unwrap();
-        assert!(instructions.starts_with("system rule\n\nYou are Codex"));
+        assert!(instructions.starts_with("You are Codex"));
+        assert!(!instructions.contains("system rule"));
         assert!(instructions.contains("# Personality"));
     }
 

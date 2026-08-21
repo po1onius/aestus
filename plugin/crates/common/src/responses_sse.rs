@@ -18,10 +18,11 @@ pub struct ConvertedResponsesBody {
 
 /// 将完整的 OpenAI Responses SSE body 转成单个非流式 Responses JSON。
 ///
-/// 与 sub2api 默认 OAuth HTTP 路径保持相同主序：优先取 `response.completed/done` 中的
-/// `response`；仅当其 output 为空时，先使用权威的 `output_item.done` 原始 item，完全
-/// 没有 done item 才用文本、reasoning 和函数参数 delta 重建。`response.failed` 转成
-/// 502 JSON 错误。没有可识别终止事件时返回 `None`，由调用方保留原始 SSE 兜底。
+/// 与 sub2api 默认 OAuth HTTP 路径保持相同主序：优先取
+/// `response.completed/done/incomplete` 中的 `response`；仅当其 output 为空时，先使用
+/// 权威的 `output_item.done` 原始 item，完全没有 done item 才用文本、reasoning 和函数
+/// 参数 delta 重建。`response.failed` 转成 502 JSON 错误。没有可识别终止事件时返回
+/// `None`，由调用方保留原始 SSE 兜底。
 pub fn convert_responses_sse_to_json(
     body: &[u8],
     upstream_status: u16,
@@ -30,15 +31,17 @@ pub fn convert_responses_sse_to_json(
         return None;
     }
 
-    let mut completed_event = None::<Value>;
+    let mut terminal_response_event = None::<Value>;
     let mut failed_event = None::<Value>;
     let mut done_items = Vec::<Value>::new();
     let mut seen_done_items = BTreeSet::<String>::new();
     for_each_json_data_value(body, |event| {
         let event_type = event.get("type").and_then(Value::as_str).map(str::trim);
         match event_type {
-            Some("response.completed" | "response.done") if completed_event.is_none() => {
-                completed_event = Some(event);
+            Some("response.completed" | "response.done" | "response.incomplete")
+                if terminal_response_event.is_none() =>
+            {
+                terminal_response_event = Some(event);
             }
             Some("response.failed") if failed_event.is_none() => {
                 failed_event = Some(event);
@@ -62,7 +65,7 @@ pub fn convert_responses_sse_to_json(
         }
     });
 
-    if let Some(mut terminal) = completed_event {
+    if let Some(mut terminal) = terminal_response_event {
         let effects = effects_from_raw_json(&terminal, Some(upstream_status), false);
         let mut response = terminal
             .get_mut("response")
@@ -330,14 +333,20 @@ data: [DONE]
     }
 
     #[test]
-    fn incomplete_stream_without_terminal_response_is_not_fabricated() {
-        assert!(
-            convert_responses_sse_to_json(
-                b"data: {\"type\":\"response.in_progress\"}\n\ndata: [DONE]\n\n",
-                200,
-            )
-            .is_none()
+    fn incomplete_event_becomes_non_streaming_response() {
+        let body = br#"data: {"type":"response.incomplete","response":{"id":"resp_incomplete","object":"response","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":{"input_tokens":3,"output_tokens":5}}}
+
+data: [DONE]
+
+"#;
+        let converted = convert_responses_sse_to_json(body, 200).unwrap();
+        assert_eq!(converted.status, 200);
+        assert_eq!(converted.value["id"], "resp_incomplete");
+        assert_eq!(converted.value["status"], "incomplete");
+        assert_eq!(
+            converted.value["incomplete_details"]["reason"],
+            "max_output_tokens"
         );
-        assert!(convert_responses_sse_to_json(br#"{"id":"json"}"#, 200).is_none());
+        assert_eq!(converted.effects.usage.unwrap().total_tokens, 8);
     }
 }
