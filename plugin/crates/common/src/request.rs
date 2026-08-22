@@ -5,7 +5,6 @@ const CODEX_INSTRUCTIONS: &str = include_str!("instructions/codex.txt");
 const GPT_5_1_INSTRUCTIONS: &str = include_str!("instructions/gpt5_1.txt");
 const GPT_5_2_INSTRUCTIONS: &str = include_str!("instructions/gpt5_2.txt");
 const GPT_5_5_INSTRUCTIONS: &str = include_str!("instructions/gpt5_5.txt");
-const REASONING_ENCRYPTED_CONTENT: &str = "reasoning.encrypted_content";
 const UNSUPPORTED_OAUTH_FIELDS: &[&str] = &[
     "max_output_tokens",
     "temperature",
@@ -38,7 +37,7 @@ pub fn transform_oauth_body(body: &[u8]) -> Result<OAuthTransformOutput, String>
 
     let original_model = require_model(object)?.to_owned();
     reject_previous_response_id(object)?;
-    let preserve_references = has_continuation_input(object);
+    normalize_prompt(object)?;
     let inferred_effort = effort_suffix(&original_model);
     object.insert(
         "model".to_owned(),
@@ -55,13 +54,12 @@ pub fn transform_oauth_body(body: &[u8]) -> Result<OAuthTransformOutput, String>
 
     normalize_reasoning(object, inferred_effort);
     normalize_service_tier(object);
-    strip_unsupported_verbosity(object);
 
     // 顶层 instructions 只承载调用方显式指令或 Codex base prompt；system 输入消息单独
     // 转成 developer，不能再复制到 instructions，否则同一条高优先级指令会进入上下文两次。
     ensure_instructions(object, &original_model);
     normalize_system_messages(object);
-    normalize_input(object, preserve_references);
+    normalize_input(object);
     sanitize_empty_base64_images(object);
 
     let body =
@@ -103,6 +101,22 @@ fn reject_previous_response_id(object: &Map<String, Value>) -> Result<(), String
     Err("previous_response_id is only supported on Responses WebSocket v2".to_owned())
 }
 
+/// 标准 Responses API 中非空的 `prompt` 用于引用可复用 Prompt 模板，并不是普通文本
+/// 提示词。ChatGPT Codex OAuth 上游会明确拒绝非空值，因此必须在转发前返回错误，不能
+/// 静默删除后继续请求；`null` 仅表示未设置，直接删除以免向上游发送无意义字段。
+fn normalize_prompt(object: &mut Map<String, Value>) -> Result<(), String> {
+    match object.get("prompt") {
+        None => Ok(()),
+        Some(Value::Null) => {
+            object.remove("prompt");
+            Ok(())
+        }
+        Some(_) => Err(
+            "ChatGPT Codex OAuth endpoint 不支持 prompt，请改用 instructions 和 input".to_owned(),
+        ),
+    }
+}
+
 fn looks_like_message_id(value: &str) -> bool {
     let value = value.to_ascii_lowercase();
     let Some(suffix) = ["msg_", "message_", "item_", "chatcmpl_"]
@@ -115,21 +129,6 @@ fn looks_like_message_id(value: &str) -> bool {
         && suffix
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-}
-
-fn has_continuation_input(object: &Map<String, Value>) -> bool {
-    object
-        .get("input")
-        .and_then(Value::as_array)
-        .is_some_and(|input| {
-            input.iter().filter_map(Value::as_object).any(|item| {
-                item.get("type")
-                    .and_then(Value::as_str)
-                    .is_some_and(|kind| {
-                        is_tool_call_item_type(kind.trim()) || kind.trim() == "item_reference"
-                    })
-            })
-        })
 }
 
 /// 对齐 sub2api 当前 Codex alias：只归一化已知模型，未知模型保留调用方值，避免插件
@@ -250,29 +249,6 @@ fn normalize_reasoning(object: &mut Map<String, Value>, inferred_effort: Option<
     {
         reasoning.insert("effort".to_owned(), Value::String("none".to_owned()));
     }
-    if reasoning.is_empty() {
-        return;
-    }
-
-    match object.get_mut("include") {
-        None | Some(Value::Null) => {
-            object.insert(
-                "include".to_owned(),
-                Value::Array(vec![Value::String(REASONING_ENCRYPTED_CONTENT.to_owned())]),
-            );
-        }
-        Some(Value::Array(include)) => {
-            if !include
-                .iter()
-                .any(|item| item.as_str() == Some(REASONING_ENCRYPTED_CONTENT))
-            {
-                include.push(Value::String(REASONING_ENCRYPTED_CONTENT.to_owned()));
-            }
-        }
-        Some(_) => {
-            // 异常类型保持原样，避免用“修复”之名覆盖调用方数据。
-        }
-    }
 }
 
 /// 官方 Responses 将 `fast` 定义为 `priority` 的请求别名，响应也统一回显
@@ -286,46 +262,7 @@ fn normalize_service_tier(object: &mut Map<String, Value>) {
     }
 }
 
-fn strip_unsupported_verbosity(object: &mut Map<String, Value>) {
-    let supports_verbosity = object
-        .get("model")
-        .and_then(Value::as_str)
-        .is_none_or(model_supports_verbosity);
-    if supports_verbosity {
-        return;
-    }
-    if let Some(Value::Object(text)) = object.get_mut("text") {
-        text.remove("verbosity");
-    }
-}
-
-fn model_supports_verbosity(model: &str) -> bool {
-    let Some(version) = model.trim().strip_prefix("gpt-") else {
-        return true;
-    };
-    let major_digits = version.bytes().take_while(u8::is_ascii_digit).count();
-    let Some(major) = version[..major_digits].parse::<u32>().ok() else {
-        return false;
-    };
-    if major > 5 {
-        return true;
-    }
-    if major < 5 {
-        return false;
-    }
-    let Some(minor_text) = version[major_digits..].strip_prefix('.') else {
-        return true;
-    };
-    let minor_digits = minor_text.bytes().take_while(u8::is_ascii_digit).count();
-    if minor_digits == 0 {
-        return true;
-    }
-    minor_text[..minor_digits]
-        .parse::<u32>()
-        .is_ok_and(|minor| minor >= 3)
-}
-
-fn normalize_input(object: &mut Map<String, Value>, preserve_references: bool) {
+fn normalize_input(object: &mut Map<String, Value>) {
     if matches!(object.get("input"), Some(Value::String(_))) {
         let Some(Value::String(input)) = object.remove("input") else {
             unreachable!("input 已确认是 string");
@@ -358,24 +295,10 @@ fn normalize_input(object: &mut Map<String, Value>, preserve_references: bool) {
             .map(str::trim)
             .unwrap_or_default()
             .to_owned();
+        // Reasoning item 可能携带由 Codex 返回的 `rs_*` 标识、summary 和加密上下文。
+        // 这些字段共同属于原生 Responses 协议载荷，插件不应修补或删除其中任何部分。
+        // 在这里直接保留，也可避免下方针对普通输入 item 的通用 ID 清理误伤 reasoning。
         if item_type == "reasoning" {
-            item_object.remove("id");
-            if !item_object.contains_key("summary") || item_object["summary"].is_null() {
-                item_object.insert("summary".to_owned(), Value::Array(Vec::new()));
-            }
-            normalized.push(item);
-            continue;
-        }
-
-        if item_type == "item_reference" {
-            if !preserve_references {
-                continue;
-            }
-            if let Some(Value::String(id)) = item_object.get_mut("id")
-                && id.starts_with("call_")
-            {
-                *id = normalize_call_id(id);
-            }
             normalized.push(item);
             continue;
         }
@@ -392,26 +315,6 @@ fn normalize_input(object: &mut Map<String, Value>, preserve_references: bool) {
                     "call_id".to_owned(),
                     Value::String(normalize_call_id(&call_id)),
                 );
-            }
-        }
-
-        if !preserve_references {
-            item_object.remove("id");
-        } else if is_tool_call_input_type(&item_type) {
-            let invalid_id = item_object
-                .get("id")
-                .and_then(Value::as_str)
-                .is_some_and(|id| !id.is_empty() && !id.starts_with("fc"));
-            if invalid_id {
-                item_object.remove("id");
-            }
-        } else if item_type == "message" {
-            let invalid_id = item_object
-                .get("id")
-                .and_then(Value::as_str)
-                .is_some_and(|id| !id.is_empty() && !id.starts_with("msg"));
-            if invalid_id {
-                item_object.remove("id");
             }
         }
 
@@ -449,13 +352,6 @@ fn is_tool_call_item_type(kind: &str) -> bool {
             | "function_call_output"
             | "custom_tool_call_output"
             | "tool_search_output"
-    )
-}
-
-fn is_tool_call_input_type(kind: &str) -> bool {
-    matches!(
-        kind,
-        "function_call" | "local_shell_call" | "tool_search_call" | "custom_tool_call"
     )
 }
 
@@ -583,13 +479,12 @@ mod tests {
         assert!(value.get("temperature").is_none());
         assert!(value.get("user").is_none());
         assert_eq!(value["reasoning"]["effort"], "high");
-        assert_eq!(value["include"][0], REASONING_ENCRYPTED_CONTENT);
         assert_eq!(value["tools"][0]["name"], "lookup");
         assert!(value["tools"][0].get("function").is_none());
         assert_eq!(value["tool_choice"]["name"], "lookup");
         assert_eq!(value["input"][0]["role"], "developer");
-        assert_eq!(value["input"][1]["summary"], json!([]));
-        assert!(value["input"][1].get("id").is_none());
+        assert_eq!(value["input"][1]["id"], "rs_1");
+        assert!(value["input"][1].get("summary").is_none());
         let instructions = value["instructions"].as_str().unwrap();
         assert!(instructions.starts_with("You are Codex"));
         assert!(!instructions.contains("system rule"));
@@ -681,7 +576,7 @@ mod tests {
     }
 
     #[test]
-    fn input_filter_matches_codex_reference_and_call_id_rules() {
+    fn input_ids_are_preserved_while_call_id_is_normalized() {
         let long_call_id = format!("call_{}", "x".repeat(80));
         let body = json!({
             "model": "gpt-5.5",
@@ -695,16 +590,16 @@ mod tests {
         });
         let output = transform_oauth_body(&serde_json::to_vec(&body).unwrap()).unwrap();
         let value: Value = serde_json::from_slice(&output.body).unwrap();
-        assert_eq!(value["input"][0]["id"], "fc_ref");
-        assert!(value["input"][1].get("id").is_none());
-        assert!(value["input"][2].get("id").is_none());
+        assert_eq!(value["input"][0]["id"], "call_ref");
+        assert_eq!(value["input"][1]["id"], "item_message");
+        assert_eq!(value["input"][2]["id"], "item_call");
         let compacted = value["input"][2]["call_id"].as_str().unwrap();
         assert_eq!(
             compacted,
             "fc_c799a41af85be7b0a2ca4f40b252062d5d2c6710dbdda85985547caa83ceb"
         );
-        assert!(value["input"][3].get("id").is_none());
-        assert_eq!(value["input"][3]["summary"], json!([]));
+        assert_eq!(value["input"][3]["id"], "rs_1");
+        assert!(value["input"][3].get("summary").is_none());
     }
 
     #[test]
@@ -720,7 +615,7 @@ mod tests {
         .unwrap();
         let value: Value = serde_json::from_slice(&output.body).unwrap();
         assert_eq!(value["service_tier"], "priority");
-        assert!(value["text"].get("verbosity").is_none());
+        assert_eq!(value["text"]["verbosity"], "high");
         assert_eq!(value["text"]["format"]["type"], "text");
         assert!(
             value["instructions"]

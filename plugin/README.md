@@ -37,20 +37,23 @@ Dashboard 的组件不会形成两套业务实现。
 - 发给 Codex 上游的 body 无论下游模式如何，都固定为 `store=false`、`stream=true`；
 - 拒绝非空 `previous_response_id`。HTTP `/v1/responses` 不支持 Responses WebSocket v2 的
   连接态续链语义；
+- 删除 `prompt=null`，并拒绝非空的顶层 `prompt`。非空值用于引用标准 Responses API 的
+  可复用 Prompt 模板，但 ChatGPT Codex OAuth 上游不支持；请改用 `instructions` 和
+  `input`；
 - 归一化已知 Codex model alias，并从 `-minimal/-none/-low/-medium/-high/-xhigh` 后缀
   推导 reasoning effort；未知 model 保持调用方原值；
 - 删除 Codex OAuth 上游不支持的字段：`max_output_tokens`、`temperature`、`top_p`、
   `frequency_penalty`、`presence_penalty`、`user`、`metadata`、
   `prompt_cache_retention`、`safety_identifier` 和 `stream_options`；
-- 将 `reasoning.effort=minimal` 改为 `none`；reasoning object 非空时补充
-  `include:["reasoning.encrypted_content"]`；
-- 将 `service_tier=fast` 归一化为 `priority`；不支持 verbosity 的模型会删除
-  `text.verbosity`，`text` 中的其他字段保持不变；
+- 将 `reasoning.effort=minimal` 改为 `none`；`include` 完全保持调用方原值，插件不会因
+  `reasoning` 非空而自动添加 `reasoning.encrypted_content`；
+- 将 `service_tier=fast` 归一化为 `priority`；`text` 完全保持调用方原值，插件不再针对
+  `text.verbosity` 做模型判断或删除；
 - `instructions` 缺失或为空时，按照调用方的原始 model 注入对应的内置 Codex base prompt；
 - 将 input 中的 `role=system` 原位改为 `developer`，不会重复复制到顶层 `instructions`；
 - 将字符串 `input` 转为 user message 数组；空字符串转为空数组；
-- 根据输入中是否存在工具调用或 `item_reference` 判断是否属于续链输入，并据此过滤或保留
-  item reference/id；reasoning item 会删除 `id`，并在缺失时补充空 `summary`；
+- 所有 input item 的 `id` 以及 `item_reference` 完全保持调用方原值，不再判断续链输入或
+  清理 message、工具 item 和 reasoning item 的标识；
 - 工具调用的 `call_id` 统一为 `fc_*`；超过 64 字节时使用固定 domain separator 和
   SHA-256 规则压缩；
 - 删除 payload 为空的 base64 `input_image`；如果 message 的 content 因此变空，则删除

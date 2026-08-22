@@ -8,4 +8,5 @@ web/vite.config.js
 web/vite.config.d.ts
 web/dev-server*.log
 deploy/.env
+.secrets/
 *.tar
