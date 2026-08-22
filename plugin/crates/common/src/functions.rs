@@ -7,7 +7,11 @@ use serde_json::Value;
 
 use crate::{
     Effects, Header,
-    headers::{ResponseHeaderMode, build_account_headers, sanitize_response_headers},
+    headers::{
+        ResponseHeaderMode, build_account_headers, build_image_account_headers,
+        sanitize_response_headers,
+    },
+    images::{transform_edits_body, transform_generations_body, transform_image_response_body},
     request::transform_oauth_body,
     response::{effects_from_raw_json, is_terminal_event, transform_response_value},
     responses_sse::convert_responses_sse_to_json,
@@ -63,6 +67,98 @@ pub struct RequestTransformOutput {
     pub body: Vec<u8>,
     pub response_mode: ResponseMode,
     pub response_context: Option<Vec<u8>>,
+}
+
+/// Images 请求函数沿用 Responses 插件的账号输入，但输出固定是发往 Codex Images
+/// 端点的 JSON header/body，不需要 response mode 或会话上下文。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageRequestTransformInput {
+    pub account: AccountResource,
+    pub headers: Vec<Header>,
+    pub body: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageRequestTransformOutput {
+    pub headers: Vec<Header>,
+    pub body: Vec<u8>,
+}
+
+/// 转换标准 OpenAI `/images/generations` JSON 请求。
+pub fn transform_image_generations_request(
+    input: ImageRequestTransformInput,
+) -> Result<ImageRequestTransformOutput, PluginError> {
+    let body = transform_generations_body(&input.body)
+        .map_err(|message| PluginError::new("invalid_image_generations_request", message))?;
+    Ok(ImageRequestTransformOutput {
+        headers: build_image_account_headers(
+            input.headers,
+            &input.account.access_token,
+            input.account.chatgpt_account_id.as_deref(),
+            input.account.chatgpt_account_is_fedramp,
+        ),
+        body,
+    })
+}
+
+/// 转换标准 OpenAI `/images/edits` multipart 请求。解析过程是异步的，便于底层
+/// multipart 库按字段消费 body；函数输出仍是可直接发送给 Codex 的完整 JSON。
+pub async fn transform_image_edits_request(
+    input: ImageRequestTransformInput,
+) -> Result<ImageRequestTransformOutput, PluginError> {
+    let content_type = input
+        .headers
+        .iter()
+        .find(|header| header.name.eq_ignore_ascii_case("content-type"))
+        .and_then(|header| std::str::from_utf8(&header.value).ok())
+        .ok_or_else(|| {
+            PluginError::new(
+                "invalid_image_edits_request",
+                "图片编辑请求缺少 Content-Type",
+            )
+        })?
+        .to_owned();
+    let body = transform_edits_body(&content_type, input.body)
+        .await
+        .map_err(|message| PluginError::new("invalid_image_edits_request", message))?;
+    Ok(ImageRequestTransformOutput {
+        headers: build_image_account_headers(
+            input.headers,
+            &input.account.access_token,
+            input.account.chatgpt_account_id.as_deref(),
+            input.account.chatgpt_account_is_fedramp,
+        ),
+        body,
+    })
+}
+
+/// 将成功的 Codex 图片响应转成最小 OpenAI Images 响应。非成功响应不改写错误 body，
+/// 只执行通用响应 header 安全过滤，便于下游看到上游的真实错误信息。
+pub fn transform_image_response(response: HttpResponse) -> Result<HttpResponse, PluginError> {
+    let HttpResponse {
+        status,
+        headers,
+        body,
+    } = response;
+    let successful = (200..300).contains(&status);
+    let body = if successful {
+        transform_image_response_body(&body)
+            .map_err(|message| PluginError::new("invalid_codex_image_response", message))?
+    } else {
+        body
+    };
+    Ok(HttpResponse {
+        status,
+        headers: sanitize_response_headers(
+            headers,
+            if successful {
+                ResponseHeaderMode::Json
+            } else {
+                ResponseHeaderMode::Preserve
+            },
+        ),
+        body,
+    })
 }
 
 /// 执行完整的 Codex OAuth 请求插件逻辑。调用方拿到的 header/body 可以直接发送到

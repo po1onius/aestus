@@ -22,10 +22,60 @@ Codex OAuth 上游固定使用 SSE。下游传入 `stream=false` 时，套件会
 
 - `transform_request`：改造 OAuth 请求 header/body，并返回下游响应模式；
 - `transform_buffered_response`：处理非流式 JSON、错误响应以及完整 SSE 到 JSON 的转换；
-- `StreamResponseTransformer::{start, transform_item, finish}`：处理一条流式响应的完整生命周期。
+- `StreamResponseTransformer::{start, transform_item, finish}`：处理一条流式响应的完整生命周期；
+- `transform_image_generations_request`：把 OpenAI `/images/generations` JSON 转成 Codex
+  `/images/generations` JSON；
+- `transform_image_edits_request`：把 OpenAI `/images/edits` multipart 转成 Codex
+  `/images/edits` JSON；
+- `transform_image_response`：从 Codex 图片响应或工具输出的 `input_image` 中提取 base64，
+  输出统一的 OpenAI Images JSON。
 
 三个 WASM Component 只负责 WIT 类型映射，内部调用同一组函数，因此函数调用和上传到
 Dashboard 的组件不会形成两套业务实现。
+
+Images 三个函数目前只作为普通 Rust 函数提供，尚未增加 WIT 或 WASM Component 包装；
+测试服务会直接调用它们验证真实 Codex Images 端点。
+
+## Images API 转换
+
+下游提供标准 OpenAI Images API：
+
+- `POST /v1/images/generations` 接收 JSON；
+- `POST /v1/images/edits` 接收 `multipart/form-data`，支持单个或多个 `image`/`image[]`
+  文件字段。
+
+两个请求发往 Codex 前都会重建 OAuth header，并转成 `application/json`。Codex 当前图片
+扩展固定使用 `gpt-image-2`，因此函数忽略下游 `model` 并写入 `gpt-image-2`。共同支持的
+请求字段只有：
+
+| 下游端点 | 进入 Codex 上游的字段 |
+| --- | --- |
+| `/images/generations` | `prompt`、`background`、`n`、`quality`、`size`、固定 `model` |
+| `/images/edits` | `images`、`prompt`、`background`、`n`、`quality`、`size`、固定 `model` |
+
+edits 函数使用成熟的 multipart 解析库读取上传文件，根据字段 Content-Type 或文件扩展名
+确定媒体类型，并编码成 Codex 所需的：
+
+```json
+{
+  "images": [
+    {"image_url": "data:image/png;base64,..."}
+  ]
+}
+```
+
+Codex 请求结构没有的 `mask`、`input_fidelity`、`moderation`、`output_compression`、
+`output_format`、`partial_images`、`response_format`、`stream`、`style` 和 `user` 等参数
+直接丢弃。`quality=standard/hd` 也不会进入只接受 `low/medium/high/auto` 的 Codex 请求。
+
+成功响应同时兼容两种上游形态：直接响应的 `data[].b64_json`，以及任意工具输出 envelope
+内的 `type=input_image` + base64 data URL。下游最终只得到：
+
+```json
+{"data":[{"b64_json":"..."}]}
+```
+
+非 2xx 响应不改写错误 body，只清理上游敏感和连接级响应 header。
 
 ## 请求转换
 
@@ -54,10 +104,10 @@ Dashboard 的组件不会形成两套业务实现。
 - 将字符串 `input` 转为 user message 数组；空字符串转为空数组；
 - 所有 input item 的 `id` 以及 `item_reference` 完全保持调用方原值，不再判断续链输入或
   清理 message、工具 item 和 reasoning item 的标识；
-- 工具调用的 `call_id` 统一为 `fc_*`；超过 64 字节时使用固定 domain separator 和
-  SHA-256 规则压缩；
-- 删除 payload 为空的 base64 `input_image`；如果 message 的 content 因此变空，则删除
-  该 message。
+- 工具调用与工具输出的 `call_id` 完全保持调用方原值，不添加 `fc_*` 前缀，也不对超长
+  ID 做哈希；Codex 上游自行校验最多 64 个字符的限制；
+- `input_image`、图片 URL、base64 payload 及 image generation tool 的所有字段完全保持
+  调用方原值。
 
 `prompt_cache_key` 保持调用方原值，不参与 header 会话隔离。插件也不会生成或透传
 `version`、`session_id`、`conversation_id`、device ID 或 installation ID。
@@ -131,12 +181,10 @@ Dashboard 的组件不会形成两套业务实现。
 
 非流式 JSON 与每个 SSE data JSON 共用以下字段修正：
 
-- 终止输出中的 `image_generation_call` 已有非空 result，但状态仍为
-  `generating/in_progress` 时改为 `completed`；
 - `response.failed` 发给下游前删除 `instructions`、`output`、`usage`、`metadata`、
   `reasoning`、`tools`、`tool_choice`、`parallel_tool_calls`、`text`、`truncation`、
   `max_output_tokens` 和 `incomplete_details`，保留错误身份和消息；
-- 原生 message、function/custom tool call 的名称和参数保持不变。
+- 原生 message、function/custom tool call 和 `image_generation_call` 的所有字段保持不变。
 
 响应 header 会删除 hop-by-hop、`Connection` 声明的动态连接级 header、失效的
 `content-length`、上游 cookie 和鉴权信息。SSE 转 JSON 成功时输出
@@ -204,10 +252,11 @@ make build
 
 ## 测试服务
 
-`gpt-codex-plugin-test-server` 提供本地 `POST /v1/responses`，真实调用 Codex 账号端点并
-依次执行请求、缓冲响应或流式响应插件函数。它会在返回前检查最终 JSON/SSE 是否符合
-Responses API 的核心结构；校验失败返回 502 和 `plugin_test_error`。日志会记录请求大小、
-模型、上游状态和具体校验错误，但不会记录 access token 或完整 prompt。
+`gpt-codex-plugin-test-server` 提供本地 `POST /v1/responses`、
+`POST /v1/images/generations` 和 `POST /v1/images/edits`，真实调用对应的 Codex 账号端点并
+执行转换函数。它会在返回前检查最终 JSON/SSE 是否符合对应 API 的核心结构；校验失败返回
+502 和 `plugin_test_error`。日志会记录请求大小、模型、图片数量、上游状态和具体校验错误，
+但不会记录 access token、完整 prompt 或图片 base64。
 
 启动时必须传入 Codex 登录态的 access token：
 
@@ -228,3 +277,23 @@ curl http://127.0.0.1:3000/v1/responses \
 流式验证只需把请求中的 `stream` 改为 `true`。测试服务为了能在写出 HTTP 响应前完成整条
 事件序列和终止事件校验，会先收集完整上游 SSE，再以 `text/event-stream` 返回；它用于验证
 插件协议转换，不用于测量首 token 延迟。
+
+文生图验证示例：
+
+```bash
+curl http://127.0.0.1:3000/v1/images/generations \
+  -H 'content-type: application/json' \
+  -d '{"model":"gpt-image-1","prompt":"一只坐在月球上的橘猫","size":"1024x1024"}'
+```
+
+图生图验证示例；curl 会自动把文件编码成 multipart：
+
+```bash
+curl http://127.0.0.1:3000/v1/images/edits \
+  -F 'image=@./cat.png' \
+  -F 'prompt=给猫加一顶红色帽子' \
+  -F 'quality=high'
+```
+
+三个 Codex 上游地址都可独立覆盖：Responses 继续使用 `--upstream-url`，图片端点使用
+`--image-generations-upstream-url` 和 `--image-edits-upstream-url`。

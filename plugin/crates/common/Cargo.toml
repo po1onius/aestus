@@ -5,7 +5,9 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-hex.workspace = true
+base64.workspace = true
+futures-util.workspace = true
+mime_guess.workspace = true
+multer.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true

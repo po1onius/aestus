@@ -1,5 +1,4 @@
 use serde_json::{Map, Value, json};
-use sha2::{Digest, Sha256};
 
 const CODEX_INSTRUCTIONS: &str = include_str!("instructions/codex.txt");
 const GPT_5_1_INSTRUCTIONS: &str = include_str!("instructions/gpt5_1.txt");
@@ -60,7 +59,6 @@ pub fn transform_oauth_body(body: &[u8]) -> Result<OAuthTransformOutput, String>
     ensure_instructions(object, &original_model);
     normalize_system_messages(object);
     normalize_input(object);
-    sanitize_empty_base64_images(object);
 
     let body =
         serde_json::to_vec(&value).map_err(|error| format!("改造后的请求体无法序列化: {error}"))?;
@@ -280,79 +278,6 @@ fn normalize_input(object: &mut Map<String, Value>) {
             },
         );
     }
-    let Some(Value::Array(input)) = object.get_mut("input") else {
-        return;
-    };
-    let mut normalized = Vec::with_capacity(input.len());
-    for mut item in std::mem::take(input) {
-        let Some(item_object) = item.as_object_mut() else {
-            normalized.push(item);
-            continue;
-        };
-        let item_type = item_object
-            .get("type")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .unwrap_or_default()
-            .to_owned();
-        // Reasoning item 可能携带由 Codex 返回的 `rs_*` 标识、summary 和加密上下文。
-        // 这些字段共同属于原生 Responses 协议载荷，插件不应修补或删除其中任何部分。
-        // 在这里直接保留，也可避免下方针对普通输入 item 的通用 ID 清理误伤 reasoning。
-        if item_type == "reasoning" {
-            normalized.push(item);
-            continue;
-        }
-
-        if is_tool_call_item_type(&item_type) {
-            let call_id = item_object
-                .get("call_id")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned);
-            if let Some(call_id) = call_id {
-                item_object.insert(
-                    "call_id".to_owned(),
-                    Value::String(normalize_call_id(&call_id)),
-                );
-            }
-        }
-
-        normalized.push(item);
-    }
-    *input = normalized;
-}
-
-fn normalize_call_id(id: &str) -> String {
-    let id = id.trim();
-    let normalized = if id.starts_with("fc") {
-        id.to_owned()
-    } else if let Some(suffix) = id.strip_prefix("call_") {
-        format!("fc_{suffix}")
-    } else {
-        format!("fc_{id}")
-    };
-    if normalized.len() <= 64 {
-        normalized
-    } else {
-        // 使用同一固定 domain separator，让不同实例、不同语言实现对同一超长 call id
-        // 得到完全相同且满足上游 64-byte 限制的值。
-        let digest = Sha256::digest(format!("sub2api:codex-call-id:v1:{normalized}").as_bytes());
-        format!("fc_{}", &hex::encode(digest)[..61])
-    }
-}
-
-fn is_tool_call_item_type(kind: &str) -> bool {
-    matches!(
-        kind,
-        "function_call"
-            | "local_shell_call"
-            | "tool_search_call"
-            | "custom_tool_call"
-            | "function_call_output"
-            | "custom_tool_call_output"
-            | "tool_search_output"
-    )
 }
 
 /// ChatGPT Codex 输入历史统一使用 developer 表达高优先级消息。这里仅改 role 并保留消息
@@ -400,46 +325,6 @@ fn codex_instructions_for_model(model: &str) -> &'static str {
     } else {
         GPT_5_5_INSTRUCTIONS
     }
-}
-
-fn sanitize_empty_base64_images(object: &mut Map<String, Value>) {
-    let Some(Value::Array(input)) = object.get_mut("input") else {
-        return;
-    };
-    input.retain_mut(|item| {
-        let Some(item_object) = item.as_object_mut() else {
-            return true;
-        };
-        if is_empty_base64_image(item_object) {
-            return false;
-        }
-        if let Some(Value::Array(content)) = item_object.get_mut("content") {
-            content.retain(|part| !part.as_object().is_some_and(is_empty_base64_image));
-            if content.is_empty() {
-                return false;
-            }
-        }
-        true
-    });
-}
-
-fn is_empty_base64_image(part: &Map<String, Value>) -> bool {
-    if part.get("type").and_then(Value::as_str) != Some("input_image") {
-        return false;
-    }
-    let Some(url) = part.get("image_url").and_then(Value::as_str) else {
-        return false;
-    };
-    let Some((metadata, payload)) = url
-        .strip_prefix("data:")
-        .and_then(|url| url.split_once(','))
-    else {
-        return false;
-    };
-    metadata
-        .split(';')
-        .any(|token| token.trim().eq_ignore_ascii_case("base64"))
-        && payload.trim().is_empty()
 }
 
 #[cfg(test)]
@@ -492,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn input_string_and_empty_image_are_normalized() {
+    fn input_string_is_normalized_while_image_fields_are_preserved() {
         let output = transform_oauth_body(
             br#"{"model":"gpt-5.3","input":"hello","tools":[{"type":"image_generation","output_format":"png","output_compression":80}]}"#,
         )
@@ -514,7 +399,11 @@ mod tests {
         )
         .unwrap();
         let value: Value = serde_json::from_slice(&output.body).unwrap();
-        assert_eq!(value["input"][0]["content"].as_array().unwrap().len(), 1);
+        assert_eq!(value["input"][0]["content"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            value["input"][0]["content"][0]["image_url"],
+            "data:image/png;base64,"
+        );
     }
 
     #[test]
@@ -576,7 +465,7 @@ mod tests {
     }
 
     #[test]
-    fn input_ids_are_preserved_while_call_id_is_normalized() {
+    fn input_item_ids_and_call_ids_are_preserved() {
         let long_call_id = format!("call_{}", "x".repeat(80));
         let body = json!({
             "model": "gpt-5.5",
@@ -584,7 +473,7 @@ mod tests {
             "input": [
                 {"type":"item_reference", "id":"call_ref"},
                 {"type":"message", "role":"user", "id":"item_message", "content":"hello"},
-                {"type":"function_call", "id":"item_call", "call_id":long_call_id, "name":"lookup", "arguments":"{}"},
+                {"type":"function_call", "id":"item_call", "call_id":long_call_id.clone(), "name":"lookup", "arguments":"{}"},
                 {"type":"reasoning", "id":"rs_1", "encrypted_content":"secret"}
             ]
         });
@@ -593,11 +482,7 @@ mod tests {
         assert_eq!(value["input"][0]["id"], "call_ref");
         assert_eq!(value["input"][1]["id"], "item_message");
         assert_eq!(value["input"][2]["id"], "item_call");
-        let compacted = value["input"][2]["call_id"].as_str().unwrap();
-        assert_eq!(
-            compacted,
-            "fc_c799a41af85be7b0a2ca4f40b252062d5d2c6710dbdda85985547caa83ceb"
-        );
+        assert_eq!(value["input"][2]["call_id"], long_call_id);
         assert_eq!(value["input"][3]["id"], "rs_1");
         assert!(value["input"][3].get("summary").is_none());
     }

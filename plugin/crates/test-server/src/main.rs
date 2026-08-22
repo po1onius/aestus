@@ -20,8 +20,10 @@ use gpt_codex_plugin_common::{
     Effects, Header,
     functions::{
         AccountResource, BufferedDisposition, BufferedTransformInput, HttpResponse,
-        RequestTransformInput, ResponseHead, ResponseMode, StreamResponseTransformer,
-        StreamStartInput, transform_buffered_response, transform_request,
+        ImageRequestTransformInput, RequestTransformInput, ResponseHead, ResponseMode,
+        StreamResponseTransformer, StreamStartInput, transform_buffered_response,
+        transform_image_edits_request, transform_image_generations_request,
+        transform_image_response, transform_request,
     },
     sse::{JsonSseItem, split_sse_items},
 };
@@ -31,12 +33,15 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 const DEFAULT_UPSTREAM_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
+const DEFAULT_IMAGE_GENERATIONS_UPSTREAM_URL: &str =
+    "https://chatgpt.com/backend-api/codex/images/generations";
+const DEFAULT_IMAGE_EDITS_UPSTREAM_URL: &str = "https://chatgpt.com/backend-api/codex/images/edits";
 const MAX_REQUEST_BYTES: usize = 512 * 1024 * 1024;
 
 #[derive(Debug, Parser)]
 #[command(
     name = "gpt-codex-plugin-test-server",
-    about = "通过 Codex 账号端点验证 GPT Responses 插件函数"
+    about = "通过 Codex 账号端点验证 GPT Responses 与 Images 转换函数"
 )]
 struct Arguments {
     /// Codex 账号登录产生的 access token。服务不会把该值写入日志。
@@ -55,6 +60,14 @@ struct Arguments {
     #[arg(long, default_value = DEFAULT_UPSTREAM_URL)]
     upstream_url: String,
 
+    /// Codex 图片生成上游地址。
+    #[arg(long, default_value = DEFAULT_IMAGE_GENERATIONS_UPSTREAM_URL)]
+    image_generations_upstream_url: String,
+
+    /// Codex 图片编辑上游地址。
+    #[arg(long, default_value = DEFAULT_IMAGE_EDITS_UPSTREAM_URL)]
+    image_edits_upstream_url: String,
+
     /// 单次上游请求总超时秒数。
     #[arg(long, default_value_t = 600)]
     upstream_timeout_seconds: u64,
@@ -65,7 +78,9 @@ struct AppState {
     client: Client,
     access_token: Arc<str>,
     chatgpt_account_id: Option<Arc<str>>,
-    upstream_url: Arc<str>,
+    responses_upstream_url: Arc<str>,
+    image_generations_upstream_url: Arc<str>,
+    image_edits_upstream_url: Arc<str>,
     request_sequence: Arc<AtomicU64>,
 }
 
@@ -98,12 +113,18 @@ async fn main() {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(Arc::from),
-        upstream_url: Arc::from(arguments.upstream_url.as_str()),
+        responses_upstream_url: Arc::from(arguments.upstream_url.as_str()),
+        image_generations_upstream_url: Arc::from(
+            arguments.image_generations_upstream_url.as_str(),
+        ),
+        image_edits_upstream_url: Arc::from(arguments.image_edits_upstream_url.as_str()),
         request_sequence: Arc::new(AtomicU64::new(1)),
     };
     let app = Router::new()
         .route("/healthz", get(health))
         .route("/v1/responses", post(create_response))
+        .route("/v1/images/generations", post(create_image_generation))
+        .route("/v1/images/edits", post(create_image_edit))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
         .with_state(state);
 
@@ -116,7 +137,9 @@ async fn main() {
     };
     info!(
         listen = %arguments.listen,
-        upstream = %arguments.upstream_url,
+        responses_upstream = %arguments.upstream_url,
+        image_generations_upstream = %arguments.image_generations_upstream_url,
+        image_edits_upstream = %arguments.image_edits_upstream_url,
         account_id_present = arguments.chatgpt_account_id.is_some(),
         "Codex 插件测试服务已启动"
     );
@@ -190,6 +213,7 @@ async fn create_response(
     let started_at = Instant::now();
     let upstream = send_upstream(
         &state,
+        state.responses_upstream_url.as_ref(),
         &transformed_request.headers,
         transformed_request.body,
     )
@@ -216,14 +240,150 @@ async fn create_response(
     }
 }
 
+async fn create_image_generation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ServiceError> {
+    let request_id = state.request_sequence.fetch_add(1, Ordering::Relaxed);
+    let request_summary = summarize_request(&body);
+    info!(
+        request_id,
+        downstream_model = request_summary.model.as_deref().unwrap_or("<default>"),
+        request_bytes = body.len(),
+        "收到 Images generations 测试请求"
+    );
+    let transformed = transform_image_generations_request(ImageRequestTransformInput {
+        account: account_resource(&state),
+        headers: from_axum_headers(&headers),
+        body: body.to_vec(),
+    })
+    .map_err(|error| {
+        warn!(request_id, code = %error.code, message = %error.message, "图片生成请求转换函数拒绝请求");
+        ServiceError::bad_request(error.code, error.message)
+    })?;
+    let upstream_body_summary = summarize_codex_image_request(&transformed.body);
+    info!(
+        request_id,
+        upstream_model = upstream_body_summary
+            .model
+            .as_deref()
+            .unwrap_or("<missing>"),
+        image_count = upstream_body_summary.image_count,
+        "图片生成请求已转换为 Codex JSON"
+    );
+
+    send_and_transform_image_response(
+        request_id,
+        &state,
+        state.image_generations_upstream_url.as_ref(),
+        transformed.headers,
+        transformed.body,
+        "generations",
+    )
+    .await
+}
+
+async fn create_image_edit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ServiceError> {
+    let request_id = state.request_sequence.fetch_add(1, Ordering::Relaxed);
+    info!(
+        request_id,
+        request_bytes = body.len(),
+        "收到 Images edits multipart 测试请求"
+    );
+    let transformed = transform_image_edits_request(ImageRequestTransformInput {
+        account: account_resource(&state),
+        headers: from_axum_headers(&headers),
+        body: body.to_vec(),
+    })
+    .await
+    .map_err(|error| {
+        warn!(request_id, code = %error.code, message = %error.message, "图片编辑请求转换函数拒绝请求");
+        ServiceError::bad_request(error.code, error.message)
+    })?;
+    let upstream_body_summary = summarize_codex_image_request(&transformed.body);
+    info!(
+        request_id,
+        upstream_model = upstream_body_summary
+            .model
+            .as_deref()
+            .unwrap_or("<missing>"),
+        image_count = upstream_body_summary.image_count,
+        "图片编辑请求已转换为 Codex JSON"
+    );
+
+    send_and_transform_image_response(
+        request_id,
+        &state,
+        state.image_edits_upstream_url.as_ref(),
+        transformed.headers,
+        transformed.body,
+        "edits",
+    )
+    .await
+}
+
+async fn send_and_transform_image_response(
+    request_id: u64,
+    state: &AppState,
+    upstream_url: &str,
+    headers: Vec<Header>,
+    body: Vec<u8>,
+    operation: &'static str,
+) -> Result<Response, ServiceError> {
+    let started_at = Instant::now();
+    let upstream = send_upstream(state, upstream_url, &headers, body)
+        .await
+        .map_err(|error| {
+            error!(request_id, operation, error = %error, "请求 Codex Images 上游失败");
+            ServiceError::bad_gateway("upstream_image_request_failed", error.to_string())
+        })?;
+    info!(
+        request_id,
+        operation,
+        upstream_status = upstream.status,
+        upstream_bytes = upstream.body.len(),
+        elapsed_ms = started_at.elapsed().as_millis(),
+        "已收到 Codex Images 上游响应"
+    );
+    let transformed = transform_image_response(upstream).map_err(|error| {
+        error!(request_id, operation, code = %error.code, message = %error.message, "图片响应转换函数执行失败");
+        ServiceError::bad_gateway(error.code, error.message)
+    })?;
+    validate_image_response(transformed.status, &transformed.body).map_err(|message| {
+        error!(request_id, operation, validation_error = %message, "插件输出不是合法 Images API 响应");
+        ServiceError::bad_gateway("invalid_images_response", message)
+    })?;
+    info!(
+        request_id,
+        operation,
+        status = transformed.status,
+        "Images API 响应格式校验通过"
+    );
+    build_response(transformed)
+}
+
+fn account_resource(state: &AppState) -> AccountResource {
+    AccountResource {
+        access_token: state.access_token.to_string(),
+        chatgpt_account_id: state.chatgpt_account_id.as_deref().map(str::to_owned),
+        chatgpt_account_is_fedramp: false,
+    }
+}
+
 async fn send_upstream(
     state: &AppState,
+    upstream_url: &str,
     headers: &[Header],
     body: Vec<u8>,
 ) -> Result<HttpResponse, reqwest::Error> {
     let response = state
         .client
-        .post(state.upstream_url.as_ref())
+        .post(upstream_url)
         .headers(to_reqwest_headers(headers))
         .body(body)
         .send()
@@ -332,6 +492,32 @@ fn validate_json_response(status: u16, body: &[u8]) -> Result<(), String> {
             Err("非成功响应缺少 error.message".to_owned())
         }
     }
+}
+
+fn validate_image_response(status: u16, body: &[u8]) -> Result<(), String> {
+    let value: Value = serde_json::from_slice(body)
+        .map_err(|error| format!("图片响应体不是合法 JSON: {error}"))?;
+    if !(200..300).contains(&status) {
+        return value
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .filter(|message| !message.trim().is_empty())
+            .map(|_| ())
+            .ok_or_else(|| "非成功图片响应缺少 error.message".to_owned());
+    }
+    let data = value
+        .get("data")
+        .and_then(Value::as_array)
+        .filter(|data| !data.is_empty())
+        .ok_or_else(|| "成功图片响应必须包含非空 data 数组".to_owned())?;
+    for (index, image) in data.iter().enumerate() {
+        image
+            .get("b64_json")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| format!("图片响应 data[{index}].b64_json 必须是非空字符串"))?;
+    }
+    Ok(())
 }
 
 fn validate_sse_response(body: &[u8]) -> Result<(), String> {
@@ -519,6 +705,12 @@ struct RequestSummary {
     valid_json: bool,
 }
 
+#[derive(Default)]
+struct CodexImageRequestSummary {
+    model: Option<String>,
+    image_count: usize,
+}
+
 fn summarize_request(body: &[u8]) -> RequestSummary {
     let Ok(Value::Object(object)) = serde_json::from_slice::<Value>(body) else {
         return RequestSummary::default();
@@ -530,6 +722,22 @@ fn summarize_request(body: &[u8]) -> RequestSummary {
             .map(str::to_owned),
         stream: object.get("stream").and_then(Value::as_bool) == Some(true),
         valid_json: true,
+    }
+}
+
+fn summarize_codex_image_request(body: &[u8]) -> CodexImageRequestSummary {
+    let Ok(Value::Object(object)) = serde_json::from_slice::<Value>(body) else {
+        return CodexImageRequestSummary::default();
+    };
+    CodexImageRequestSummary {
+        model: object
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        image_count: object
+            .get("images")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len),
     }
 }
 

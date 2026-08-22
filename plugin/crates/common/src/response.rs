@@ -25,13 +25,10 @@ pub fn effects_from_raw_json(value: &Value, status: Option<u16>, stream: bool) -
     }
 }
 
-/// 对非流式 Responses JSON 和单个 SSE data JSON 复用同一组字段修正。原生工具调用的
-/// 名称与参数属于 Responses 协议载荷，必须原样保留；这里只处理 sub2api 的 Responses
-/// 路径确实执行的图片状态修正和失败响应瘦身。
+/// 对非流式 Responses JSON 和单个 SSE data JSON 复用失败响应瘦身。正常响应中的
+/// message、工具调用、图片生成结果及其他原生 Responses 字段全部保持上游原值。
 pub fn transform_response_value(value: &mut Value) -> bool {
-    let mut changed = normalize_image_generation_status(value);
-    changed |= sanitize_failed_response(value);
-    changed
+    sanitize_failed_response(value)
 }
 
 pub fn extract_usage(value: &Value) -> Option<Usage> {
@@ -88,57 +85,6 @@ fn non_negative_i64(value: Option<&Value>) -> Option<i64> {
         .as_i64()
         .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))?;
     (parsed >= 0).then_some(parsed)
-}
-
-fn normalize_image_generation_status(value: &mut Value) -> bool {
-    let mut changed = false;
-    let event_type = value.get("type").and_then(Value::as_str).map(str::to_owned);
-    match event_type.as_deref() {
-        Some("response.output_item.done") => {
-            if let Some(item) = value.get_mut("item") {
-                changed |= complete_image_item(item);
-            }
-        }
-        Some("response.completed" | "response.done") => {
-            if let Some(Value::Array(output)) = value.pointer_mut("/response/output") {
-                for item in output {
-                    changed |= complete_image_item(item);
-                }
-            }
-        }
-        None => {
-            // 非流式 Responses 的 body 本身就是最终 response object，没有事件 wrapper。
-            if let Some(Value::Array(output)) = value.get_mut("output") {
-                for item in output {
-                    changed |= complete_image_item(item);
-                }
-            }
-        }
-        _ => {}
-    }
-    changed
-}
-
-fn complete_image_item(item: &mut Value) -> bool {
-    let Some(item) = item.as_object_mut() else {
-        return false;
-    };
-    if item.get("type").and_then(Value::as_str) != Some("image_generation_call") {
-        return false;
-    }
-    let has_result = item
-        .get("result")
-        .and_then(Value::as_str)
-        .is_some_and(|result| !result.trim().is_empty());
-    let pending = matches!(
-        item.get("status").and_then(Value::as_str),
-        Some("generating" | "in_progress")
-    );
-    if has_result && pending {
-        item.insert("status".to_owned(), Value::String("completed".to_owned()));
-        return true;
-    }
-    false
 }
 
 fn sanitize_failed_response(value: &mut Value) -> bool {
@@ -353,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_images_are_corrected_without_touching_native_tool_calls() {
+    fn native_image_and_tool_items_are_preserved() {
         let duplicated = r#"{"path":"/tmp/a","old_string":"a","new_string":"b"}{"path":"/tmp/a","old_string":"a","new_string":"b"}"#;
         let mut value = json!({
             "type": "response.completed",
@@ -365,7 +311,7 @@ mod tests {
             }
         });
         transform_response_value(&mut value);
-        assert_eq!(value["response"]["output"][0]["status"], "completed");
+        assert_eq!(value["response"]["output"][0]["status"], "generating");
         assert_eq!(value["response"]["output"][1]["name"], "apply_patch");
         assert_eq!(value["response"]["output"][1]["arguments"], duplicated);
     }
