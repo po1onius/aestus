@@ -96,6 +96,14 @@ pub enum AppError {
     #[error("请求参数无效: {message}")]
     BadRequest { message: String },
 
+    /// 请求插件已经成功运行，并基于调用方输入主动拒绝继续构造上游请求。
+    ///
+    /// 该错误与 WASM trap、内存越界、非法插件输出等 `Plugin` 故障严格区分：前者是
+    /// 调用方可以修正的请求错误，后者是网关或插件套件故障。`code/message` 来自受信任的
+    /// 已发布插件，并由 runtime 在进入该类型前执行长度和空值收敛。
+    #[error("请求插件拒绝处理: code={code}, message={message}")]
+    PluginRequestRejected { code: String, message: String },
+
     #[error("请求体超过限制: {limit_bytes} bytes")]
     PayloadTooLarge { limit_bytes: usize },
 
@@ -192,7 +200,9 @@ impl AppError {
                 StatusCode::UNAUTHORIZED
             }
             AppError::Forbidden => StatusCode::FORBIDDEN,
-            AppError::BadRequest { .. } => StatusCode::BAD_REQUEST,
+            AppError::BadRequest { .. } | AppError::PluginRequestRejected { .. } => {
+                StatusCode::BAD_REQUEST
+            }
             AppError::PayloadTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             AppError::RequestBodyInterrupted { .. } => CLIENT_CLOSED_REQUEST,
             AppError::BodyCache { .. } => StatusCode::INTERNAL_SERVER_ERROR,
@@ -225,6 +235,7 @@ impl AppError {
             AppError::InvalidDashboardToken => "invalid_dashboard_token",
             AppError::Forbidden => "forbidden",
             AppError::BadRequest { .. } => "bad_request",
+            AppError::PluginRequestRejected { .. } => "plugin_request_rejected",
             AppError::PayloadTooLarge { .. } => "payload_too_large",
             AppError::RequestBodyInterrupted { .. } => "request_body_interrupted",
             AppError::BodyCache { .. } => "body_cache_failed",

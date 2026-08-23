@@ -458,7 +458,7 @@ impl PluginRuntime {
         let output = bindings
             .call_transform(&mut store, &input)
             .map_err(plugin_runtime_error)?
-            .map_err(|error| declared_error(&error.code, &error.message))?;
+            .map_err(|error| request_declared_error(&error.code, &error.message))?;
         let response_mode = match output.response_mode {
             common_types::ResponseMode::Stream => PluginResponseMode::Stream,
             common_types::ResponseMode::Buffered => PluginResponseMode::Buffered,
@@ -500,7 +500,7 @@ impl PluginRuntime {
         let output = bindings
             .call_transform(&mut store, &input)
             .map_err(plugin_runtime_error)?
-            .map_err(|error| declared_error(&error.code, &error.message))?;
+            .map_err(|error| request_declared_error(&error.code, &error.message))?;
         let response_mode = match output.response_mode {
             common_types::ResponseMode::Stream => PluginResponseMode::Stream,
             common_types::ResponseMode::Buffered => PluginResponseMode::Buffered,
@@ -1053,6 +1053,28 @@ fn plugin_runtime_error(source: impl std::fmt::Display) -> AppError {
     }
 }
 
+/// 请求 Component 的已声明错误表示插件成功理解了输入，但拒绝为该输入生成上游请求。
+/// code/message 会进入模型 Provider 的公开 400 响应，因此必须在宿主边界限制大小，并为
+/// 空值提供稳定回退。WASM trap、ABI 调用失败及非法输出不会经过这里，仍统一归为 502。
+fn request_declared_error(code: &str, message: &str) -> AppError {
+    let code = truncate(code, MAX_PLUGIN_TEXT_BYTES).trim();
+    let message = truncate(message, MAX_PLUGIN_TEXT_BYTES).trim();
+    AppError::PluginRequestRejected {
+        code: if code.is_empty() {
+            "plugin_request_rejected".to_owned()
+        } else {
+            code.to_owned()
+        },
+        message: if message.is_empty() {
+            "request rejected by plugin".to_owned()
+        } else {
+            message.to_owned()
+        },
+    }
+}
+
+/// 响应 Component 的已声明错误表示上游响应无法被插件可靠转换，属于网关侧故障，不能
+/// 归因于调用方请求。此类错误只进入内部日志，对下游继续投影为脱敏的 502。
 fn declared_error(code: &str, message: &str) -> AppError {
     AppError::Plugin {
         message: format!(

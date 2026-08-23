@@ -126,6 +126,11 @@ Codex 请求结构没有的 `mask`、`input_fidelity`、`moderation`、`output_c
 请求插件当前始终返回空的 `response_context`，响应插件也不执行工具名称恢复或原始 model
 回写。
 
+请求插件主动返回的 `transform-error` 表示调用方请求不受支持或结构非法。宿主不会发送
+上游 HTTP 请求，也不会调用 buffered/stream 响应插件，而是使用插件公开的 `code/message`
+生成 Provider 原生格式的 HTTP 400。WASM trap、资源越界、ABI 调用失败或非法插件输出仍
+属于插件执行故障，宿主会返回脱敏的 HTTP 502，不能通过声明错误伪装成调用方错误。
+
 ## 请求 Header
 
 请求插件使用白名单重建 Codex OAuth 上游 header。允许参与重建或从下游保留的 header 只有：
@@ -150,17 +155,19 @@ Codex 请求结构没有的 `mask`、`input_fidelity`、`moderation`、`output_c
 
 缓冲响应插件用于下游 `stream=false` 的成功响应，以及所有非 2xx HTTP 响应。
 
-如果上游 body 已经是 JSON，插件会直接提取 effects 并执行通用响应字段修正。如果成功
+如果上游 2xx body 已经是 JSON，插件会先校验它是标准的 Response object，再提取 effects
+并执行通用响应字段修正；非 2xx JSON 或非 JSON 错误响应仍保持上游状态和 body。如果成功
 响应具有 SSE framing，则按以下顺序转换为一个 Responses JSON：
 
-1. 优先提取首个 `response.completed`、`response.done` 或 `response.incomplete` 的
-   `response` object；
+1. 提取首个 completed、done、incomplete、failed 或 cancelled 终止事件中的完整
+   `response` object，并保持它的原始状态和 HTTP 状态；
 2. 终止对象的 `output` 为空时，优先按到达顺序保留去重后的
    `response.output_item.done.item` 原始对象；
-3. 完全没有 done item 时，才累计文本 delta、reasoning delta、function/custom tool item
-   和参数 delta 重建 output；
-4. `response.failed` 转为状态码 502、类型为 `upstream_error` 的 JSON 错误；
-5. 没有可识别终止事件时不伪造成功响应，保留原始 SSE body。
+3. 不使用文本或工具 delta 臆造缺失协议字段的 output item；没有完整 done item 时保持
+   终止 Response 的空 output；
+4. 转换结果必须具有合法的 `id/object/status/output` 核心结构；
+5. 缺少终止事件、终止事件缺少 Response object 或结构非法时返回插件错误，绝不会把 SSE
+   body 作为 `stream=false` 的成功响应透传给客户端。
 
 当前 buffered disposition 只有 `respond`，插件自身不会要求宿主重试。
 

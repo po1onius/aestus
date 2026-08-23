@@ -14,7 +14,7 @@ use crate::{
     images::{transform_edits_body, transform_generations_body, transform_image_response_body},
     request::transform_oauth_body,
     response::{effects_from_raw_json, is_terminal_event, transform_response_value},
-    responses_sse::convert_responses_sse_to_json,
+    responses_sse::{convert_responses_sse_to_json, validate_non_streaming_response},
     sse::JsonSseItem,
 };
 
@@ -226,11 +226,32 @@ pub fn transform_buffered_response(
     let mut converted_from_sse = false;
     let parsed_json = serde_json::from_slice::<Value>(&body).ok();
     let (mut parsed, effects) = if let Some(value) = parsed_json {
+        // HTTP 2xx 的 buffered Responses 必须直接是标准 Response object。若上游返回了
+        // SSE event envelope、HTML 或业务错误 JSON，不能继续以成功响应透传给客户端。
+        if (200..300).contains(&upstream_status) {
+            validate_non_streaming_response(&value).map_err(|message| {
+                PluginError::new(
+                    "invalid_upstream_responses_json",
+                    format!("上游非流式 Responses JSON 结构非法: {message}"),
+                )
+            })?;
+        }
         let effects = effects_from_raw_json(&value, Some(upstream_status), false);
         (Some(value), effects)
-    } else if (200..300).contains(&upstream_status)
-        && let Some(converted) = convert_responses_sse_to_json(&body, upstream_status)
-    {
+    } else if (200..300).contains(&upstream_status) {
+        let converted = convert_responses_sse_to_json(&body, upstream_status)
+            .map_err(|message| {
+                PluginError::new(
+                    "invalid_upstream_responses_sse",
+                    format!("上游 buffered Responses SSE 无法转换: {message}"),
+                )
+            })?
+            .ok_or_else(|| {
+                PluginError::new(
+                    "invalid_upstream_responses_body",
+                    "上游成功响应既不是标准 Responses JSON，也不包含 SSE framing",
+                )
+            })?;
         status = converted.status;
         converted_from_sse = true;
         (Some(converted.value), converted.effects)
@@ -257,7 +278,9 @@ pub fn transform_buffered_response(
         // 非 JSON 错误页或空 body 不臆测业务协议，但 header 仍按插件契约执行安全过滤。
         body
     };
-    let header_mode = if converted_from_sse {
+    // 能走到这里的 2xx body 已经确认或转换为 Response JSON，统一输出 JSON Content-Type，
+    // 避免上游错误标注为 text/event-stream 后让非流式客户端按 SSE 解析。
+    let header_mode = if (200..300).contains(&status) {
         ResponseHeaderMode::Json
     } else {
         ResponseHeaderMode::Preserve

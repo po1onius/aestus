@@ -1,6 +1,6 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
-use serde_json::{Map, Value, json};
+use serde_json::Value;
 
 use crate::{
     Effects,
@@ -18,33 +18,33 @@ pub struct ConvertedResponsesBody {
 
 /// 将完整的 OpenAI Responses SSE body 转成单个非流式 Responses JSON。
 ///
-/// 与 sub2api 默认 OAuth HTTP 路径保持相同主序：优先取
-/// `response.completed/done/incomplete` 中的 `response`；仅当其 output 为空时，先使用
-/// 权威的 `output_item.done` 原始 item，完全没有 done item 才用文本、reasoning 和函数
-/// 参数 delta 重建。`response.failed` 转成 502 JSON 错误。没有可识别终止事件时返回
-/// `None`，由调用方保留原始 SSE 兜底。
+/// OpenAI 的非流式 Responses API 返回完整的 Response object，而不是终止事件 envelope。
+/// 因此这里提取首个合法终止事件中的 `response`，并保留 completed、incomplete、failed
+/// 等全部状态。只有 `response.output_item.done.item` 才是可直接复用的完整 output item；
+/// delta 只是传输片段，不能在缺失 id/status 等协议字段时臆造 output object。
 pub fn convert_responses_sse_to_json(
     body: &[u8],
     upstream_status: u16,
-) -> Option<ConvertedResponsesBody> {
+) -> Result<Option<ConvertedResponsesBody>, String> {
     if !body_has_sse_framing(body) {
-        return None;
+        return Ok(None);
     }
 
-    let mut terminal_response_event = None::<Value>;
-    let mut failed_event = None::<Value>;
+    let mut terminal_event = None::<Value>;
     let mut done_items = Vec::<Value>::new();
     let mut seen_done_items = BTreeSet::<String>::new();
     for_each_json_data_value(body, |event| {
         let event_type = event.get("type").and_then(Value::as_str).map(str::trim);
         match event_type {
-            Some("response.completed" | "response.done" | "response.incomplete")
-                if terminal_response_event.is_none() =>
-            {
-                terminal_response_event = Some(event);
-            }
-            Some("response.failed") if failed_event.is_none() => {
-                failed_event = Some(event);
+            Some(
+                "response.completed"
+                | "response.done"
+                | "response.incomplete"
+                | "response.failed"
+                | "response.cancelled"
+                | "response.canceled",
+            ) if terminal_event.is_none() => {
+                terminal_event = Some(event);
             }
             Some("response.output_item.done") => {
                 let Some(item) = event.get("item").filter(|item| item.is_object()) else {
@@ -65,45 +65,31 @@ pub fn convert_responses_sse_to_json(
         }
     });
 
-    if let Some(mut terminal) = terminal_response_event {
-        let effects = effects_from_raw_json(&terminal, Some(upstream_status), false);
-        let mut response = terminal
-            .get_mut("response")
-            .filter(|response| response.is_object())
-            .map(Value::take)?;
-        if response_output_is_empty(&response) {
-            let reconstructed = if done_items.is_empty() {
-                reconstruct_output_from_deltas(body)
-            } else {
-                Some(done_items)
-            };
-            if let Some(output) = reconstructed
-                && let Some(response) = response.as_object_mut()
-            {
-                response.insert("output".to_owned(), Value::Array(output));
-            }
-        }
-        return Some(ConvertedResponsesBody {
-            status: upstream_status,
-            value: response,
-            effects,
-        });
-    }
-
-    let terminal = failed_event?;
+    let mut terminal = terminal_event.ok_or_else(|| {
+        "Responses SSE 缺少 completed、done、incomplete、failed 或 cancelled 终止事件".to_owned()
+    })?;
     let effects = effects_from_raw_json(&terminal, Some(upstream_status), false);
-    let message = response_error_message(&terminal)
-        .unwrap_or_else(|| "OpenAI upstream response failed".to_owned());
-    Some(ConvertedResponsesBody {
-        status: 502,
-        value: json!({
-            "error": {
-                "type": "upstream_error",
-                "message": message,
-            }
-        }),
+    let mut response = terminal
+        .get_mut("response")
+        .filter(|response| response.is_object())
+        .map(Value::take)
+        .ok_or_else(|| "Responses SSE 终止事件缺少 response object".to_owned())?;
+
+    // 某些 Codex 流会在终止 Response 中给出空 output，但此前已经发送完整的 done item。
+    // 此时按到达顺序去重后补回原始对象，未知字段也原样保留，避免协议信息损失。
+    if response_output_is_empty(&response)
+        && !done_items.is_empty()
+        && let Some(response) = response.as_object_mut()
+    {
+        response.insert("output".to_owned(), Value::Array(done_items));
+    }
+    validate_non_streaming_response(&response)?;
+
+    Ok(Some(ConvertedResponsesBody {
+        status: upstream_status,
+        value: response,
         effects,
-    })
+    }))
 }
 
 fn response_output_is_empty(response: &Value) -> bool {
@@ -113,137 +99,61 @@ fn response_output_is_empty(response: &Value) -> bool {
         .is_none_or(Vec::is_empty)
 }
 
-#[derive(Default)]
-struct DeltaOutputAccumulator {
-    text: String,
-    reasoning: String,
-    function_calls: Vec<FunctionCall>,
-    output_index_to_function: BTreeMap<i64, usize>,
-}
-
-struct FunctionCall {
-    call_id: String,
-    name: String,
-    arguments: String,
-}
-
-fn reconstruct_output_from_deltas(body: &[u8]) -> Option<Vec<Value>> {
-    let mut accumulator = DeltaOutputAccumulator::default();
-    for_each_json_data_value(body, |event| {
-        let event_type = event.get("type").and_then(Value::as_str).map(str::trim);
-        match event_type {
-            Some("response.output_text.delta") => {
-                append_string_field(&mut accumulator.text, &event, "delta");
-            }
-            Some("response.reasoning_summary_text.delta" | "response.reasoning_text.delta") => {
-                append_string_field(&mut accumulator.reasoning, &event, "delta");
-            }
-            Some("response.output_item.added") => {
-                let Some(item) = event.get("item") else {
-                    return;
-                };
-                if !matches!(
-                    item.get("type").and_then(Value::as_str),
-                    Some("function_call" | "custom_tool_call")
-                ) {
-                    return;
-                }
-                let output_index = event
-                    .get("output_index")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0);
-                let index = accumulator.function_calls.len();
-                accumulator
-                    .output_index_to_function
-                    .insert(output_index, index);
-                accumulator.function_calls.push(FunctionCall {
-                    call_id: string_field(item, "call_id"),
-                    name: string_field(item, "name"),
-                    arguments: String::new(),
-                });
-            }
-            Some(
-                "response.function_call_arguments.delta" | "response.custom_tool_call_input.delta",
-            ) => {
-                let output_index = event
-                    .get("output_index")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0);
-                if let Some(index) = accumulator
-                    .output_index_to_function
-                    .get(&output_index)
-                    .copied()
-                    && let Some(call) = accumulator.function_calls.get_mut(index)
-                {
-                    append_string_field(&mut call.arguments, &event, "delta");
-                }
-            }
-            _ => {}
-        }
-    });
-    accumulator.build_output()
-}
-
-impl DeltaOutputAccumulator {
-    fn build_output(self) -> Option<Vec<Value>> {
-        let mut output = Vec::new();
-        if !self.reasoning.is_empty() {
-            output.push(json!({
-                "type": "reasoning",
-                "summary": [{"type":"summary_text", "text":self.reasoning}],
-            }));
-        }
-        if !self.text.is_empty() {
-            output.push(json!({
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type":"output_text", "text":self.text}],
-            }));
-        }
-        for call in self.function_calls {
-            let mut item =
-                Map::from_iter([("type".to_owned(), Value::String("function_call".to_owned()))]);
-            insert_non_empty(&mut item, "call_id", call.call_id);
-            insert_non_empty(&mut item, "name", call.name);
-            insert_non_empty(&mut item, "arguments", call.arguments);
-            output.push(Value::Object(item));
-        }
-        (!output.is_empty()).then_some(output)
+/// 校验非流式成功响应的 Responses 核心结构。
+///
+/// output item 类型会持续扩展，因此这里只验证所有版本都稳定存在的公共字段，不在插件
+/// 中复制整份 OpenAI schema。这样既能阻止 SSE envelope、错误页或残缺拼装结果冒充
+/// Response，又不会因上游新增内建工具类型而误拒绝合法响应。
+pub fn validate_non_streaming_response(value: &Value) -> Result<(), String> {
+    let response = value
+        .as_object()
+        .ok_or_else(|| "非流式 Responses 响应必须是 JSON object".to_owned())?;
+    required_non_empty_string(value, "id", "response")?;
+    if required_non_empty_string(value, "object", "response")? != "response" {
+        return Err("response.object 必须为 response".to_owned());
     }
-}
-
-fn append_string_field(output: &mut String, value: &Value, field: &str) {
-    if let Some(delta) = value.get(field).and_then(Value::as_str) {
-        output.push_str(delta);
+    let status = required_non_empty_string(value, "status", "response")?;
+    if !matches!(
+        status,
+        "completed" | "incomplete" | "failed" | "in_progress" | "cancelled" | "queued"
+    ) {
+        return Err(format!("response.status 非法: {status}"));
     }
+
+    let output = response
+        .get("output")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "response.output 必须是 array".to_owned())?;
+    for (index, item) in output.iter().enumerate() {
+        required_non_empty_string(item, "type", &format!("response.output[{index}]"))?;
+    }
+
+    if let Some(usage) = response.get("usage").filter(|usage| !usage.is_null()) {
+        let usage = usage
+            .as_object()
+            .ok_or_else(|| "response.usage 必须是 object 或 null".to_owned())?;
+        for field in ["input_tokens", "output_tokens", "total_tokens"] {
+            if let Some(value) = usage.get(field)
+                && value.as_i64().is_none_or(|value| value < 0)
+            {
+                return Err(format!("response.usage.{field} 必须是非负整数"));
+            }
+        }
+    }
+    Ok(())
 }
 
-fn string_field(value: &Value, field: &str) -> String {
+fn required_non_empty_string<'a>(
+    value: &'a Value,
+    field: &str,
+    context: &str,
+) -> Result<&'a str, String> {
     value
         .get(field)
         .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned()
-}
-
-fn insert_non_empty(object: &mut Map<String, Value>, field: &str, value: String) {
-    if !value.is_empty() {
-        object.insert(field.to_owned(), Value::String(value));
-    }
-}
-
-fn response_error_message(value: &Value) -> Option<String> {
-    let message = value
-        .pointer("/response/error/message")
-        .or_else(|| value.pointer("/error/message"))
-        .or_else(|| value.get("message"))?
-        .as_str()?
-        .trim();
-    if message.is_empty() {
-        return None;
-    }
-    const MAX_CHARS: usize = 1_024;
-    Some(message.chars().take(MAX_CHARS).collect())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("{context}.{field} 必须是非空字符串"))
 }
 
 #[cfg(test)]
@@ -258,7 +168,7 @@ mod tests {
 data: [DONE]
 
 "#;
-        let converted = convert_responses_sse_to_json(body, 200).unwrap();
+        let converted = convert_responses_sse_to_json(body, 200).unwrap().unwrap();
         assert_eq!(converted.status, 200);
         assert_eq!(converted.value["id"], "resp_1");
         assert_eq!(converted.value["output"][0]["content"][0]["text"], "hello");
@@ -282,10 +192,10 @@ data: {"type":"response.output_item.done","item":{"id":"rs_1","type":"reasoning"
 
 data: {"type":"response.output_item.done","item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"q\":1}","future_field":true}}
 
-data: {"type":"response.completed","response":{"id":"resp_2","output":[],"usage":{"input_tokens":1,"output_tokens":1}}}
+data: {"type":"response.completed","response":{"id":"resp_2","object":"response","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1}}}
 
 "#;
-        let converted = convert_responses_sse_to_json(body, 200).unwrap();
+        let converted = convert_responses_sse_to_json(body, 200).unwrap().unwrap();
         assert_eq!(converted.value["output"].as_array().unwrap().len(), 2);
         assert_eq!(converted.value["output"][0]["encrypted_content"], "opaque");
         assert_eq!(converted.value["output"][1]["future_field"], true);
@@ -293,7 +203,7 @@ data: {"type":"response.completed","response":{"id":"resp_2","output":[],"usage"
     }
 
     #[test]
-    fn deltas_rebuild_text_reasoning_and_function_arguments() {
+    fn deltas_do_not_fabricate_incomplete_output_items() {
         let body = br#"data: {"type":"response.reasoning_summary_text.delta","delta":"think"}
 
 data: {"type":"response.output_text.delta","delta":"hel"}
@@ -306,25 +216,23 @@ data: {"type":"response.function_call_arguments.delta","output_index":2,"delta":
 
 data: {"type":"response.function_call_arguments.delta","output_index":2,"delta":"1}"}
 
-data: {"type":"response.completed","response":{"id":"resp_3","output":[],"usage":{"input_tokens":1,"output_tokens":2}}}
+data: {"type":"response.completed","response":{"id":"resp_3","object":"response","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":2}}}
 
 "#;
-        let converted = convert_responses_sse_to_json(body, 200).unwrap();
-        assert_eq!(converted.value["output"][0]["summary"][0]["text"], "think");
-        assert_eq!(converted.value["output"][1]["content"][0]["text"], "hello");
-        assert_eq!(converted.value["output"][2]["name"], "lookup");
-        assert_eq!(converted.value["output"][2]["arguments"], r#"{"q":1}"#);
+        let converted = convert_responses_sse_to_json(body, 200).unwrap().unwrap();
+        assert!(converted.value["output"].as_array().unwrap().is_empty());
     }
 
     #[test]
-    fn failed_event_becomes_502_json_and_keeps_feedback() {
-        let body = br#"data: {"type":"response.failed","response":{"error":{"code":"server_error","message":"overloaded"}}}
+    fn failed_event_keeps_standard_response_and_feedback() {
+        let body = br#"data: {"type":"response.failed","response":{"id":"resp_failed","object":"response","status":"failed","error":{"code":"server_error","message":"overloaded"},"output":[]}}
 
 data: [DONE]
 
 "#;
-        let converted = convert_responses_sse_to_json(body, 200).unwrap();
-        assert_eq!(converted.status, 502);
+        let converted = convert_responses_sse_to_json(body, 200).unwrap().unwrap();
+        assert_eq!(converted.status, 200);
+        assert_eq!(converted.value["status"], "failed");
         assert_eq!(converted.value["error"]["message"], "overloaded");
         assert!(matches!(
             converted.effects.feedback,
@@ -339,7 +247,7 @@ data: [DONE]
 data: [DONE]
 
 "#;
-        let converted = convert_responses_sse_to_json(body, 200).unwrap();
+        let converted = convert_responses_sse_to_json(body, 200).unwrap().unwrap();
         assert_eq!(converted.status, 200);
         assert_eq!(converted.value["id"], "resp_incomplete");
         assert_eq!(converted.value["status"], "incomplete");

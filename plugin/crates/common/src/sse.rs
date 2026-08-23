@@ -12,8 +12,8 @@ pub fn body_has_sse_framing(body: &[u8]) -> bool {
 /// 遍历完整 SSE body 中的 JSON data payload。
 ///
 /// 标准多行 `data:` 按换行拼接；同时兼容缺失空行、连续多条 data 各自都是 JSON 的
-/// 上游形态，此时逐行解析。空 data、`[DONE]` 和无法解析的扩展事件会被忽略，调用方可
-/// 在找不到终止事件时保留原始 body，行为与 sub2api 的非流式兜底一致。
+/// 上游形态，此时逐行解析。空 data、`[DONE]` 和无法解析的扩展事件会被忽略；调用方必须
+/// 根据自己的协议要求决定缺少目标事件时是报错还是继续处理。
 pub fn for_each_json_data_value(body: &[u8], mut visit: impl FnMut(Value)) -> bool {
     let Ok(text) = std::str::from_utf8(body) else {
         return false;

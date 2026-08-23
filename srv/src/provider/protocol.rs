@@ -56,7 +56,9 @@ pub enum ProviderVisibleErrorKind {
 pub struct ProviderVisibleError {
     pub status: StatusCode,
     pub kind: ProviderVisibleErrorKind,
-    pub code: &'static str,
+    /// 大多数错误使用网关定义的稳定 code；请求插件主动拒绝时保留插件公开 code，方便
+    /// SDK 和调用方精确定位可修正的协议字段，因此这里不能再限制为静态字符串。
+    pub code: String,
     pub message: String,
 }
 
@@ -90,6 +92,9 @@ impl ProviderVisibleError {
                 ProviderVisibleErrorKind::InvalidRequest,
                 "invalid_request_error",
             ),
+            AppError::PluginRequestRejected { code, .. } => {
+                (ProviderVisibleErrorKind::InvalidRequest, code.as_str())
+            }
             AppError::PayloadTooLarge { .. } => (
                 ProviderVisibleErrorKind::InvalidRequest,
                 "request_too_large",
@@ -137,6 +142,7 @@ impl ProviderVisibleError {
         };
         let message = match error {
             AppError::RequestBodyInterrupted { .. } => "request body interrupted".to_owned(),
+            AppError::PluginRequestRejected { message, .. } => message.clone(),
             _ if kind == ProviderVisibleErrorKind::Gateway => "gateway error".to_owned(),
             _ => error.to_string(),
         };
@@ -144,7 +150,7 @@ impl ProviderVisibleError {
         Self {
             status,
             kind,
-            code,
+            code: code.to_owned(),
             message,
         }
     }

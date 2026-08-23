@@ -849,7 +849,7 @@ data: {"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded
         #[serde(rename = "type")]
         pub error_type: &'static str,
         pub param: Option<&'static str>,
-        pub code: &'static str,
+        pub code: String,
     }
 
     pub fn encode_provider_error(
@@ -869,7 +869,7 @@ data: {"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded
                 message: error.message.clone(),
                 error_type,
                 param: None,
-                code: error.code,
+                code: error.code.clone(),
             },
         };
         let (status, body) = match serde_json::to_vec(&payload) {

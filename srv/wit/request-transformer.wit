@@ -25,7 +25,10 @@ interface common-types {
     }
 
     record transform-error {
+        /// 可安全返回给调用方的稳定错误码。请求插件返回该声明错误表示输入被主动拒绝，
+        /// 宿主会生成 HTTP 400；WASM trap、ABI 失败和非法输出不使用此类型。
         code: string,
+        /// 可安全返回给调用方的错误说明，不得包含账号凭证或其他上游敏感信息。
         message: string,
     }
 }
