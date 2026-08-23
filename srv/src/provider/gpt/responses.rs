@@ -1,10 +1,7 @@
 use std::future::Future;
 
-use axum::{
-    body::Bytes,
-    http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
-};
-use tracing::{debug, info, warn};
+use axum::{body::Bytes, http::HeaderMap};
+use tracing::{info, warn};
 
 use crate::{
     config::AppConfig,
@@ -20,6 +17,10 @@ use crate::{
             },
             maintenance::GptMaintenance,
             model::GptAccountRequestContext,
+            upstream::{
+                account_signal_to_feedback, build_upstream_url, classify_http_failure,
+                filtered_response_headers,
+            },
         },
         protocol::{
             BufferedProtocolResponse, EncodedProviderError, MAX_SSE_ITEM_BYTES, ProtocolFailure,
@@ -33,21 +34,6 @@ use crate::{
         response_logging::response_body_for_tracing,
     },
 };
-
-/// ChatGPT 账号 Responses 上游返回的账号级 Codex 窗口额度 header。
-///
-/// 网关调用方使用的是网关 API Key，不应观察到某一次调度所选 OAuth 账号的剩余额度；
-/// 否则 Codex API Key 模式会把这个短暂账号快照缓存并展示在 `/status` 中，既泄露池内账号
-/// 状态，也会让后续切换账号后的额度展示产生误导。这里只过滤 Codex 当前消费的两个默认
-/// 窗口字段，其他响应 header 继续沿用既有透明代理规则。
-const ACCOUNT_CODEX_RATE_LIMIT_RESPONSE_HEADERS: [&str; 6] = [
-    "x-codex-primary-used-percent",
-    "x-codex-primary-window-minutes",
-    "x-codex-primary-reset-at",
-    "x-codex-secondary-used-percent",
-    "x-codex-secondary-window-minutes",
-    "x-codex-secondary-reset-at",
-];
 
 impl From<CodexTokenUsage> for TokenUsage {
     fn from(usage: CodexTokenUsage) -> Self {
@@ -115,7 +101,7 @@ impl ProviderProtocol for GptResponsesProxy {
                 HttpClientProfile::ChatGptCodex,
             ),
             UpstreamResourceKind::ApiKey => (
-                build_official_url(
+                build_upstream_url(
                     resource.api_key_base_url()?,
                     &config.gpt_upstream_responses_path,
                     request.uri.query(),
@@ -204,31 +190,6 @@ impl ProviderProtocol for GptResponsesProxy {
     }
 }
 
-fn account_signal_to_feedback(signal: CodexAccountSignal) -> UpstreamFeedback {
-    match signal {
-        CodexAccountSignal::Unauthorized => UpstreamFeedback::AuthenticationRejected {
-            reason: "unauthorized".to_owned(),
-        },
-        CodexAccountSignal::QuotaExhausted { resets_at } => UpstreamFeedback::QuotaExhausted {
-            resets_at,
-            reason: "quota_exhausted".to_owned(),
-        },
-        CodexAccountSignal::UsageLimitReached {
-            plan_type,
-            resets_at,
-        } => UpstreamFeedback::QuotaExhausted {
-            resets_at,
-            reason: format!(
-                "usage_limit_reached: plan_type={}",
-                plan_type.as_deref().unwrap_or("<unknown>")
-            ),
-        },
-        CodexAccountSignal::UsageNotIncluded => UpstreamFeedback::EntitlementMissing {
-            reason: "usage_not_included".to_owned(),
-        },
-    }
-}
-
 async fn process_upstream_response(
     config: &AppConfig,
     resource: &UpstreamResource,
@@ -272,136 +233,18 @@ async fn process_upstream_response(
 
     let account_signal = codex_response::parse_account_signal(status, &body);
     let response_headers = filtered_response_headers(&headers, resource.kind);
-    let (retry, exclude_resource_on_retry, feedback) =
-        if resource.kind == UpstreamResourceKind::ApiKey {
-            let (retry, exclude_resource_on_retry, quarantine_key) =
-                classify_api_key_http_failure(status);
-            debug!(
-                upstream_status = status.as_u16(),
-                retry,
-                exclude_resource_on_retry,
-                quarantine_key,
-                "GPT 官方 API Key HTTP 错误已完成请求级/资源级分类"
-            );
-            let feedback = quarantine_key.then(|| UpstreamFeedback::Error {
-                reason: format!("HTTP {status}"),
-            });
-            (retry, exclude_resource_on_retry, feedback)
-        } else if let Some(signal) = account_signal {
-            // usage_not_included 只说明当前账号不能承载这次调用，不足以改变账号对其他请求的
-            // 持久健康状态；但本请求重试时也不能再次选回同一账号。
-            let exclude_resource_on_retry = matches!(&signal, CodexAccountSignal::UsageNotIncluded);
-            (
-                true,
-                exclude_resource_on_retry,
-                Some(account_signal_to_feedback(signal)),
-            )
-        } else {
-            (is_transient_upstream_status(status), false, None)
-        };
+    let classification = classify_http_failure(resource.kind, status, account_signal);
 
     Ok(ProtocolResponse::Buffered(BufferedProtocolResponse {
         status,
         headers: response_headers,
         body,
         record_error_response: true,
-        retry,
-        exclude_resource_on_retry,
-        feedback,
+        retry: classification.retry,
+        exclude_resource_on_retry: classification.exclude_resource_on_retry,
+        feedback: classification.feedback,
         usage: None,
     }))
-}
-
-/// 返回 `(retry, exclude_resource_on_retry, quarantine_key)`，把当前请求的重试、
-/// 请求级排除和 Key 的持久化隔离三个生命周期决策保持独立。408 只直接重试；5xx
-/// 只在当前请求重试时暂时排除该 Key，不提交全局错误回执；401、403、429 继续提交
-/// 全局 Key 错误回执。
-fn classify_api_key_http_failure(status: StatusCode) -> (bool, bool, bool) {
-    let quarantine_key = matches!(
-        status,
-        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS
-    );
-    let retry = quarantine_key || is_transient_upstream_status(status);
-    // 408 是明确的“直接重试”状态，不把当前 Key 加入本请求排除集合；只有 5xx
-    // 才在重试时切换到其他资源，同时保持 Key 的全局健康状态不变。
-    let exclude_resource_on_retry = status.is_server_error();
-    (retry, exclude_resource_on_retry, quarantine_key)
-}
-
-fn is_transient_upstream_status(status: StatusCode) -> bool {
-    status == StatusCode::REQUEST_TIMEOUT || status.is_server_error()
-}
-
-fn normalized_path(path: &str) -> String {
-    if path.starts_with('/') {
-        path.to_owned()
-    } else {
-        format!("/{path}")
-    }
-}
-
-fn build_upstream_url(base_url: &str, path: &str, query: Option<&str>) -> String {
-    let mut url = format!("{}{}", base_url, normalized_path(path));
-    if let Some(query) = query.filter(|value| !value.is_empty()) {
-        url.push('?');
-        url.push_str(query);
-    }
-    url
-}
-
-fn build_official_url(base_url: &str, path: &str, query: Option<&str>) -> String {
-    build_upstream_url(base_url.trim().trim_end_matches('/'), path, query)
-}
-
-fn filtered_response_headers(source: &HeaderMap, resource_kind: UpstreamResourceKind) -> HeaderMap {
-    let mut headers = HeaderMap::new();
-    copy_response_headers(source, &mut headers, resource_kind);
-
-    let filtered_account_rate_limit_headers = if resource_kind == UpstreamResourceKind::Account {
-        ACCOUNT_CODEX_RATE_LIMIT_RESPONSE_HEADERS
-            .iter()
-            .copied()
-            .filter(|name| source.contains_key(*name))
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-    debug!(
-        resource_type = resource_kind.as_str(),
-        upstream_header_value_count = source.len(),
-        downstream_header_value_count = headers.len(),
-        filtered_account_rate_limit_header_count = filtered_account_rate_limit_headers.len(),
-        filtered_account_rate_limit_headers = ?filtered_account_rate_limit_headers,
-        "GPT 原生响应头过滤完成"
-    );
-    headers
-}
-
-fn copy_response_headers(
-    source: &HeaderMap,
-    target: &mut HeaderMap,
-    resource_kind: UpstreamResourceKind,
-) {
-    for (name, value) in source {
-        if codex_response::should_forward_response_header(name)
-            && should_forward_account_rate_limit_header(resource_kind, name)
-            && let Ok(value) = HeaderValue::from_bytes(value.as_bytes())
-        {
-            target.append(name.clone(), value);
-        }
-    }
-}
-
-/// 额度 header 只属于上游 OAuth 账号，官方 API Key 仍保持透明响应语义。
-///
-/// 响应插件命中时通用 pipeline 会完全绕过 `ProviderProtocol::handle_response`，因此不会
-/// 调用这里；插件生成的同名 header 仍由插件运行时按原有安全规则处理，不受本过滤影响。
-fn should_forward_account_rate_limit_header(
-    resource_kind: UpstreamResourceKind,
-    name: &HeaderName,
-) -> bool {
-    resource_kind != UpstreamResourceKind::Account
-        || !ACCOUNT_CODEX_RATE_LIMIT_RESPONSE_HEADERS.contains(&name.as_str())
 }
 
 /// GPT SSE observer 只保存协议解析状态；maintenance 回执、资源释放、额度扣减与日志收尾

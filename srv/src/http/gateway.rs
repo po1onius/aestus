@@ -13,6 +13,7 @@ use crate::{
     gateway_auth,
     provider::{
         claude::messages::ClaudeMessagesProxy,
+        gpt::image_generations::GptImageGenerationsProxy,
         gpt::responses::GptResponsesProxy,
         protocol::{ProviderProtocol, ProviderVisibleError, ReplayableRequest},
         proxy,
@@ -25,6 +26,7 @@ use crate::{
 };
 
 const RESPONSES_ROUTE: &str = "/v1/responses";
+const IMAGE_GENERATIONS_ROUTE: &str = "/v1/images/generations";
 const MESSAGES_ROUTE: &str = "/v1/messages";
 const MESSAGES_COUNT_TOKENS_ROUTE: &str = "/v1/messages/count_tokens";
 
@@ -36,6 +38,7 @@ const MESSAGES_COUNT_TOKENS_ROUTE: &str = "/v1/messages/count_tokens";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OperationId {
     Responses,
+    ImageGenerations,
     Messages,
     MessagesCountTokens,
 }
@@ -44,9 +47,27 @@ impl OperationId {
     const fn as_str(self) -> &'static str {
         match self {
             Self::Responses => "responses",
+            Self::ImageGenerations => "image_generations",
             Self::Messages => "messages",
             Self::MessagesCountTokens => "messages_count_tokens",
         }
+    }
+}
+
+/// endpoint 对账号插件套件的使用策略。
+///
+/// 当前 Dashboard 三个插件插槽只定义了 Responses/Messages 风格的通用 ABI，Images
+/// 普通 Rust 转换函数尚未包装成 Component。由 endpoint 显式声明策略，可以避免继续用
+/// URI 白名单暗示插件能力，也能防止绑定了 Responses 插件的 API Key 误处理图片请求。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PluginPolicy {
+    Disabled,
+    AccountAttempts,
+}
+
+impl PluginPolicy {
+    const fn enabled(self) -> bool {
+        matches!(self, Self::AccountAttempts)
     }
 }
 
@@ -55,12 +76,14 @@ struct EndpointDescriptor {
     provider: &'static str,
     operation: OperationId,
     route: &'static str,
+    plugin_policy: PluginPolicy,
 }
 
 impl EndpointDescriptor {
     fn identify(method: &Method, uri: &Uri) -> AppResult<Self> {
         let operation = match (method, uri.path()) {
             (&Method::POST, RESPONSES_ROUTE) => OperationId::Responses,
+            (&Method::POST, IMAGE_GENERATIONS_ROUTE) => OperationId::ImageGenerations,
             (&Method::POST, MESSAGES_ROUTE) => OperationId::Messages,
             (&Method::POST, MESSAGES_COUNT_TOKENS_ROUTE) => OperationId::MessagesCountTokens,
             _ => {
@@ -75,13 +98,22 @@ impl EndpointDescriptor {
                 OperationId::Messages | OperationId::MessagesCountTokens => {
                     crate::provider::claude::model::PROVIDER
                 }
-                OperationId::Responses => crate::provider::gpt::model::PROVIDER,
+                OperationId::Responses | OperationId::ImageGenerations => {
+                    crate::provider::gpt::model::PROVIDER
+                }
             },
             operation,
             route: match operation {
                 OperationId::Responses => RESPONSES_ROUTE,
+                OperationId::ImageGenerations => IMAGE_GENERATIONS_ROUTE,
                 OperationId::Messages => MESSAGES_ROUTE,
                 OperationId::MessagesCountTokens => MESSAGES_COUNT_TOKENS_ROUTE,
+            },
+            plugin_policy: match operation {
+                OperationId::Responses | OperationId::Messages => PluginPolicy::AccountAttempts,
+                OperationId::ImageGenerations | OperationId::MessagesCountTokens => {
+                    PluginPolicy::Disabled
+                }
             },
         })
     }
@@ -94,6 +126,7 @@ impl EndpointDescriptor {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route(RESPONSES_ROUTE, post(handle_provider_request))
+        .route(IMAGE_GENERATIONS_ROUTE, post(handle_provider_request))
         .route(MESSAGES_ROUTE, post(handle_provider_request))
         .route(MESSAGES_COUNT_TOKENS_ROUTE, post(handle_provider_request))
 }
@@ -132,6 +165,10 @@ async fn handle_provider_request(
         OperationId::Responses => {
             execute_pipeline::<GptResponsesProxy>(&state, endpoint, uri, request, request_id).await
         }
+        OperationId::ImageGenerations => {
+            execute_pipeline::<GptImageGenerationsProxy>(&state, endpoint, uri, request, request_id)
+                .await
+        }
         OperationId::Messages | OperationId::MessagesCountTokens => {
             execute_pipeline::<ClaudeMessagesProxy>(&state, endpoint, uri, request, request_id)
                 .await
@@ -155,12 +192,13 @@ async fn execute_pipeline<P>(
 where
     P: ProviderProtocol,
 {
-    let result = prepare_and_execute::<P>(state, uri, request, request_id).await;
+    let result = prepare_and_execute::<P>(state, endpoint, uri, request, request_id).await;
     finish_pipeline::<P>(state, endpoint, request_id, result).await
 }
 
 async fn prepare_and_execute<P>(
     state: &AppState,
+    endpoint: EndpointDescriptor,
     uri: Uri,
     request: Request<Body>,
     request_id: uuid::Uuid,
@@ -169,12 +207,11 @@ where
     P: ProviderProtocol,
 {
     let headers = request.headers().clone();
-    let plugin_endpoint = matches!(uri.path(), RESPONSES_ROUTE | MESSAGES_ROUTE);
     let auth = gateway_auth::authenticate_gateway_key(
         state,
         &headers,
         P::provider_name(),
-        plugin_endpoint,
+        endpoint.plugin_policy.enabled(),
     )
     .await?;
     // API Key、用户和分组均是网关领域事实，不应等待 body 上传或 provider 私有 DTO
