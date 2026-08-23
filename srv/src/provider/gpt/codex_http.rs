@@ -619,6 +619,32 @@ pub mod header {
         upstream_headers
     }
 
+    /// 为 Codex Images 账号端点构造最小 JSON 请求头。
+    ///
+    /// Images 不使用 Responses 的 SSE Accept、openai-beta 或 turn header，只保留下游语言
+    /// 偏好，并复用同一套受信任 Codex 客户端身份。账号凭证仍在资源 override 之后注入。
+    pub fn build_codex_image_upstream_headers(source_headers: &HeaderMap) -> HeaderMap {
+        let mut upstream_headers = HeaderMap::new();
+        for value in source_headers.get_all(header::ACCEPT_LANGUAGE) {
+            upstream_headers.append(header::ACCEPT_LANGUAGE, value.clone());
+        }
+        apply_codex_client_identity(source_headers, &mut upstream_headers);
+        apply_codex_image_protocol_headers(&mut upstream_headers);
+        upstream_headers
+    }
+
+    /// 在资源 override 之后恢复 Codex Images 的权威协议 header。
+    pub fn apply_codex_image_protocol_headers(upstream_headers: &mut HeaderMap) {
+        upstream_headers.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
+        upstream_headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static(JSON_CONTENT_TYPE),
+        );
+        // Images 端点不使用 Responses experimental 协议标记；管理员 override 也不能把
+        // 它重新注入到最终请求。
+        upstream_headers.remove("openai-beta");
+    }
+
     pub fn apply_codex_credential(
         upstream_headers: &mut HeaderMap,
         account_auth: CodexAccountAuth<'_>,
@@ -1111,7 +1137,11 @@ data: {"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded
     pub fn should_forward_response_header(name: &HeaderName) -> bool {
         // Set-Cookie 已由 ChatGPT 专用 reqwest cookie provider 在网关内部消费。禁止把
         // Cloudflare 或未来可能出现的账号相关 Cookie 暴露给下游调用方。
-        !is_hop_by_hop_header(name) && name != header::CONTENT_LENGTH && name != header::SET_COOKIE
+        !is_hop_by_hop_header(name)
+            && name != header::CONTENT_LENGTH
+            && name != header::SET_COOKIE
+            && name != header::AUTHORIZATION
+            && name.as_str() != "x-api-key"
     }
 
     fn is_hop_by_hop_header(name: &HeaderName) -> bool {

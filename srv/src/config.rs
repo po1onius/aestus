@@ -15,6 +15,7 @@ const DEFAULT_GPT_ACCOUNT_UPSTREAM_5XX_COOLDOWN_SECONDS: u64 = 30;
 const DEFAULT_GPT_UPSTREAM_API_KEY_PROBE_INTERVAL_SECONDS: u64 = 120;
 const DEFAULT_GPT_UPSTREAM_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const DEFAULT_GPT_UPSTREAM_RESPONSES_PATH: &str = "/responses";
+const DEFAULT_GPT_UPSTREAM_IMAGE_GENERATIONS_PATH: &str = "/images/generations";
 const DEFAULT_PROVIDER_UPSTREAM_CONNECT_TIMEOUT_SECONDS: u64 = 30;
 const DEFAULT_PROVIDER_UPSTREAM_TIMEOUT_SECONDS: u64 = 120;
 // SSE 默认允许无限时长且不启用空闲超时；部署方显式配置正数后，只有连续无上游字节
@@ -70,6 +71,7 @@ pub struct AppConfig {
     pub gpt_upstream_api_key_probe_interval_seconds: u64,
     pub gpt_upstream_base_url: String,
     pub gpt_upstream_responses_path: String,
+    pub gpt_upstream_image_generations_path: String,
     pub provider_upstream_connect_timeout_seconds: u64,
     pub provider_upstream_timeout_seconds: u64,
     pub provider_upstream_stream_idle_timeout_seconds: u64,
@@ -156,6 +158,10 @@ impl AppConfig {
             gpt_upstream_responses_path: parse_env_string(
                 "AESTUS_GPT_UPSTREAM_RESPONSES_PATH",
                 DEFAULT_GPT_UPSTREAM_RESPONSES_PATH,
+            )?,
+            gpt_upstream_image_generations_path: parse_env_string(
+                "AESTUS_GPT_UPSTREAM_IMAGE_GENERATIONS_PATH",
+                DEFAULT_GPT_UPSTREAM_IMAGE_GENERATIONS_PATH,
             )?,
             provider_upstream_connect_timeout_seconds: parse_env(
                 "AESTUS_PROVIDER_UPSTREAM_CONNECT_TIMEOUT_SECONDS",
