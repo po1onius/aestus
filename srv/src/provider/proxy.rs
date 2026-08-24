@@ -569,6 +569,13 @@ async fn finalize_upstream_request<P: ProviderProtocol>(
 
     // 通用 override 先处理两个请求要素；provider 随后在一个 hook 内同时最终化真实凭证
     // header 和可选 body attribution，确保调用方或管理员都无法覆盖实际资源身份。
+    // multipart 等 operation 会先把 wire body 转成 JSON 中间表示，再进入所有 provider
+    // 共用的 Merge Patch。这样管理员 override 不需要理解 multipart boundary，也不会因
+    // Account/API Key 的上游编码差异失效。
+    let base_body = match base_body {
+        Some(body) => Some(P::transform_body_before_override(resource, request, body).await?),
+        None => None,
+    };
     let mut body = resource.request_override.apply(
         allocation.request_id,
         resource,

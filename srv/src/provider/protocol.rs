@@ -428,7 +428,13 @@ pub trait ProviderProtocol: Send + Sync + 'static {
     ///
     /// 原始 body 仍由请求缓存负责透传和重放；该方法不得修改请求体，也不要把 provider
     /// 私有 DTO 暴露给通用层。
-    fn inspect_request(body: &[u8]) -> AppResult<RequestInspection>;
+    /// `headers` 只用于需要结合 Content-Type 解释请求体的协议（例如 Images edits 的
+    /// multipart boundary）。普通 JSON 协议可以忽略它。检查允许异步执行，使 adapter
+    /// 能直接复用成熟的流式 multipart 解析库，而不在 Tokio runtime 内阻塞线程。
+    fn inspect_request(
+        headers: &HeaderMap,
+        body: Bytes,
+    ) -> impl Future<Output = AppResult<RequestInspection>> + Send;
 
     /// 将已经脱敏的公共错误编码为 provider 原生 wire shape。
     ///
@@ -448,6 +454,17 @@ pub trait ProviderProtocol: Send + Sync + 'static {
         resource: &UpstreamResource,
         request: &ReplayableRequest,
     ) -> AppResult<UpstreamRequestDraft>;
+
+    /// 在通用 JSON Merge Patch body override 之前，把调用方 wire body 转为可覆盖的
+    /// JSON。默认保持原字节；multipart 等非 JSON operation 必须在此转成中间 JSON，
+    /// 从而继续享有与其他 provider 请求一致的资源级 body override 能力。
+    fn transform_body_before_override(
+        _resource: &UpstreamResource,
+        _request: &ReplayableRequest,
+        body: Bytes,
+    ) -> impl Future<Output = AppResult<Bytes>> + Send {
+        std::future::ready(Ok(body))
+    }
 
     /// 在通用 header/body override 之后，一次性完成 provider 私有的上游请求最终化。
     ///

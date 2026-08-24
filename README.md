@@ -5,7 +5,7 @@
 ## 功能
 
 - 统一 API:对外提供 OpenAI / Anthropic 风格接口
-- 图片生成:提供 OpenAI 风格 `/v1/images/generations`,复用 GPT 账号池与官方 API Key
+- 图片 API:提供 OpenAI 风格 `/v1/images/generations` 和 `/v1/images/edits`,复用 GPT 账号池与官方 API Key
 - 账号池:自动调度与维护多个上游账号、Key
 - 控制:模型白名单、用户配额、会话粘性
 - 插件:上传 WASM 插件,改写请求与响应,内置了sub2api的codex协议转换
@@ -30,23 +30,39 @@ make dev                                        # 本地启动(需 PostgreSQL/Re
 cd deploy && cp .env.example .env && docker compose up -d   # Docker 一键部署
 ```
 
-## 图片生成
+## 图片 API
 
-`POST /v1/images/generations` 进入与 Responses 相同的鉴权、模型白名单、资源调度、重试、
-maintenance、额度和请求日志流程。当前公开的是所有 GPT 资源都能一致执行的 buffered
-`gpt-image-2` 子集：`model` 可以省略，省略时按 `gpt-image-2` 授权；显式模型只接受
-`gpt-image-2`。支持 `prompt`、`background`、`n`、`quality` 和 `size`，不支持
-`stream=true`，其他非 null 参数会返回请求错误而不会被静默忽略。
+`POST /v1/images/generations` 和 `POST /v1/images/edits` 进入与 Responses 相同的鉴权、
+模型白名单、资源调度、重试、maintenance、额度和请求日志流程。当前公开的是所有 GPT
+资源都能一致执行的 buffered `gpt-image-2` 子集：`model` 可以省略，省略时按
+`gpt-image-2` 授权并向上游显式补齐；显式模型只接受 `gpt-image-2`。共同支持
+`prompt`、`background`、`n`、`quality` 和 `size`，不支持 `stream=true`，其他参数会返回
+请求错误而不会被静默忽略。
+
+generations 接收 JSON；edits 接收 `multipart/form-data`，支持单个或多个 `image` /
+`image[]` 文件字段，最多 16 张；每张必须是小于 50 MiB 的 PNG、JPEG 或 WebP。当前跨
+Account 与 Official API Key 一致的编辑子集不包含 `mask`、`input_fidelity`、
+`output_format` 等额外参数。
 
 账号资源会请求 Codex `/images/generations`；官方 API Key 资源请求其 Base URL 下的相同
-路径。两种资源都会在 resource override 后把请求归一化为 `gpt-image-2` JSON，账号上游
-路径可通过 `AESTUS_GPT_UPSTREAM_IMAGE_GENERATIONS_PATH` 覆盖。
+路径。图片编辑分别请求 `/images/edits`，两类资源都会在 resource override 后编码成
+包含 data URL 的标准 Images JSON。两个图片上游路径可分别通过
+`AESTUS_GPT_UPSTREAM_IMAGE_GENERATIONS_PATH` 和 `AESTUS_GPT_UPSTREAM_IMAGE_EDITS_PATH`
+覆盖。
 
 ```bash
 curl http://127.0.0.1:8080/v1/images/generations \
   -H 'authorization: Bearer <AESTUS_GATEWAY_KEY>' \
   -H 'content-type: application/json' \
   -d '{"model":"gpt-image-2","prompt":"一只坐在月球上的橘猫","size":"1024x1024"}'
+```
+
+```bash
+curl http://127.0.0.1:8080/v1/images/edits \
+  -H 'authorization: Bearer <AESTUS_GATEWAY_KEY>' \
+  -F 'image=@./cat.png' \
+  -F 'prompt=给猫加一顶红色帽子' \
+  -F 'quality=high'
 ```
 
 ## 目录结构

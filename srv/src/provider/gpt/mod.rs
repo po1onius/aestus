@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod codex_http;
+pub mod image_edits;
 pub mod image_generations;
 mod images;
 pub mod maintenance;

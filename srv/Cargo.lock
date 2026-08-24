@@ -39,6 +39,8 @@ dependencies = [
  "jsonwebtoken",
  "lettre",
  "logroller",
+ "mime_guess",
+ "multer",
  "rand 0.10.1",
  "redis",
  "reqwest",

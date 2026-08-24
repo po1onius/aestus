@@ -13,6 +13,7 @@ use crate::{
     gateway_auth,
     provider::{
         claude::messages::ClaudeMessagesProxy,
+        gpt::image_edits::GptImageEditsProxy,
         gpt::image_generations::GptImageGenerationsProxy,
         gpt::responses::GptResponsesProxy,
         protocol::{ProviderProtocol, ProviderVisibleError, ReplayableRequest},
@@ -27,6 +28,7 @@ use crate::{
 
 const RESPONSES_ROUTE: &str = "/v1/responses";
 const IMAGE_GENERATIONS_ROUTE: &str = "/v1/images/generations";
+const IMAGE_EDITS_ROUTE: &str = "/v1/images/edits";
 const MESSAGES_ROUTE: &str = "/v1/messages";
 const MESSAGES_COUNT_TOKENS_ROUTE: &str = "/v1/messages/count_tokens";
 
@@ -39,6 +41,7 @@ const MESSAGES_COUNT_TOKENS_ROUTE: &str = "/v1/messages/count_tokens";
 enum OperationId {
     Responses,
     ImageGenerations,
+    ImageEdits,
     Messages,
     MessagesCountTokens,
 }
@@ -48,6 +51,7 @@ impl OperationId {
         match self {
             Self::Responses => "responses",
             Self::ImageGenerations => "image_generations",
+            Self::ImageEdits => "image_edits",
             Self::Messages => "messages",
             Self::MessagesCountTokens => "messages_count_tokens",
         }
@@ -84,6 +88,7 @@ impl EndpointDescriptor {
         let operation = match (method, uri.path()) {
             (&Method::POST, RESPONSES_ROUTE) => OperationId::Responses,
             (&Method::POST, IMAGE_GENERATIONS_ROUTE) => OperationId::ImageGenerations,
+            (&Method::POST, IMAGE_EDITS_ROUTE) => OperationId::ImageEdits,
             (&Method::POST, MESSAGES_ROUTE) => OperationId::Messages,
             (&Method::POST, MESSAGES_COUNT_TOKENS_ROUTE) => OperationId::MessagesCountTokens,
             _ => {
@@ -98,22 +103,23 @@ impl EndpointDescriptor {
                 OperationId::Messages | OperationId::MessagesCountTokens => {
                     crate::provider::claude::model::PROVIDER
                 }
-                OperationId::Responses | OperationId::ImageGenerations => {
-                    crate::provider::gpt::model::PROVIDER
-                }
+                OperationId::Responses
+                | OperationId::ImageGenerations
+                | OperationId::ImageEdits => crate::provider::gpt::model::PROVIDER,
             },
             operation,
             route: match operation {
                 OperationId::Responses => RESPONSES_ROUTE,
                 OperationId::ImageGenerations => IMAGE_GENERATIONS_ROUTE,
+                OperationId::ImageEdits => IMAGE_EDITS_ROUTE,
                 OperationId::Messages => MESSAGES_ROUTE,
                 OperationId::MessagesCountTokens => MESSAGES_COUNT_TOKENS_ROUTE,
             },
             plugin_policy: match operation {
                 OperationId::Responses | OperationId::Messages => PluginPolicy::AccountAttempts,
-                OperationId::ImageGenerations | OperationId::MessagesCountTokens => {
-                    PluginPolicy::Disabled
-                }
+                OperationId::ImageGenerations
+                | OperationId::ImageEdits
+                | OperationId::MessagesCountTokens => PluginPolicy::Disabled,
             },
         })
     }
@@ -127,6 +133,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route(RESPONSES_ROUTE, post(handle_provider_request))
         .route(IMAGE_GENERATIONS_ROUTE, post(handle_provider_request))
+        .route(IMAGE_EDITS_ROUTE, post(handle_provider_request))
         .route(MESSAGES_ROUTE, post(handle_provider_request))
         .route(MESSAGES_COUNT_TOKENS_ROUTE, post(handle_provider_request))
 }
@@ -168,6 +175,9 @@ async fn handle_provider_request(
         OperationId::ImageGenerations => {
             execute_pipeline::<GptImageGenerationsProxy>(&state, endpoint, uri, request, request_id)
                 .await
+        }
+        OperationId::ImageEdits => {
+            execute_pipeline::<GptImageEditsProxy>(&state, endpoint, uri, request, request_id).await
         }
         OperationId::Messages | OperationId::MessagesCountTokens => {
             execute_pipeline::<ClaudeMessagesProxy>(&state, endpoint, uri, request, request_id)
@@ -240,7 +250,9 @@ where
     // 无论是否绑定插件，inspection 始终描述调用方提交的原始 provider 请求，并在资源
     // 调度之前完成。插件是 admin 控制的上游请求改造能力，可以在后续 attempt 中静默
     // 修改最终 header/body，但不接管用户模型授权、请求日志字段或会话粘性语义。
-    let inspection = P::inspect_request(&inspection_bytes)?;
+    // Bytes clone 只增加引用计数；multipart adapter 可直接持有同一块完整请求体，避免
+    // 图片上传在调度前检查时额外复制几十 MiB。
+    let inspection = P::inspect_request(&headers, inspection_bytes.clone()).await?;
     let model = inspection.requested_model;
     let sticky_key = inspection.sticky_key;
     let log_fields = inspection.log_fields;

@@ -38,15 +38,19 @@ pub struct GptImageGenerationsProxy;
 impl ProviderProtocol for GptImageGenerationsProxy {
     type Maintenance = GptMaintenance;
 
-    fn inspect_request(body: &[u8]) -> AppResult<RequestInspection> {
-        let requested_model = images::inspect_generations_body(body)
-            .map_err(|message| AppError::BadRequest { message })?
-            .to_owned();
-        Ok(RequestInspection {
-            requested_model,
-            sticky_key: None,
-            log_fields: RequestLogFields::default(),
-        })
+    fn inspect_request(
+        _headers: &HeaderMap,
+        body: Bytes,
+    ) -> impl Future<Output = AppResult<RequestInspection>> + Send {
+        let result = images::inspect_generations_body(&body)
+            .map(str::to_owned)
+            .map(|requested_model| RequestInspection {
+                requested_model,
+                sticky_key: None,
+                log_fields: RequestLogFields::default(),
+            })
+            .map_err(|message| AppError::BadRequest { message });
+        std::future::ready(result)
     }
 
     fn encode_error(error: &ProviderVisibleError, request_id: uuid::Uuid) -> EncodedProviderError {
@@ -171,11 +175,11 @@ impl ProviderProtocol for GptImageGenerationsProxy {
         attempt: UpstreamAttemptContext,
         response: reqwest::Response,
     ) -> impl Future<Output = Result<ProtocolResponse, ProtocolFailure>> + Send + 'a {
-        process_upstream_response(config, resource, attempt, response)
+        process_image_upstream_response(config, resource, attempt, response)
     }
 }
 
-async fn process_upstream_response(
+pub(super) async fn process_image_upstream_response(
     config: &AppConfig,
     resource: &UpstreamResource,
     attempt: UpstreamAttemptContext,

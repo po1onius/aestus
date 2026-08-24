@@ -56,30 +56,36 @@ pub struct GptResponsesProxy;
 impl ProviderProtocol for GptResponsesProxy {
     type Maintenance = GptMaintenance;
 
-    fn inspect_request(body: &[u8]) -> AppResult<RequestInspection> {
-        let metadata = codex_request::parse_responses_metadata(body)?;
-        let sticky_key = metadata
-            .prompt_cache_key
-            .as_ref()
-            .map(|value| format!("responses:prompt_cache_key:{value}"));
-        let reasoning = metadata
-            .reasoning
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()
-            .map_err(|source| AppError::BadRequest {
-                message: format!("请求体 reasoning 字段无法序列化为 JSON: {source}"),
-            })?;
-        Ok(RequestInspection {
-            requested_model: metadata.model,
-            sticky_key,
-            log_fields: RequestLogFields {
-                reasoning,
-                service_tier: metadata.service_tier,
-                fast_mode: None,
-                is_compaction: Some(metadata.is_compaction),
-            },
-        })
+    fn inspect_request(
+        _headers: &HeaderMap,
+        body: Bytes,
+    ) -> impl Future<Output = AppResult<RequestInspection>> + Send {
+        let result = (|| {
+            let metadata = codex_request::parse_responses_metadata(&body)?;
+            let sticky_key = metadata
+                .prompt_cache_key
+                .as_ref()
+                .map(|value| format!("responses:prompt_cache_key:{value}"));
+            let reasoning = metadata
+                .reasoning
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|source| AppError::BadRequest {
+                    message: format!("请求体 reasoning 字段无法序列化为 JSON: {source}"),
+                })?;
+            Ok(RequestInspection {
+                requested_model: metadata.model,
+                sticky_key,
+                log_fields: RequestLogFields {
+                    reasoning,
+                    service_tier: metadata.service_tier,
+                    fast_mode: None,
+                    is_compaction: Some(metadata.is_compaction),
+                },
+            })
+        })();
+        std::future::ready(result)
     }
 
     fn encode_error(error: &ProviderVisibleError, request_id: uuid::Uuid) -> EncodedProviderError {

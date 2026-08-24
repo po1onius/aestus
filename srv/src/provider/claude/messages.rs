@@ -44,41 +44,47 @@ pub struct ClaudeMessagesProxy;
 impl ProviderProtocol for ClaudeMessagesProxy {
     type Maintenance = ClaudeMaintenance;
 
-    fn inspect_request(body: &[u8]) -> AppResult<RequestInspection> {
-        let metadata = claude_request::parse_messages_metadata(body)?;
-        let sticky_key = metadata
-            .metadata
-            .as_ref()
-            .and_then(|metadata| metadata.user_id.clone())
-            .map(|value| format!("messages:metadata.user_id:{value}"))
-            .or_else(|| {
-                metadata
-                    .container_sticky_value()
-                    .map(|value| format!("messages:container:{value}"))
-            });
-        let reasoning = metadata
-            .thinking
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()
-            .map_err(|source| AppError::BadRequest {
-                message: format!("Claude Messages thinking 字段无法序列化: {source}"),
-            })?;
-        let fast_mode = match metadata.speed.as_deref() {
-            Some("fast") => Some(true),
-            Some("standard") => Some(false),
-            _ => None,
-        };
-        Ok(RequestInspection {
-            requested_model: metadata.model,
-            sticky_key,
-            log_fields: RequestLogFields {
-                reasoning,
-                service_tier: metadata.service_tier,
-                fast_mode,
-                is_compaction: None,
-            },
-        })
+    fn inspect_request(
+        _headers: &HeaderMap,
+        body: Bytes,
+    ) -> impl Future<Output = AppResult<RequestInspection>> + Send {
+        let result = (|| {
+            let metadata = claude_request::parse_messages_metadata(&body)?;
+            let sticky_key = metadata
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.user_id.clone())
+                .map(|value| format!("messages:metadata.user_id:{value}"))
+                .or_else(|| {
+                    metadata
+                        .container_sticky_value()
+                        .map(|value| format!("messages:container:{value}"))
+                });
+            let reasoning = metadata
+                .thinking
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|source| AppError::BadRequest {
+                    message: format!("Claude Messages thinking 字段无法序列化: {source}"),
+                })?;
+            let fast_mode = match metadata.speed.as_deref() {
+                Some("fast") => Some(true),
+                Some("standard") => Some(false),
+                _ => None,
+            };
+            Ok(RequestInspection {
+                requested_model: metadata.model,
+                sticky_key,
+                log_fields: RequestLogFields {
+                    reasoning,
+                    service_tier: metadata.service_tier,
+                    fast_mode,
+                    is_compaction: None,
+                },
+            })
+        })();
+        std::future::ready(result)
     }
 
     fn encode_error(error: &ProviderVisibleError, request_id: uuid::Uuid) -> EncodedProviderError {
