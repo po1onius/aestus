@@ -1,9 +1,10 @@
-import { Gauge, Loader2, UserCog } from "lucide-react";
+import { Gauge, Loader2, Plus, UserCog } from "lucide-react";
 import { ListPager } from "../components/ListPager";
 import { StatusBadge } from "../components/StatusBadge";
 import { formatDateTime } from "../lib/format";
 import {
   actionStackClass,
+  buttonPrimary,
   buttonSmall,
   cellMainClass,
   cellNoteClass,
@@ -28,6 +29,7 @@ interface UsersPageProps {
   offset: number;
   pageSize: number;
   nextOffset: number | null;
+  onAdd: () => void;
   onOpenQuota: (user: DashboardUser) => void;
   onToggleStatus: (user: DashboardUser) => void;
   onPageChange: (offset: number) => void;
@@ -41,6 +43,7 @@ export function UsersPage({
   offset,
   pageSize,
   nextOffset,
+  onAdd,
   onOpenQuota,
   onToggleStatus,
   onPageChange,
@@ -50,7 +53,10 @@ export function UsersPage({
       <div className={`${panelClass} overflow-hidden`}>
         <div className={panelHeaderClass}>
           <h2 className={panelTitleClass}>用户</h2>
-          <span className="text-sm text-slate-500 dark:text-slate-400">当前页 {users.length} 个用户</span>
+          <button className={buttonPrimary} onClick={onAdd}>
+            <Plus size={16} />
+            添加用户
+          </button>
         </div>
         {loading ? (
           <div className={emptyStateClass}>

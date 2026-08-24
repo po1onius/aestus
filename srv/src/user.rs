@@ -185,6 +185,31 @@ pub async fn create_regular_user(
     .await
 }
 
+/// 由管理员直接创建普通用户。
+///
+/// 管理员已经在受保护的 Dashboard 中完成身份校验，因此该流程不发送或校验邮箱验证码；
+/// 邮箱留空时使用归一化后的用户名生成稳定的站内默认地址。最终仍复用普通用户创建逻辑，
+/// 使用户名、邮箱、密码边界以及数据库唯一冲突在所有创建入口保持一致。
+pub async fn create_admin_managed_user(
+    conn: &mut AsyncPgConnection,
+    username: String,
+    email: Option<String>,
+    password: String,
+) -> AppResult<User> {
+    let username = normalize_username(&username)?;
+    let (email, default_email_used) = match email.as_deref().map(str::trim) {
+        Some(email) if !email.is_empty() => (normalize_email(email)?, false),
+        _ => (normalize_email(&format!("{username}@aes.tus"))?, true),
+    };
+
+    info!(
+        username,
+        email, default_email_used, "管理员创建用户请求已完成字段归一化"
+    );
+
+    create_regular_user(conn, username, email, password).await
+}
+
 pub async fn create_user(
     conn: &mut AsyncPgConnection,
     username: String,

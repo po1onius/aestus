@@ -50,6 +50,7 @@ import {
 } from "./features/plugins/PluginCreateDialog";
 import { PluginReleaseDialog } from "./features/plugins/PluginReleaseDialog";
 import { requestLogAutoLoadKey } from "./features/request-logs/utils";
+import { UserCreateDialog } from "./features/users/UserCreateDialog";
 import { UserQuotaDialog } from "./features/users/UserQuotaDialog";
 import { errorMessageFrom, showErrorToast } from "./lib/errors";
 import {
@@ -211,6 +212,11 @@ export function App() {
   const [pluginReleaseTarget, setPluginReleaseTarget] = useState<PluginReleaseSummary | null>(null);
   const [userQuotaDialogUser, setUserQuotaDialogUser] = useState<DashboardUser | null>(null);
   const [userQuotaValue, setUserQuotaValue] = useState("");
+  const [userCreateOpen, setUserCreateOpen] = useState(false);
+  const [userCreateUsername, setUserCreateUsername] = useState("");
+  const [userCreateEmail, setUserCreateEmail] = useState("");
+  const [userCreatePassword, setUserCreatePassword] = useState("");
+  const [userCreating, setUserCreating] = useState(false);
   const [authorization, setAuthorization] = useState<OauthAuthorizationResponse | null>(null);
   const [callbackUrl, setCallbackUrl] = useState("");
   const [refreshToken, setRefreshToken] = useState("");
@@ -542,6 +548,11 @@ export function App() {
     setPluginReleaseTarget(null);
     setUserQuotaDialogUser(null);
     setUserQuotaValue("");
+    setUserCreateOpen(false);
+    setUserCreateUsername("");
+    setUserCreateEmail("");
+    setUserCreatePassword("");
+    setUserCreating(false);
     setAuthorization(null);
     setCallbackUrl("");
     setRefreshToken("");
@@ -1153,6 +1164,16 @@ export function App() {
     }
     setUserQuotaDialogUser(null);
     setUserQuotaValue("");
+  }
+
+  function closeUserCreateDialog() {
+    if (userCreating) {
+      return;
+    }
+    setUserCreateOpen(false);
+    setUserCreateUsername("");
+    setUserCreateEmail("");
+    setUserCreatePassword("");
   }
 
   function closeConfirmationDialog() {
@@ -2209,6 +2230,53 @@ export function App() {
     }
   }
 
+  async function submitUserCreate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const username = userCreateUsername.trim().toLowerCase();
+    const usernameCharacters = Array.from(username);
+    if (
+      usernameCharacters.length === 0 ||
+      usernameCharacters.length > 32 ||
+      utf8ByteLength(username) > 128 ||
+      !/^[\p{L}\p{N}][\p{L}\p{N}_-]*$/u.test(username)
+    ) {
+      toast.error("用户添加失败", {
+        description: "用户名最多 32 个字符，只能包含字母、数字、下划线和连字符。",
+      });
+      return;
+    }
+    if (Array.from(userCreatePassword).length < 8 || utf8ByteLength(userCreatePassword) > 72) {
+      toast.error("用户添加失败", {
+        description: "密码至少 8 个字符，且 UTF-8 编码长度不能超过 72 字节。",
+      });
+      return;
+    }
+
+    const email = userCreateEmail.trim();
+    setUserCreating(true);
+    try {
+      await requestJson<DashboardUser>(usersPath, {
+        method: "POST",
+        // 邮箱留空时不发送该字段，确保默认地址规则由服务端作为唯一真源执行。
+        body: JSON.stringify({
+          username,
+          ...(email ? { email } : {}),
+          password: userCreatePassword,
+        }),
+      }, authToken);
+      setUserCreateOpen(false);
+      setUserCreateUsername("");
+      setUserCreateEmail("");
+      setUserCreatePassword("");
+      await loadUsers(0);
+      toast.success("用户已添加");
+    } catch (error) {
+      showErrorToast("用户添加失败", error);
+    } finally {
+      setUserCreating(false);
+    }
+  }
+
   async function updateUserStatus(user: DashboardUser) {
     setUserUpdatingId(user.id);
     try {
@@ -2447,6 +2515,20 @@ export function App() {
               onClose={closeUserQuotaDialog}
             />
           )}
+          {userCreateOpen && activePage === "users" && (
+            <UserCreateDialog
+              key="user-create"
+              username={userCreateUsername}
+              email={userCreateEmail}
+              password={userCreatePassword}
+              saving={userCreating}
+              onUsernameChange={setUserCreateUsername}
+              onEmailChange={setUserCreateEmail}
+              onPasswordChange={setUserCreatePassword}
+              onSubmit={submitUserCreate}
+              onClose={closeUserCreateDialog}
+            />
+          )}
           {confirmationRequest && (
             <ConfirmDialog
               key="confirmation"
@@ -2550,6 +2632,7 @@ export function App() {
           offset={usersPage.offset}
           pageSize={dashboardListPageSize}
           nextOffset={usersPage.nextOffset}
+          onAdd={() => setUserCreateOpen(true)}
           onOpenQuota={openUserQuotaDialog}
           onToggleStatus={updateUserStatus}
           onPageChange={loadUsers}

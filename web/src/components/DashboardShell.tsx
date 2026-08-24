@@ -60,7 +60,7 @@ export function DashboardShell({
   onLogout,
   onToggleTheme,
 }: DashboardShellProps) {
-  const panelLabel = "控制台";
+  const panelLabel = "Aestus";
   const activeRouteIndex = Math.max(0, routes.findIndex((route) => route.page === activePage));
 
   return (
