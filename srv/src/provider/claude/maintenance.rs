@@ -210,17 +210,8 @@ impl MaintenanceProvider for ClaudeMaintenance {
         })
     }
 
-    fn account_refresh_retry_seconds(state: &AppState, kind: MaintenanceFailureKind) -> u64 {
-        match kind {
-            // invalid refresh token 会直接进入终态，不会调用该分支。
-            MaintenanceFailureKind::Unauthorized => 1,
-            MaintenanceFailureKind::RateLimited => {
-                state.config().claude_account_rate_limit_cooldown_seconds
-            }
-            MaintenanceFailureKind::Retryable | MaintenanceFailureKind::BadResponse => {
-                state.config().claude_account_upstream_5xx_cooldown_seconds
-            }
-        }
+    fn account_refresh_retry_seconds(state: &AppState) -> u64 {
+        state.config().claude_token_refresh_retry_seconds
     }
 
     fn api_key_probe_interval_seconds(state: &AppState) -> u64 {

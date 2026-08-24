@@ -10,8 +10,6 @@ const DEFAULT_UPSTREAM_RETRY_LIMIT: u8 = 2;
 const DEFAULT_DATABASE_POOL_SIZE: usize = 16;
 const DEFAULT_PROVIDER_SESSION_STICKY_TTL_SECONDS: u64 = 3600;
 const DEFAULT_PROVIDER_SCHEDULER_CANDIDATE_LIMIT: i64 = 32;
-const DEFAULT_GPT_ACCOUNT_RATE_LIMIT_COOLDOWN_SECONDS: u64 = 120;
-const DEFAULT_GPT_ACCOUNT_UPSTREAM_5XX_COOLDOWN_SECONDS: u64 = 30;
 const DEFAULT_GPT_UPSTREAM_API_KEY_PROBE_INTERVAL_SECONDS: u64 = 120;
 const DEFAULT_GPT_UPSTREAM_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const DEFAULT_GPT_UPSTREAM_RESPONSES_PATH: &str = "/responses";
@@ -23,6 +21,7 @@ const DEFAULT_PROVIDER_UPSTREAM_TIMEOUT_SECONDS: u64 = 120;
 // 达到该秒数才终止流，活跃的长响应不会受总时长限制。
 const DEFAULT_PROVIDER_UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS: u64 = 0;
 const DEFAULT_GPT_TOKEN_REFRESH_AHEAD_SECONDS: u64 = 180;
+const DEFAULT_GPT_TOKEN_REFRESH_RETRY_SECONDS: u64 = 30;
 const DEFAULT_GPT_OAUTH_ISSUER: &str = "https://auth.openai.com";
 const DEFAULT_GPT_OAUTH_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
 const DEFAULT_GPT_OAUTH_SCOPE: &str = "openid profile email offline_access";
@@ -30,12 +29,12 @@ const DEFAULT_GPT_OAUTH_SESSION_TTL_SECONDS: u64 = 600;
 const DEFAULT_GPT_TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
 const DEFAULT_GPT_QUOTA_RECOVERY_SECONDS: u64 = 5 * 60 * 60;
 const DEFAULT_CLAUDE_ACCOUNT_RATE_LIMIT_COOLDOWN_SECONDS: u64 = 120;
-const DEFAULT_CLAUDE_ACCOUNT_UPSTREAM_5XX_COOLDOWN_SECONDS: u64 = 30;
 const DEFAULT_CLAUDE_UPSTREAM_API_KEY_PROBE_INTERVAL_SECONDS: u64 = 120;
 const DEFAULT_CLAUDE_UPSTREAM_API_KEY_PROBE_MODEL: &str = "claude-opus-4-8";
 const DEFAULT_CLAUDE_UPSTREAM_BASE_URL: &str = "https://api.anthropic.com";
 const DEFAULT_CLAUDE_UPSTREAM_MESSAGES_PATH: &str = "/v1/messages";
 const DEFAULT_CLAUDE_TOKEN_REFRESH_AHEAD_SECONDS: u64 = 180;
+const DEFAULT_CLAUDE_TOKEN_REFRESH_RETRY_SECONDS: u64 = 30;
 const DEFAULT_CLAUDE_OAUTH_AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";
 const DEFAULT_CLAUDE_OAUTH_REDIRECT_URI: &str = "https://platform.claude.com/oauth/code/callback";
 const DEFAULT_CLAUDE_OAUTH_SCOPE: &str =
@@ -67,8 +66,6 @@ pub struct AppConfig {
     pub upstream_retry_limit: u8,
     pub provider_session_sticky_ttl_seconds: u64,
     pub provider_scheduler_candidate_limit: i64,
-    pub gpt_account_rate_limit_cooldown_seconds: u64,
-    pub gpt_account_upstream_5xx_cooldown_seconds: u64,
     pub gpt_upstream_api_key_probe_interval_seconds: u64,
     pub gpt_upstream_base_url: String,
     pub gpt_upstream_responses_path: String,
@@ -78,6 +75,7 @@ pub struct AppConfig {
     pub provider_upstream_timeout_seconds: u64,
     pub provider_upstream_stream_idle_timeout_seconds: u64,
     pub gpt_token_refresh_ahead_seconds: u64,
+    pub gpt_token_refresh_retry_seconds: u64,
     pub gpt_oauth_issuer: String,
     pub gpt_oauth_redirect_uri: String,
     pub gpt_oauth_scope: String,
@@ -85,12 +83,12 @@ pub struct AppConfig {
     pub gpt_token_endpoint: String,
     pub gpt_quota_recovery_seconds: u64,
     pub claude_account_rate_limit_cooldown_seconds: u64,
-    pub claude_account_upstream_5xx_cooldown_seconds: u64,
     pub claude_upstream_api_key_probe_interval_seconds: u64,
     pub claude_upstream_api_key_probe_model: String,
     pub claude_upstream_base_url: String,
     pub claude_upstream_messages_path: String,
     pub claude_token_refresh_ahead_seconds: u64,
+    pub claude_token_refresh_retry_seconds: u64,
     pub claude_oauth_authorize_url: String,
     pub claude_oauth_redirect_uri: String,
     pub claude_oauth_scope: String,
@@ -141,14 +139,6 @@ impl AppConfig {
                 "AESTUS_PROVIDER_SCHEDULER_CANDIDATE_LIMIT",
                 DEFAULT_PROVIDER_SCHEDULER_CANDIDATE_LIMIT,
             )?,
-            gpt_account_rate_limit_cooldown_seconds: parse_env(
-                "AESTUS_GPT_ACCOUNT_RATE_LIMIT_COOLDOWN_SECONDS",
-                DEFAULT_GPT_ACCOUNT_RATE_LIMIT_COOLDOWN_SECONDS,
-            )?,
-            gpt_account_upstream_5xx_cooldown_seconds: parse_env(
-                "AESTUS_GPT_ACCOUNT_UPSTREAM_5XX_COOLDOWN_SECONDS",
-                DEFAULT_GPT_ACCOUNT_UPSTREAM_5XX_COOLDOWN_SECONDS,
-            )?,
             gpt_upstream_api_key_probe_interval_seconds: parse_env(
                 "AESTUS_GPT_UPSTREAM_API_KEY_PROBE_INTERVAL_SECONDS",
                 DEFAULT_GPT_UPSTREAM_API_KEY_PROBE_INTERVAL_SECONDS,
@@ -185,6 +175,10 @@ impl AppConfig {
                 "AESTUS_GPT_TOKEN_REFRESH_AHEAD_SECONDS",
                 DEFAULT_GPT_TOKEN_REFRESH_AHEAD_SECONDS,
             )?,
+            gpt_token_refresh_retry_seconds: parse_env(
+                "AESTUS_GPT_TOKEN_REFRESH_RETRY_SECONDS",
+                DEFAULT_GPT_TOKEN_REFRESH_RETRY_SECONDS,
+            )?,
             gpt_oauth_issuer: parse_env_string(
                 "AESTUS_GPT_OAUTH_ISSUER",
                 DEFAULT_GPT_OAUTH_ISSUER,
@@ -210,10 +204,6 @@ impl AppConfig {
                 "AESTUS_CLAUDE_ACCOUNT_RATE_LIMIT_COOLDOWN_SECONDS",
                 DEFAULT_CLAUDE_ACCOUNT_RATE_LIMIT_COOLDOWN_SECONDS,
             )?,
-            claude_account_upstream_5xx_cooldown_seconds: parse_env(
-                "AESTUS_CLAUDE_ACCOUNT_UPSTREAM_5XX_COOLDOWN_SECONDS",
-                DEFAULT_CLAUDE_ACCOUNT_UPSTREAM_5XX_COOLDOWN_SECONDS,
-            )?,
             claude_upstream_api_key_probe_interval_seconds: parse_env(
                 "AESTUS_CLAUDE_UPSTREAM_API_KEY_PROBE_INTERVAL_SECONDS",
                 DEFAULT_CLAUDE_UPSTREAM_API_KEY_PROBE_INTERVAL_SECONDS,
@@ -233,6 +223,10 @@ impl AppConfig {
             claude_token_refresh_ahead_seconds: parse_env(
                 "AESTUS_CLAUDE_TOKEN_REFRESH_AHEAD_SECONDS",
                 DEFAULT_CLAUDE_TOKEN_REFRESH_AHEAD_SECONDS,
+            )?,
+            claude_token_refresh_retry_seconds: parse_env(
+                "AESTUS_CLAUDE_TOKEN_REFRESH_RETRY_SECONDS",
+                DEFAULT_CLAUDE_TOKEN_REFRESH_RETRY_SECONDS,
             )?,
             claude_oauth_authorize_url: parse_env_string(
                 "AESTUS_CLAUDE_OAUTH_AUTHORIZE_URL",

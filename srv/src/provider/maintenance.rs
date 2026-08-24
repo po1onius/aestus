@@ -43,8 +43,9 @@ pub trait MaintenanceProvider: Send + Sync + 'static {
         api_key: &'a ProviderApiKey,
     ) -> impl Future<Output = Result<(), MaintenanceFailure>> + Send + 'a;
 
-    /// refresh endpoint 的所有可重试失败都复用账号唯一的 next refresh 时间点。
-    fn account_refresh_retry_seconds(state: &AppState, kind: MaintenanceFailureKind) -> u64;
+    /// refresh endpoint 的所有非终态失败使用 Provider 独立的固定重试间隔，并复用账号
+    /// 唯一的 next refresh 时间点；业务请求的限流与 5xx 冷却配置不得影响凭证维护节奏。
+    fn account_refresh_retry_seconds(state: &AppState) -> u64;
 
     /// API Key 只有一个 next probe 时间点，不根据错误类型计算 quota/cooldown。
     fn api_key_probe_interval_seconds(state: &AppState) -> u64;
@@ -720,10 +721,10 @@ async fn maintain_account_with_lock<P: MaintenanceProvider>(
             Ok(None)
         }
         Err(failure) => {
-            let next_at = Utc::now()
-                + chrono::Duration::seconds(
-                    P::account_refresh_retry_seconds(state, failure.kind).max(1) as i64,
-                );
+            // token endpoint 的维护重试与业务请求资源冷却属于不同生命周期。这里仅使用
+            // Provider 自己的刷新重试配置，避免调整请求限流策略时意外改变凭证维护节奏。
+            let retry_seconds = P::account_refresh_retry_seconds(state).max(1);
+            let next_at = Utc::now() + chrono::Duration::seconds(retry_seconds as i64);
             let mut conn = state.db_conn().await?;
             let updated = sql::account::schedule_refresh_retry_if_generation(
                 &mut conn,
@@ -751,6 +752,7 @@ async fn maintain_account_with_lock<P: MaintenanceProvider>(
                 credential_generation = generation,
                 credential_status = %updated.status,
                 failure_kind = failure.kind.as_str(),
+                retry_seconds,
                 next_token_refresh_at = %next_at,
                 error = %failure,
                 "token refresh 临时失败，已复用 next refresh 时间安排重试"
