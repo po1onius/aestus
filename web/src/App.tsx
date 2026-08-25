@@ -2139,21 +2139,6 @@ export function App() {
     }
   }
 
-  async function refreshRateLimitResetCredits() {
-    if (!rateLimitResetTarget || rateLimitResetLoading || applyingResetCreditId) {
-      return;
-    }
-    setRateLimitResetError(null);
-    setRateLimitResetLoading(true);
-    try {
-      setRateLimitResetResponse(await fetchRateLimitResetCredits(rateLimitResetTarget));
-    } catch (error) {
-      setRateLimitResetError(errorMessageFrom(error));
-    } finally {
-      setRateLimitResetLoading(false);
-    }
-  }
-
   async function applyRateLimitResetCredit(credit: RateLimitResetCredit) {
     if (!rateLimitResetTarget || applyingResetCreditId || rateLimitResetLoading) {
       return;
@@ -2536,7 +2521,6 @@ export function App() {
               loading={rateLimitResetLoading}
               error={rateLimitResetError}
               applyingCreditId={applyingResetCreditId}
-              onRefresh={refreshRateLimitResetCredits}
               onApply={applyRateLimitResetCredit}
               onClose={closeRateLimitResetDialog}
             />

@@ -1,7 +1,7 @@
-import { AlertCircle, Loader2, RefreshCw, RotateCcw } from "lucide-react";
+import { AlertCircle, Loader2, RotateCcw } from "lucide-react";
 import { Modal } from "../../components/Modal";
 import { formatDateTime, formatOptionalDateTime } from "../../lib/format";
-import { buttonPrimary, buttonSecondary, spinnerClass } from "../../lib/ui";
+import { buttonPrimary, spinnerClass } from "../../lib/ui";
 import type {
   GptAccount,
   RateLimitResetCredit,
@@ -14,7 +14,6 @@ interface RateLimitResetDialogProps {
   loading: boolean;
   error: string | null;
   applyingCreditId: string | null;
-  onRefresh: () => void;
   onApply: (credit: RateLimitResetCredit) => void;
   onClose: () => void;
 }
@@ -37,30 +36,6 @@ export function RateLimitResetDialog(props: RateLimitResetDialogProps) {
       onClose={props.onClose}
     >
       <div className="grid gap-4">
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50/70 px-4 py-3 dark:border-slate-800 dark:bg-slate-950/70">
-          <div>
-            <strong className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-              可用重置次数：{props.response?.available_count ?? "—"}
-            </strong>
-            <p className="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">
-              应用成功后会重新查询重置列表和账号额度，并同步网关调度状态。
-            </p>
-          </div>
-          <button
-            type="button"
-            className={buttonSecondary}
-            disabled={busy}
-            onClick={props.onRefresh}
-          >
-            {props.loading ? (
-              <Loader2 className={spinnerClass} size={16} />
-            ) : (
-              <RefreshCw size={16} />
-            )}
-            重新查询
-          </button>
-        </div>
-
         {props.error ? (
           <div className="flex items-start gap-3 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
             <AlertCircle className="mt-0.5 shrink-0" size={18} />
