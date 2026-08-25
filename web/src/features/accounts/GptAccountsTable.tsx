@@ -1,4 +1,4 @@
-import { Loader2, Search, Settings, Trash2 } from "lucide-react";
+import { Loader2, RotateCcw, Search, Settings, Trash2 } from "lucide-react";
 import { RuntimeBadge } from "../../components/RuntimeBadge";
 import { StatusBadge } from "../../components/StatusBadge";
 import { formatDateTime, formatOptionalDateTime } from "../../lib/format";
@@ -24,11 +24,13 @@ interface GptAccountsTableProps {
   accounts: GptAccount[];
   quotas: Record<string, GptAccountQuotaResponse>;
   quotaRefreshingIds: Record<string, boolean>;
+  resetOperationAccountId: string | null;
   groups: ProviderGroup[];
   groupUpdatingId: string | null;
   enabledUpdatingId: string | null;
   deletingId: string | null;
   onRefreshQuota: (account: GptAccount) => void;
+  onOpenRateLimitReset: (account: GptAccount) => void;
   onUpdateGroup: (account: GptAccount, groupId: string) => void;
   onUpdateEnabled: (account: GptAccount, enabled: boolean) => void;
   onOpenOverride: (account: GptAccount) => void;
@@ -40,11 +42,13 @@ export function GptAccountsTable({
   accounts,
   quotas,
   quotaRefreshingIds,
+  resetOperationAccountId,
   groups,
   groupUpdatingId,
   enabledUpdatingId,
   deletingId,
   onRefreshQuota,
+  onOpenRateLimitReset,
   onUpdateGroup,
   onUpdateEnabled,
   onOpenOverride,
@@ -69,6 +73,7 @@ export function GptAccountsTable({
           {accounts.map((account) => {
             const busy =
               Boolean(quotaRefreshingIds[account.id]) ||
+              resetOperationAccountId === account.id ||
               deletingId === account.id ||
               groupUpdatingId === account.id ||
               enabledUpdatingId === account.id;
@@ -147,6 +152,19 @@ export function GptAccountsTable({
                         <Search size={14} />
                       )}
                       查询额度
+                    </button>
+                    <button
+                      className={buttonSmall}
+                      disabled={busy}
+                      onClick={() => onOpenRateLimitReset(account)}
+                      title="查询并应用账号额度重置"
+                    >
+                      {resetOperationAccountId === account.id ? (
+                        <Loader2 className={spinnerClass} size={14} />
+                      ) : (
+                        <RotateCcw size={14} />
+                      )}
+                      重置
                     </button>
                     <button
                       className={buttonSmall}

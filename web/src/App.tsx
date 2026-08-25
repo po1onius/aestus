@@ -34,6 +34,7 @@ import {
 import { AccountImportDialog } from "./features/accounts/AccountImportDialog";
 import { ProviderGroupCreateDialog } from "./features/accounts/ProviderGroupCreateDialog";
 import { ProviderUpstreamApiKeyDialog } from "./features/accounts/ProviderUpstreamApiKeyDialog";
+import { RateLimitResetDialog } from "./features/accounts/RateLimitResetDialog";
 import { RequestOverrideDialog } from "./features/accounts/RequestOverrideDialog";
 import { AuthScreen } from "./features/auth/AuthScreen";
 import {
@@ -71,6 +72,7 @@ import type {
   ApiKey,
   AuthResponse,
   ClaudeAccount,
+  ConsumeRateLimitResetCreditResponse,
   DashboardUser,
   DashboardTheme,
   DeleteClaudeAccountResponse,
@@ -92,6 +94,8 @@ import type {
   OauthAuthorizationResponse,
   OverrideEntry,
   PluginReleaseSummary,
+  RateLimitResetCredit,
+  RateLimitResetCreditsResponse,
   RequestLogCursor,
   RequestLogRecord,
   RequestOverride,
@@ -144,6 +148,12 @@ export function App() {
   const [activeAccountProvider, setActiveAccountProvider] = useState<AccountProviderKey>("gpt");
   const [users, setUsers] = useState<DashboardUser[]>([]);
   const [accountQuotas, setAccountQuotas] = useState<Record<string, GptAccountQuotaResponse>>({});
+  const [rateLimitResetTarget, setRateLimitResetTarget] = useState<GptAccount | null>(null);
+  const [rateLimitResetResponse, setRateLimitResetResponse] =
+    useState<RateLimitResetCreditsResponse | null>(null);
+  const [rateLimitResetLoading, setRateLimitResetLoading] = useState(false);
+  const [rateLimitResetError, setRateLimitResetError] = useState<string | null>(null);
+  const [applyingResetCreditId, setApplyingResetCreditId] = useState<string | null>(null);
   const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
   const [plugins, setPlugins] = useState<PluginReleaseSummary[]>([]);
   const [pluginOptions, setPluginOptions] = useState<PluginReleaseSummary[]>([]);
@@ -2068,17 +2078,29 @@ export function App() {
     }
   }
 
+  /** 查询并写入账号额度；重置成功后的静默同步与手动“查询额度”共用同一状态更新路径。 */
+  async function fetchAndStoreAccountQuota(account: GptAccount) {
+    const quota = await requestJson<GptAccountQuotaResponse>(
+      `${gptAccountsPath}/${account.id}/quota`,
+      {
+        method: "POST",
+      },
+      authToken,
+    );
+    setAccountQuotas((items) => ({ ...items, [account.id]: quota }));
+    if (quota.quota_limit_removed) {
+      // 后端已同时更新 PostgreSQL quota 状态与 Redis 调度投影，重新加载账号列表，避免
+      // 页面继续展示查询前的 quota_limited 快照。
+      await loadAccounts();
+    }
+    return quota;
+  }
+
   async function refreshAccountQuota(account: GptAccount) {
     setQuotaRefreshingIds((items) => ({ ...items, [account.id]: true }));
     try {
-      const quota = await requestJson<GptAccountQuotaResponse>(`${gptAccountsPath}/${account.id}/quota`, {
-        method: "POST",
-      }, authToken);
-      setAccountQuotas((items) => ({ ...items, [account.id]: quota }));
+      const quota = await fetchAndStoreAccountQuota(account);
       if (quota.quota_limit_removed) {
-        // 后端已同时更新 PostgreSQL quota 状态与 Redis 调度投影，重新加载账号列表，避免
-        // 页面继续展示查询前的 quota_limited 快照。
-        await loadAccounts();
         toast.success("账号额度查询成功，额度限制已解除");
       } else {
         toast.success("账号额度查询成功");
@@ -2092,6 +2114,122 @@ export function App() {
         return next;
       });
     }
+  }
+
+  async function fetchRateLimitResetCredits(account: GptAccount) {
+    return requestJson<RateLimitResetCreditsResponse>(
+      `${gptAccountsPath}/${account.id}/rate-limit-reset-credits`,
+      { method: "GET" },
+      authToken,
+    );
+  }
+
+  /** 点击“重置”后立即查询上游列表，弹窗同时承载加载态、错误态和最终兑换列表。 */
+  async function openRateLimitResetDialog(account: GptAccount) {
+    setRateLimitResetTarget(account);
+    setRateLimitResetResponse(null);
+    setRateLimitResetError(null);
+    setRateLimitResetLoading(true);
+    try {
+      setRateLimitResetResponse(await fetchRateLimitResetCredits(account));
+    } catch (error) {
+      setRateLimitResetError(errorMessageFrom(error));
+    } finally {
+      setRateLimitResetLoading(false);
+    }
+  }
+
+  async function refreshRateLimitResetCredits() {
+    if (!rateLimitResetTarget || rateLimitResetLoading || applyingResetCreditId) {
+      return;
+    }
+    setRateLimitResetError(null);
+    setRateLimitResetLoading(true);
+    try {
+      setRateLimitResetResponse(await fetchRateLimitResetCredits(rateLimitResetTarget));
+    } catch (error) {
+      setRateLimitResetError(errorMessageFrom(error));
+    } finally {
+      setRateLimitResetLoading(false);
+    }
+  }
+
+  async function applyRateLimitResetCredit(credit: RateLimitResetCredit) {
+    if (!rateLimitResetTarget || applyingResetCreditId || rateLimitResetLoading) {
+      return;
+    }
+
+    const account = rateLimitResetTarget;
+    setApplyingResetCreditId(credit.id);
+    setRateLimitResetError(null);
+    try {
+      const result = await requestJson<ConsumeRateLimitResetCreditResponse>(
+        `${gptAccountsPath}/${account.id}/rate-limit-reset-credits/consume`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            credit_id: credit.id,
+          }),
+        },
+        authToken,
+      );
+
+      switch (result.code) {
+        case "reset":
+          toast.success(
+            result.windows_reset > 0
+              ? `额度重置已应用，共重置 ${result.windows_reset} 个窗口`
+              : "额度重置已应用",
+          );
+          break;
+        case "already_redeemed":
+          toast.success("该次额度重置此前已成功应用");
+          break;
+        case "nothing_to_reset":
+          toast.info("当前没有符合条件的额度窗口可以重置");
+          break;
+        case "no_credit":
+          toast.error("账号当前没有可用的额度重置次数");
+          break;
+      }
+
+      // 无论上游返回何种业务结果都重新读取列表；成功或幂等成功时还要同步额度与网关
+      // quota_limited 状态，避免账号已恢复但调度快照仍不可用。
+      setRateLimitResetLoading(true);
+      try {
+        const [creditsResult, quotaResult] = await Promise.allSettled([
+          fetchRateLimitResetCredits(account),
+          result.code === "reset" || result.code === "already_redeemed"
+            ? fetchAndStoreAccountQuota(account)
+            : Promise.resolve(null),
+        ]);
+        if (creditsResult.status === "fulfilled") {
+          setRateLimitResetResponse(creditsResult.value);
+        } else {
+          setRateLimitResetError(
+            `额度重置操作已完成，但重新查询列表失败：${errorMessageFrom(creditsResult.reason)}`,
+          );
+        }
+        if (quotaResult.status === "rejected") {
+          showErrorToast("额度重置已应用，但账号额度同步失败", quotaResult.reason);
+        }
+      } finally {
+        setRateLimitResetLoading(false);
+      }
+    } catch (error) {
+      showErrorToast("额度重置应用失败", error);
+    } finally {
+      setApplyingResetCreditId(null);
+    }
+  }
+
+  function closeRateLimitResetDialog() {
+    if (rateLimitResetLoading || applyingResetCreditId) {
+      return;
+    }
+    setRateLimitResetTarget(null);
+    setRateLimitResetResponse(null);
+    setRateLimitResetError(null);
   }
 
   function requestDeleteAccount(account: GptAccount) {
@@ -2314,6 +2452,11 @@ export function App() {
     }
   }
 
+  const resetOperationAccountId =
+    rateLimitResetTarget && (rateLimitResetLoading || applyingResetCreditId)
+      ? rateLimitResetTarget.id
+      : null;
+
   if (authLoading || !currentUser) {
     return (
       <AuthScreen
@@ -2383,6 +2526,19 @@ export function App() {
               onChatgptAccountIdChange={setChatgptAccountId}
               onSubmitCallback={submitCallback}
               onSubmitManual={submitManualAccount}
+            />
+          )}
+          {rateLimitResetTarget && activePage === "accounts" && (
+            <RateLimitResetDialog
+              key={`rate-limit-reset-${rateLimitResetTarget.id}`}
+              account={rateLimitResetTarget}
+              response={rateLimitResetResponse}
+              loading={rateLimitResetLoading}
+              error={rateLimitResetError}
+              applyingCreditId={applyingResetCreditId}
+              onRefresh={refreshRateLimitResetCredits}
+              onApply={applyRateLimitResetCredit}
+              onClose={closeRateLimitResetDialog}
             />
           )}
           {providerGroupCreateProvider && activePage === "accounts" && (
@@ -2580,6 +2736,7 @@ export function App() {
           upstreamApiKeyDeletingId={upstreamApiKeyDeletingId}
           upstreamApiKeyEnabledUpdatingId={upstreamApiKeyEnabledUpdatingId}
           quotaRefreshingIds={quotaRefreshingIds}
+          resetOperationAccountId={resetOperationAccountId}
           providerGroups={providerGroups}
           resourceGroupUpdatingId={resourceGroupUpdatingId}
           pageOffset={activeCredentialPage.offset}
@@ -2608,6 +2765,7 @@ export function App() {
           onUpdateGptEnabled={updateEnabled}
           onUpdateUpstreamApiKeyEnabled={updateUpstreamApiKeyEnabled}
           onRefreshAccountQuota={refreshAccountQuota}
+          onOpenRateLimitReset={openRateLimitResetDialog}
           onDeleteGptAccount={requestDeleteAccount}
           onDeleteClaudeAccount={requestDeleteClaudeAccount}
           onDeleteUpstreamApiKey={requestDeleteUpstreamApiKey}

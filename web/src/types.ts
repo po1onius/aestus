@@ -174,6 +174,33 @@ export interface RateLimitResetCreditsSummary {
   available_count: number;
 }
 
+/** ChatGPT 后端授予账号的一条可兑换额度重置记录。 */
+export interface RateLimitResetCredit {
+  id: string;
+  reset_type: string;
+  status: string;
+  granted_at: string;
+  expires_at: string | null;
+  title: string | null;
+  description: string | null;
+}
+
+export interface RateLimitResetCreditsResponse {
+  credits: RateLimitResetCredit[];
+  available_count: number;
+}
+
+export type ConsumeRateLimitResetCreditCode =
+  | "reset"
+  | "nothing_to_reset"
+  | "no_credit"
+  | "already_redeemed";
+
+export interface ConsumeRateLimitResetCreditResponse {
+  code: ConsumeRateLimitResetCreditCode;
+  windows_reset: number;
+}
+
 export interface ListAccountsResponse extends ListPageResponse<GptAccount> {
 }
 

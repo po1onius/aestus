@@ -63,6 +63,7 @@ export function createOverrideEntry(key: string, value: string): OverrideEntry {
   };
 }
 
+/** 优先使用浏览器 UUID，为仅存在于前端的临时表单项创建唯一 ID。 */
 function createClientId() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }

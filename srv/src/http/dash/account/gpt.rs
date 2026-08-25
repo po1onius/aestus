@@ -21,7 +21,7 @@ use crate::{
             auth::{self, RefreshTokenGrant, RefreshedAuthToken},
             maintenance::{self as gpt_maintenance, GptMaintenance},
             model::{self as gpt_model, GptAccountSpecific},
-            quota,
+            quota, rate_limit_reset,
             sql::account,
         },
         group::ProviderGroup,
@@ -114,6 +114,14 @@ pub fn router() -> Router<AppState> {
         .route("/oauth/callback", post(complete_oauth_callback))
         .route("/{id}", delete(delete_gpt_account))
         .route("/{id}/quota", post(refresh_gpt_account_quota))
+        .route(
+            "/{id}/rate-limit-reset-credits",
+            get(list_gpt_account_rate_limit_reset_credits),
+        )
+        .route(
+            "/{id}/rate-limit-reset-credits/consume",
+            post(consume_gpt_account_rate_limit_reset_credit),
+        )
         .route("/{id}/enabled", put(update_gpt_account_enabled))
         .route("/{id}/override", put(update_gpt_account_override))
         .route("/{id}/group", put(update_gpt_account_group))
@@ -486,6 +494,66 @@ async fn refresh_gpt_account_quota(
     );
 
     Ok(Json(quota))
+}
+
+/// 查询指定 GPT OAuth 账号可用的人工额度重置记录。
+async fn list_gpt_account_rate_limit_reset_credits(
+    State(state): State<AppState>,
+    _admin: dash_auth::AdminUser,
+    Path(id): Path<Uuid>,
+) -> AdminResult<Json<rate_limit_reset::RateLimitResetCreditsResponse>> {
+    let service = ProviderResourceService::<GptMaintenance>::new(&state);
+    let account = service.find_account(id).await?.ok_or_else(|| {
+        warn!(gpt_account_id = %id, "管理端查询 GPT 账号额度重置记录失败，账号不存在");
+        AppError::BadRequest {
+            message: format!("GPT 账号不存在: {id}"),
+        }
+    })?;
+
+    let response = rate_limit_reset::fetch_rate_limit_reset_credits(&state, &account).await?;
+    info!(
+        gpt_account_id = %account.id,
+        available_count = response.available_count,
+        credit_count = response.credits.len(),
+        "管理端已查询 GPT 账号额度重置记录"
+    );
+    Ok(Json(response))
+}
+
+/// 应用一条由查询接口返回的额度重置记录。
+async fn consume_gpt_account_rate_limit_reset_credit(
+    State(state): State<AppState>,
+    _admin: dash_auth::AdminUser,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<rate_limit_reset::ConsumeRateLimitResetCreditRequest>,
+) -> AdminResult<Json<rate_limit_reset::ConsumeRateLimitResetCreditResponse>> {
+    let service = ProviderResourceService::<GptMaintenance>::new(&state);
+    let account = service.find_account(id).await?.ok_or_else(|| {
+        warn!(gpt_account_id = %id, "管理端应用 GPT 账号额度重置记录失败，账号不存在");
+        AppError::BadRequest {
+            message: format!("GPT 账号不存在: {id}"),
+        }
+    })?;
+
+    // 上游 redeem_request_id 是本次后端操作的协议细节，不暴露给浏览器。UUID v7 同时便于
+    // 按时间定位日志；当前管理接口不做透明自动重试，每次点击“应用”创建一次新操作。
+    let idempotency_key = Uuid::now_v7();
+    let response = rate_limit_reset::consume_rate_limit_reset_credit(
+        &state,
+        &account,
+        idempotency_key,
+        &payload.credit_id,
+    )
+    .await?;
+    info!(
+        gpt_account_id = %account.id,
+        credit_id = %payload.credit_id,
+        idempotency_key = %idempotency_key,
+        outcome = ?response.code,
+        windows_reset = response.windows_reset,
+        "管理端已完成 GPT 账号额度重置操作"
+    );
+    Ok(Json(response))
 }
 
 async fn delete_gpt_account(

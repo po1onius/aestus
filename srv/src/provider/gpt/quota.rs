@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use reqwest::{
-    StatusCode,
-    header::{ACCEPT, HeaderName, HeaderValue},
+    Method, StatusCode,
+    header::{ACCEPT, HeaderValue},
 };
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
@@ -12,7 +12,7 @@ use crate::{
     provider::{
         credential::ProviderAccount,
         gpt::{
-            codex_http::header as codex_header,
+            account_api::{GptAccountApiAuth, account_api_url},
             model::{GptAccountSpecific, PROVIDER},
         },
         response_logging::response_body_for_tracing,
@@ -20,8 +20,6 @@ use crate::{
     state::AppState,
 };
 
-const CHATGPT_ACCOUNT_ID_HEADER: &str = "chatgpt-account-id";
-const FEDRAMP_HEADER: &str = "x-openai-fedramp";
 const DEFAULT_LIMIT_ID: &str = "codex";
 
 /// 单个 GPT 账号的额度快照响应。
@@ -208,55 +206,21 @@ pub async fn fetch_account_quota(
     account: &ProviderAccount,
 ) -> AppResult<GptAccountQuotaResponse> {
     let specific = account.parse_specific::<GptAccountSpecific>()?;
-    let access_token = account.access_token.trim();
-    if access_token.is_empty() {
-        return Err(AppError::BadRequest {
-            message: "GPT 账号缺少 access_token，无法刷新额度".to_owned(),
-        });
-    }
-
-    let chatgpt_account_id = specific
-        .chatgpt_account_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| AppError::BadRequest {
-            message: "GPT 账号缺少 chatgpt_account_id，无法按账号查询额度".to_owned(),
-        })?;
+    let auth = GptAccountApiAuth::from_account(account, "查询额度")?;
+    let chatgpt_account_id = auth.chatgpt_account_id();
 
     let url = usage_status_url(&state.config().gpt_upstream_base_url);
     info!(
         gpt_account_id = %account.id,
         chatgpt_account_id,
         usage_url = %url,
-        fedramp = specific.chatgpt_account_is_fedramp,
+        fedramp = auth.is_fedramp(),
         "开始刷新 GPT 账号额度快照"
     );
 
-    let mut request = state
-        .chatgpt_codex_http_client()
-        .get(&url)
-        // 额度查询没有下游请求 UA，使用与模型请求规范化逻辑相同的固定 fallback 身份。
-        .header(
-            reqwest::header::USER_AGENT,
-            HeaderValue::from_static(codex_header::FALLBACK_CODEX_USER_AGENT),
-        )
-        .header(
-            HeaderName::from_static(codex_header::ORIGINATOR_HEADER),
-            HeaderValue::from_static(codex_header::FALLBACK_CODEX_CLIENT),
-        )
-        .header(ACCEPT, HeaderValue::from_static("application/json"))
-        .bearer_auth(access_token)
-        .header(
-            HeaderName::from_static(CHATGPT_ACCOUNT_ID_HEADER),
-            chatgpt_account_id,
-        );
-    if specific.chatgpt_account_is_fedramp {
-        request = request.header(
-            HeaderName::from_static(FEDRAMP_HEADER),
-            HeaderValue::from_static("true"),
-        );
-    }
+    let request = auth
+        .request(state, Method::GET, &url)
+        .header(ACCEPT, HeaderValue::from_static("application/json"));
 
     let response = request.send().await.map_err(|source| {
         warn!(
@@ -328,16 +292,7 @@ pub async fn fetch_account_quota(
 }
 
 fn usage_status_url(upstream_base_url: &str) -> String {
-    let mut base = upstream_base_url.trim().trim_end_matches('/').to_owned();
-    if let Some(stripped) = base.strip_suffix("/codex") {
-        base = stripped.to_owned();
-    }
-
-    if base.contains("/backend-api") {
-        format!("{base}/wham/usage")
-    } else {
-        format!("{base}/api/codex/usage")
-    }
+    account_api_url(upstream_base_url, "usage", "usage")
 }
 
 fn quota_response_from_payload(

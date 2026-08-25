@@ -52,6 +52,7 @@ interface AccountsPageProps {
   upstreamApiKeyDeletingId: string | null;
   upstreamApiKeyEnabledUpdatingId: string | null;
   quotaRefreshingIds: Record<string, boolean>;
+  resetOperationAccountId: string | null;
   providerGroups: ProviderGroupSummary[];
   resourceGroupUpdatingId: string | null;
   pageOffset: number;
@@ -81,6 +82,7 @@ interface AccountsPageProps {
     enabled: boolean,
   ) => void;
   onRefreshAccountQuota: (account: GptAccount) => void;
+  onOpenRateLimitReset: (account: GptAccount) => void;
   onDeleteGptAccount: (account: GptAccount) => void;
   onDeleteClaudeAccount: (account: ClaudeAccount) => void;
   onDeleteUpstreamApiKey: (
@@ -119,6 +121,7 @@ export function AccountsPage({
   upstreamApiKeyDeletingId,
   upstreamApiKeyEnabledUpdatingId,
   quotaRefreshingIds,
+  resetOperationAccountId,
   providerGroups,
   resourceGroupUpdatingId,
   pageOffset,
@@ -140,6 +143,7 @@ export function AccountsPage({
   onUpdateGptEnabled,
   onUpdateUpstreamApiKeyEnabled,
   onRefreshAccountQuota,
+  onOpenRateLimitReset,
   onDeleteGptAccount,
   onDeleteClaudeAccount,
   onDeleteUpstreamApiKey,
@@ -366,11 +370,13 @@ export function AccountsPage({
             accounts={accounts}
             quotas={accountQuotas}
             quotaRefreshingIds={quotaRefreshingIds}
+            resetOperationAccountId={resetOperationAccountId}
             groups={activeEnabledProviderGroups}
             groupUpdatingId={resourceGroupUpdatingId}
             enabledUpdatingId={enabledUpdatingId}
             deletingId={accountDeletingId}
             onRefreshQuota={onRefreshAccountQuota}
+            onOpenRateLimitReset={onOpenRateLimitReset}
             onUpdateEnabled={onUpdateGptEnabled}
             onUpdateGroup={onUpdateGptGroup}
             onOpenOverride={(account) => onOpenRequestOverride({ kind: "account", item: account })}
