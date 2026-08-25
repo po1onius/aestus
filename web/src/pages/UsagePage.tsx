@@ -22,7 +22,6 @@ const chartNumberFormatter = new Intl.NumberFormat("zh-CN", {
   notation: "compact",
   maximumFractionDigits: 1,
 });
-const CHART_FONT_FAMILY = "'IBM Plex Sans Variable', 'Noto Sans SC Variable', sans-serif";
 
 /** 三张模型图共用同一套颜色，确保同一统计结果中的模型视觉语义保持一致。 */
 const MODEL_COLORS = [
@@ -49,6 +48,9 @@ const CONTRIBUTION_PALETTES = {
   light: ["#e5e7eb", "#c6e48b", "#7bc96f", "#239a3b", "#196127"],
   dark: ["#27313d", "#164b35", "#19733f", "#24a148", "#56d364"],
 } as const;
+// ECharts 热力图会让色块铺满类目槽位；使用面板底色描边把色块向内收缩，同时形成稳定间距。
+const CONTRIBUTION_CELL_GAP = 3.5;
+const CONTRIBUTION_CELL_RADIUS = 3;
 const OTHER_MODEL_PROVIDER = "all";
 const OTHER_MODEL_NAME = "其他模型";
 const OTHER_API_KEY_NAME = "其他 API Key";
@@ -384,6 +386,7 @@ function buildContributionOption(points: UsageDailyPoint[], darkMode: boolean): 
   );
   const maxIntensity = Math.max(0, ...intensityValues);
   const palette = CONTRIBUTION_PALETTES[darkMode ? "dark" : "light"];
+  const cellGapColor = darkMode ? "#131820" : "#ffffff";
 
   const data: ContributionChartDatum[] = parsedPoints.map(({ point, date }, index) => {
     const weekdayIndex = mondayBasedWeekday(date);
@@ -406,13 +409,11 @@ function buildContributionOption(points: UsageDailyPoint[], darkMode: boolean): 
         // 今天使用主题强调色描边，既能定位当前日期，也不会覆盖 GitHub 风格的用量色阶。
         borderColor: isToday
           ? darkMode
-            ? "#a5b4fc"
-            : "#4f46e5"
-          : darkMode
-            ? "#0f172a"
-            : "#ffffff",
-        borderWidth: isToday ? 2 : 1.5,
-        borderRadius: 2,
+            ? "#fb923c"
+            : "#f97316"
+          : cellGapColor,
+        borderWidth: isToday ? 1.5 : CONTRIBUTION_CELL_GAP,
+        borderRadius: CONTRIBUTION_CELL_RADIUS,
       },
     };
   });
@@ -420,7 +421,6 @@ function buildContributionOption(points: UsageDailyPoint[], darkMode: boolean): 
   return {
     aria: { enabled: true },
     animationDuration: 650,
-    textStyle: { fontFamily: CHART_FONT_FAMILY },
     tooltip: {
       ...chartTooltip(darkMode),
       trigger: "item",
@@ -474,14 +474,14 @@ function buildContributionOption(points: UsageDailyPoint[], darkMode: boolean): 
         progressive: 0,
         itemStyle: {
           color: palette[0],
-          borderColor: darkMode ? "#0f172a" : "#ffffff",
-          borderWidth: 1.5,
-          borderRadius: 2,
+          borderColor: cellGapColor,
+          borderWidth: CONTRIBUTION_CELL_GAP,
+          borderRadius: CONTRIBUTION_CELL_RADIUS,
         },
         emphasis: {
           itemStyle: {
             borderColor: darkMode ? "#e2e8f0" : "#334155",
-            borderWidth: 2,
+            borderWidth: CONTRIBUTION_CELL_GAP,
           },
         },
       },
@@ -522,7 +522,6 @@ function buildDailyBarOption(points: UsageDailyPoint[], darkMode: boolean): ECha
   return {
     aria: { enabled: true },
     animationDuration: 350,
-    textStyle: { fontFamily: CHART_FONT_FAMILY },
     grid: { top: 18, right: 20, bottom: 42, left: 68 },
     tooltip: {
       ...chartTooltip(darkMode),
@@ -625,7 +624,6 @@ function buildModelShareOption(points: UsageModelPoint[], darkMode: boolean): EC
   return {
     aria: { enabled: true },
     animationDuration: 350,
-    textStyle: { fontFamily: CHART_FONT_FAMILY },
     color: MODEL_COLORS,
     tooltip: {
       ...chartTooltip(darkMode),
@@ -664,7 +662,6 @@ function buildConsumerShareOption(
   return {
     aria: { enabled: true },
     animationDuration: 350,
-    textStyle: { fontFamily: CHART_FONT_FAMILY },
     color: CONSUMER_COLORS,
     tooltip: {
       ...chartTooltip(darkMode),
@@ -708,7 +705,6 @@ function buildRankOption(
   return {
     aria: { enabled: true },
     animationDuration: 350,
-    textStyle: { fontFamily: CHART_FONT_FAMILY },
     grid: { top: 12, right: 28, bottom: 32, left: 126 },
     tooltip: {
       ...chartTooltip(darkMode),

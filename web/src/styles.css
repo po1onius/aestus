@@ -3,9 +3,6 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 @theme {
-  --font-sans: "IBM Plex Sans Variable", "Noto Sans SC Variable", "Microsoft YaHei", sans-serif;
-  --font-mono: "IBM Plex Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-
   /*
    * 石墨中性色承担页面层级，避免默认 Slate 在暗色模式中过度偏蓝。
    * 保留原有 slate utility 名称，使所有业务组件共享同一套语义色阶。
@@ -50,7 +47,7 @@
 }
 
 @layer base {
-  /* 全局使用统一的 IBM Plex/思源系字体度量，并让后台数字列天然保持纵向对齐。 */
+  /* 使用 Tailwind 的系统字体栈，避免下载和打包额外字体资源；数字列保持纵向对齐。 */
   html {
     @apply font-sans antialiased;
     font-variant-numeric: tabular-nums;

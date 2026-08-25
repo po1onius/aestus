@@ -1,9 +1,6 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { domAnimation, LazyMotion } from "motion/react";
-import "@fontsource-variable/ibm-plex-sans/wght.css";
-import "@fontsource-variable/noto-sans-sc/wght.css";
-import "@fontsource/ibm-plex-mono/latin-400.css";
 import { App } from "./App";
 import { themeStorageKey } from "./config";
 import "./styles.css";
