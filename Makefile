@@ -1,6 +1,13 @@
 SHELL := /bin/sh
 .DEFAULT_GOAL := dev
 
+# 本地开发只把基础设施放进容器；网关本身始终使用当前工作区源码构建并启动。
+PODMAN ?= podman
+COMPOSE ?= $(PODMAN) compose
+COMPOSE_FILE ?= deploy/compose.yml
+DEPENDENCY_SERVICES ?= postgres redis clickhouse
+DEPENDENCY_WAIT_TIMEOUT_SECONDS ?= 120
+
 POSTGRES_DB ?= aestus_gateway
 POSTGRES_USER ?= aestus
 POSTGRES_PASSWORD ?= aestus
@@ -70,10 +77,37 @@ AESTUS_LOG_FILE_NAME ?= aestus-gateway.log
 RUST_LOG ?= aestus=info,tower_http=info,axum=info
 
 .PHONY: dev
+
+# 一键启动顺序必须保持为：基础设施 -> 数据库迁移 -> 前端构建 -> 本地网关进程。
+# 所有步骤集中在默认目标中，直接执行 make 即可完成本地启动。
 dev:
 	@set -e; \
-	cd web && npm run build; \
-	cd ../srv && env \
+	printf '%s\n' '[aestus] 正在通过 Podman Compose 启动 PostgreSQL、Redis 和 ClickHouse...'; \
+	env \
+		POSTGRES_DB="$(POSTGRES_DB)" \
+		POSTGRES_USER="$(POSTGRES_USER)" \
+		POSTGRES_PASSWORD="$(POSTGRES_PASSWORD)" \
+		CLICKHOUSE_DATABASE="$(CLICKHOUSE_DATABASE)" \
+		CLICKHOUSE_USER="$(CLICKHOUSE_USER)" \
+		CLICKHOUSE_PASSWORD="$(CLICKHOUSE_PASSWORD)" \
+		$(COMPOSE) -f "$(COMPOSE_FILE)" up -d \
+			--wait \
+			--wait-timeout "$(DEPENDENCY_WAIT_TIMEOUT_SECONDS)" \
+			$(DEPENDENCY_SERVICES); \
+	printf '%s\n' '[aestus] 依赖服务已全部通过健康检查。'; \
+	printf '%s\n' '[aestus] 正在执行 PostgreSQL 数据库迁移...'; \
+	env \
+		POSTGRES_DB="$(POSTGRES_DB)" \
+		POSTGRES_USER="$(POSTGRES_USER)" \
+		POSTGRES_PASSWORD="$(POSTGRES_PASSWORD)" \
+		$(COMPOSE) -f "$(COMPOSE_FILE)" run --rm migrate; \
+	printf '%s\n' '[aestus] PostgreSQL 数据库迁移完成。'; \
+	printf '%s\n' '[aestus] 正在构建 Web 管理页面...'; \
+	cd web; \
+	npm run build; \
+	cd ../srv; \
+	printf '%s\n' '[aestus] 正在通过 cargo run 构建并启动本地网关，监听地址：$(AESTUS_BIND_ADDR)'; \
+	env \
 		DATABASE_URL="$(DATABASE_URL)" \
 		REDIS_URL="$(REDIS_URL)" \
 		CLICKHOUSE_URL="$(CLICKHOUSE_URL)" \

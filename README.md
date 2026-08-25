@@ -26,7 +26,7 @@
 ## 快速开始
 
 ```bash
-make dev                                        # 本地启动(需 PostgreSQL/Redis/ClickHouse)
+make dev                                        # Podman Compose 启动依赖，本地构建并启动服务
 cd deploy && cp .env.example .env && docker compose up -d   # Docker 一键部署
 ```
 

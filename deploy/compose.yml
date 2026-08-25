@@ -38,7 +38,7 @@ services:
     environment:
       CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE:-default}
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?require}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-change-me-clickhouse-password}
     ports:
       - "8123:8123"
       - "9000:9000"
@@ -90,8 +90,8 @@ services:
       CLICKHOUSE_URL: ${CLICKHOUSE_URL:-http://clickhouse:8123}
       CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-default}
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?require}
-      AESTUS_REQUEST_LOG_TABLE: ${AESTUS_REQUEST_LOG_TABLE:-gateway_request_logs}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-change-me-clickhouse-password}
+      AESTUS_REQUEST_LOG_TABLE: gateway_request_logs
       AESTUS_JWT_SECRET: ${AESTUS_JWT_SECRET:-}
       AESTUS_JWT_TTL_SECONDS: ${AESTUS_JWT_TTL_SECONDS:-604800}
       AESTUS_ADMIN_USERNAME: ${AESTUS_ADMIN_USERNAME:-}
