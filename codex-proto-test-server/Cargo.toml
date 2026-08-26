@@ -1,0 +1,15 @@
+[package]
+name = "codex-proto-test-server"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+axum = "0.8.9"
+clap = { version = "4.6.6", features = ["derive"] }
+gpt-codex-plugin-common = { path = "../plugin/crates/common" }
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "signal"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }

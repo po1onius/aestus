@@ -70,6 +70,7 @@ curl http://127.0.0.1:8080/v1/images/edits \
 ```
 ├── srv/       Rust 网关服务(核心)
 ├── plugin/    WASM 插件示例套件
+├── codex-proto-test-server/ 独立的 Codex 协议转换验证服务
 ├── web/       React 管理面板
 └── deploy/    Docker Compose 部署配置
 ```

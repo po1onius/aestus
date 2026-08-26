@@ -27,14 +27,12 @@ check:
 		-p gpt-codex-buffered-response-plugin \
 		-p gpt-codex-stream-response-plugin
 	$(CARGO) check -p gpt-plugin-componentize
-	$(CARGO) check -p gpt-codex-plugin-test-server
 	$(CARGO) clippy -p gpt-codex-plugin-common --all-targets -- -D warnings
 	$(CARGO) clippy --target wasm32-unknown-unknown \
 		-p gpt-codex-request-plugin \
 		-p gpt-codex-buffered-response-plugin \
 		-p gpt-codex-stream-response-plugin -- -D warnings
 	$(CARGO) clippy -p gpt-plugin-componentize -- -D warnings
-	$(CARGO) clippy -p gpt-codex-plugin-test-server --all-targets -- -D warnings
 
 clean:
 	$(CARGO) clean

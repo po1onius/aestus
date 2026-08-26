@@ -48,38 +48,6 @@ pub fn build_account_headers(
     output
 }
 
-/// Codex Images 端点使用普通 JSON 响应，不需要 Responses SSE 的 accept/openai-beta。
-/// 这里仍复用同一套官方 Codex 客户端身份识别和账号鉴权规则，避免下游伪造账号 header。
-pub fn build_image_account_headers(
-    headers: Vec<Header>,
-    access_token: &str,
-    account_id: Option<&str>,
-    fedramp: bool,
-) -> Vec<Header> {
-    let (user_agent, originator) = resolve_codex_identity(&headers);
-    let mut output = headers
-        .into_iter()
-        .filter(|header| matches!(header.name.to_ascii_lowercase().as_str(), "accept-language"))
-        .collect::<Vec<_>>();
-
-    append_unique_text(&mut output, "accept", "application/json");
-    append_unique_text(&mut output, "content-type", "application/json");
-    append_unique(&mut output, "user-agent", user_agent);
-    append_unique_text(&mut output, "originator", &originator);
-    append_unique_text(
-        &mut output,
-        "authorization",
-        format!("Bearer {}", access_token.trim()),
-    );
-    if let Some(account_id) = account_id.map(str::trim).filter(|value| !value.is_empty()) {
-        append_unique_text(&mut output, "chatgpt-account-id", account_id);
-    }
-    if fedramp {
-        append_unique_text(&mut output, "x-openai-fedramp", "true");
-    }
-    output
-}
-
 /// 响应插件完全接管下游 header，因此在插件侧先删除 hop-by-hop、上游 cookie、上游
 /// 鉴权和失效的 content-length。宿主仍会做最终安全校验，这里是业务组件自身的明确契约。
 pub fn sanitize_response_headers(headers: Vec<Header>, mode: ResponseHeaderMode) -> Vec<Header> {

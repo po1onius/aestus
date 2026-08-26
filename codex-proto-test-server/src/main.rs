@@ -20,10 +20,8 @@ use gpt_codex_plugin_common::{
     Effects, Header,
     functions::{
         AccountResource, BufferedDisposition, BufferedTransformInput, HttpResponse,
-        ImageRequestTransformInput, RequestTransformInput, ResponseHead, ResponseMode,
-        StreamResponseTransformer, StreamStartInput, transform_buffered_response,
-        transform_image_edits_request, transform_image_generations_request,
-        transform_image_response, transform_request,
+        RequestTransformInput, ResponseHead, ResponseMode, StreamResponseTransformer,
+        StreamStartInput, transform_buffered_response, transform_request,
     },
     sse::{JsonSseItem, split_sse_items},
 };
@@ -33,20 +31,27 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 const DEFAULT_UPSTREAM_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
-const DEFAULT_IMAGE_GENERATIONS_UPSTREAM_URL: &str =
-    "https://chatgpt.com/backend-api/codex/images/generations";
-const DEFAULT_IMAGE_EDITS_UPSTREAM_URL: &str = "https://chatgpt.com/backend-api/codex/images/edits";
+const DEFAULT_OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+const DEFAULT_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const MAX_REQUEST_BYTES: usize = 512 * 1024 * 1024;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "gpt-codex-plugin-test-server",
-    about = "通过 Codex 账号端点验证 GPT Responses 与 Images 转换函数"
+    name = "codex-proto-test-server",
+    about = "通过 Codex 账号端点验证 Responses 协议转换"
 )]
 struct Arguments {
-    /// Codex 账号登录产生的 access token。服务不会把该值写入日志。
+    /// Codex 账号登录产生的 access token。传入后优先使用，不再消费 refresh token。
     #[arg(long, value_name = "TOKEN")]
-    access_token: String,
+    access_token: Option<String>,
+
+    /// 未提供 access token 时，用该 refresh token 向 OpenAI OAuth 端点换取 access token。
+    #[arg(long, value_name = "TOKEN")]
+    refresh_token: Option<String>,
+
+    /// OAuth 刷新请求使用的 client ID；默认与 Codex CLI 当前内置值保持一致。
+    #[arg(long, default_value = DEFAULT_OAUTH_CLIENT_ID, value_name = "CLIENT_ID")]
+    client_id: String,
 
     /// 多账号场景使用的 ChatGPT account ID；单账号 token 通常可以不传。
     #[arg(long, value_name = "ACCOUNT_ID")]
@@ -60,14 +65,6 @@ struct Arguments {
     #[arg(long, default_value = DEFAULT_UPSTREAM_URL)]
     upstream_url: String,
 
-    /// Codex 图片生成上游地址。
-    #[arg(long, default_value = DEFAULT_IMAGE_GENERATIONS_UPSTREAM_URL)]
-    image_generations_upstream_url: String,
-
-    /// Codex 图片编辑上游地址。
-    #[arg(long, default_value = DEFAULT_IMAGE_EDITS_UPSTREAM_URL)]
-    image_edits_upstream_url: String,
-
     /// 单次上游请求总超时秒数。
     #[arg(long, default_value_t = 600)]
     upstream_timeout_seconds: u64,
@@ -79,8 +76,6 @@ struct AppState {
     access_token: Arc<str>,
     chatgpt_account_id: Option<Arc<str>>,
     responses_upstream_url: Arc<str>,
-    image_generations_upstream_url: Arc<str>,
-    image_edits_upstream_url: Arc<str>,
     request_sequence: Arc<AtomicU64>,
 }
 
@@ -88,10 +83,6 @@ struct AppState {
 async fn main() {
     init_logging();
     let arguments = Arguments::parse();
-    if arguments.access_token.trim().is_empty() {
-        error!("启动失败：--access-token 不能为空");
-        std::process::exit(2);
-    }
 
     let client = match Client::builder()
         .connect_timeout(Duration::from_secs(30))
@@ -104,9 +95,24 @@ async fn main() {
             std::process::exit(1);
         }
     };
+
+    // 显式 access token 始终优先，避免调用方同时传入两种凭证时意外消费可能轮换的
+    // refresh token。只有 access token 缺失或全为空白时才执行 OAuth 刷新。
+    let (access_token, authentication_source) =
+        match resolve_access_token(&client, &arguments).await {
+            Ok(resolved) => resolved,
+            Err(TokenResolutionError::InvalidArguments(message)) => {
+                error!(error = %message, "启动参数中的 OAuth 凭证无效");
+                std::process::exit(2);
+            }
+            Err(TokenResolutionError::RefreshFailed(message)) => {
+                error!(error = %message, "使用 refresh token 获取 access token 失败");
+                std::process::exit(1);
+            }
+        };
     let state = AppState {
         client,
-        access_token: Arc::from(arguments.access_token.trim()),
+        access_token: Arc::from(access_token),
         chatgpt_account_id: arguments
             .chatgpt_account_id
             .as_deref()
@@ -114,17 +120,11 @@ async fn main() {
             .filter(|value| !value.is_empty())
             .map(Arc::from),
         responses_upstream_url: Arc::from(arguments.upstream_url.as_str()),
-        image_generations_upstream_url: Arc::from(
-            arguments.image_generations_upstream_url.as_str(),
-        ),
-        image_edits_upstream_url: Arc::from(arguments.image_edits_upstream_url.as_str()),
         request_sequence: Arc::new(AtomicU64::new(1)),
     };
     let app = Router::new()
         .route("/healthz", get(health))
         .route("/v1/responses", post(create_response))
-        .route("/v1/images/generations", post(create_image_generation))
-        .route("/v1/images/edits", post(create_image_edit))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
         .with_state(state);
 
@@ -138,10 +138,9 @@ async fn main() {
     info!(
         listen = %arguments.listen,
         responses_upstream = %arguments.upstream_url,
-        image_generations_upstream = %arguments.image_generations_upstream_url,
-        image_edits_upstream = %arguments.image_edits_upstream_url,
         account_id_present = arguments.chatgpt_account_id.is_some(),
-        "Codex 插件测试服务已启动"
+        authentication_source,
+        "Codex 协议测试服务已启动"
     );
     if let Err(error) = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -150,6 +149,137 @@ async fn main() {
         error!(error = %error, "HTTP 服务异常退出");
         std::process::exit(1);
     }
+}
+
+#[derive(Debug)]
+enum TokenResolutionError {
+    InvalidArguments(String),
+    RefreshFailed(String),
+}
+
+/// 根据启动参数解析服务实际使用的 access token。
+///
+/// refresh token 属于高敏感凭证，整个流程只按引用传递给 reqwest 的 JSON 序列化器，
+/// 错误与日志均不包含请求正文或 token 原文。
+async fn resolve_access_token(
+    client: &Client,
+    arguments: &Arguments,
+) -> Result<(String, &'static str), TokenResolutionError> {
+    if let Some(access_token) = arguments
+        .access_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if arguments
+            .refresh_token
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            info!("同时提供了 access token 和 refresh token，将优先使用 access token");
+        }
+        return Ok((access_token.to_owned(), "access-token"));
+    }
+
+    let refresh_token = arguments
+        .refresh_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            TokenResolutionError::InvalidArguments(
+                "必须提供非空 --access-token 或 --refresh-token".to_owned(),
+            )
+        })?;
+    let client_id = arguments.client_id.trim();
+    if client_id.is_empty() {
+        return Err(TokenResolutionError::InvalidArguments(
+            "使用 --refresh-token 时，--client-id 不能为空".to_owned(),
+        ));
+    }
+
+    info!(
+        oauth_token_url = DEFAULT_OAUTH_TOKEN_URL,
+        client_id, "未提供 access token，开始使用 refresh token 获取 access token"
+    );
+    let access_token = exchange_refresh_token(client, refresh_token, client_id)
+        .await
+        .map_err(TokenResolutionError::RefreshFailed)?;
+    Ok((access_token, "refresh-token"))
+}
+
+/// 按 Codex CLI 当前协议向 OpenAI OAuth token 端点发送 JSON 刷新请求。
+async fn exchange_refresh_token(
+    client: &Client,
+    refresh_token: &str,
+    client_id: &str,
+) -> Result<String, String> {
+    let started_at = Instant::now();
+    let response = client
+        .post(DEFAULT_OAUTH_TOKEN_URL)
+        .json(&json!({
+            "client_id": client_id,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        }))
+        .send()
+        .await
+        .map_err(|error| format!("请求 OAuth token 端点失败: {error}"))?;
+    let status = response.status();
+    let body = response
+        .bytes()
+        .await
+        .map_err(|error| format!("读取 OAuth token 响应失败: {error}"))?;
+
+    info!(
+        oauth_status = status.as_u16(),
+        response_bytes = body.len(),
+        elapsed_ms = started_at.elapsed().as_millis(),
+        "已收到 OAuth token 响应"
+    );
+    if !status.is_success() {
+        return Err(summarize_oauth_error(status.as_u16(), &body));
+    }
+
+    let value: Value = serde_json::from_slice(&body)
+        .map_err(|error| format!("OAuth token 成功响应不是合法 JSON: {error}"))?;
+    let access_token = value
+        .get("access_token")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "OAuth token 成功响应缺少非空 access_token".to_owned())?;
+    let rotated_refresh_token_present = value
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    info!(
+        rotated_refresh_token_present,
+        "已通过 refresh token 获取 access token"
+    );
+    Ok(access_token.to_owned())
+}
+
+/// 只提取 OAuth 错误码并映射为固定说明，避免服务端错误正文意外回显凭证后进入日志。
+fn summarize_oauth_error(status: u16, body: &[u8]) -> String {
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        return format!("OAuth token 端点返回 HTTP {status}，响应体不是合法 JSON");
+    };
+    let code = value
+        .pointer("/error/code")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("error").and_then(Value::as_str))
+        .or_else(|| value.get("code").and_then(Value::as_str))
+        .unwrap_or("unknown");
+    let message = match code.to_ascii_lowercase().as_str() {
+        "invalid_grant" => "refresh token 无效或已不可用",
+        "refresh_token_expired" => "refresh token 已过期",
+        "refresh_token_reused" => "refresh token 已被使用",
+        "refresh_token_invalidated" => "refresh token 已被撤销",
+        "invalid_client" => "client ID 无效",
+        _ => "OAuth 服务返回未识别错误",
+    };
+    format!("OAuth token 端点返回 HTTP {status}: code={code}, message={message}")
 }
 
 fn init_logging() {
@@ -237,141 +367,6 @@ async fn create_response(
         handle_buffered_response(request_id, upstream, transformed_request.response_context)
     } else {
         handle_stream_response(request_id, upstream, transformed_request.response_context)
-    }
-}
-
-async fn create_image_generation(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Response, ServiceError> {
-    let request_id = state.request_sequence.fetch_add(1, Ordering::Relaxed);
-    let request_summary = summarize_request(&body);
-    info!(
-        request_id,
-        downstream_model = request_summary.model.as_deref().unwrap_or("<default>"),
-        request_bytes = body.len(),
-        "收到 Images generations 测试请求"
-    );
-    let transformed = transform_image_generations_request(ImageRequestTransformInput {
-        account: account_resource(&state),
-        headers: from_axum_headers(&headers),
-        body: body.to_vec(),
-    })
-    .map_err(|error| {
-        warn!(request_id, code = %error.code, message = %error.message, "图片生成请求转换函数拒绝请求");
-        ServiceError::bad_request(error.code, error.message)
-    })?;
-    let upstream_body_summary = summarize_codex_image_request(&transformed.body);
-    info!(
-        request_id,
-        upstream_model = upstream_body_summary
-            .model
-            .as_deref()
-            .unwrap_or("<missing>"),
-        image_count = upstream_body_summary.image_count,
-        "图片生成请求已转换为 Codex JSON"
-    );
-
-    send_and_transform_image_response(
-        request_id,
-        &state,
-        state.image_generations_upstream_url.as_ref(),
-        transformed.headers,
-        transformed.body,
-        "generations",
-    )
-    .await
-}
-
-async fn create_image_edit(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Response, ServiceError> {
-    let request_id = state.request_sequence.fetch_add(1, Ordering::Relaxed);
-    info!(
-        request_id,
-        request_bytes = body.len(),
-        "收到 Images edits multipart 测试请求"
-    );
-    let transformed = transform_image_edits_request(ImageRequestTransformInput {
-        account: account_resource(&state),
-        headers: from_axum_headers(&headers),
-        body: body.to_vec(),
-    })
-    .await
-    .map_err(|error| {
-        warn!(request_id, code = %error.code, message = %error.message, "图片编辑请求转换函数拒绝请求");
-        ServiceError::bad_request(error.code, error.message)
-    })?;
-    let upstream_body_summary = summarize_codex_image_request(&transformed.body);
-    info!(
-        request_id,
-        upstream_model = upstream_body_summary
-            .model
-            .as_deref()
-            .unwrap_or("<missing>"),
-        image_count = upstream_body_summary.image_count,
-        "图片编辑请求已转换为 Codex JSON"
-    );
-
-    send_and_transform_image_response(
-        request_id,
-        &state,
-        state.image_edits_upstream_url.as_ref(),
-        transformed.headers,
-        transformed.body,
-        "edits",
-    )
-    .await
-}
-
-async fn send_and_transform_image_response(
-    request_id: u64,
-    state: &AppState,
-    upstream_url: &str,
-    headers: Vec<Header>,
-    body: Vec<u8>,
-    operation: &'static str,
-) -> Result<Response, ServiceError> {
-    let started_at = Instant::now();
-    let upstream = send_upstream(state, upstream_url, &headers, body)
-        .await
-        .map_err(|error| {
-            error!(request_id, operation, error = %error, "请求 Codex Images 上游失败");
-            ServiceError::bad_gateway("upstream_image_request_failed", error.to_string())
-        })?;
-    info!(
-        request_id,
-        operation,
-        upstream_status = upstream.status,
-        upstream_bytes = upstream.body.len(),
-        elapsed_ms = started_at.elapsed().as_millis(),
-        "已收到 Codex Images 上游响应"
-    );
-    let transformed = transform_image_response(upstream).map_err(|error| {
-        error!(request_id, operation, code = %error.code, message = %error.message, "图片响应转换函数执行失败");
-        ServiceError::bad_gateway(error.code, error.message)
-    })?;
-    validate_image_response(transformed.status, &transformed.body).map_err(|message| {
-        error!(request_id, operation, validation_error = %message, "插件输出不是合法 Images API 响应");
-        ServiceError::bad_gateway("invalid_images_response", message)
-    })?;
-    info!(
-        request_id,
-        operation,
-        status = transformed.status,
-        "Images API 响应格式校验通过"
-    );
-    build_response(transformed)
-}
-
-fn account_resource(state: &AppState) -> AccountResource {
-    AccountResource {
-        access_token: state.access_token.to_string(),
-        chatgpt_account_id: state.chatgpt_account_id.as_deref().map(str::to_owned),
-        chatgpt_account_is_fedramp: false,
     }
 }
 
@@ -492,32 +487,6 @@ fn validate_json_response(status: u16, body: &[u8]) -> Result<(), String> {
             Err("非成功响应缺少 error.message".to_owned())
         }
     }
-}
-
-fn validate_image_response(status: u16, body: &[u8]) -> Result<(), String> {
-    let value: Value = serde_json::from_slice(body)
-        .map_err(|error| format!("图片响应体不是合法 JSON: {error}"))?;
-    if !(200..300).contains(&status) {
-        return value
-            .pointer("/error/message")
-            .and_then(Value::as_str)
-            .filter(|message| !message.trim().is_empty())
-            .map(|_| ())
-            .ok_or_else(|| "非成功图片响应缺少 error.message".to_owned());
-    }
-    let data = value
-        .get("data")
-        .and_then(Value::as_array)
-        .filter(|data| !data.is_empty())
-        .ok_or_else(|| "成功图片响应必须包含非空 data 数组".to_owned())?;
-    for (index, image) in data.iter().enumerate() {
-        image
-            .get("b64_json")
-            .and_then(Value::as_str)
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| format!("图片响应 data[{index}].b64_json 必须是非空字符串"))?;
-    }
-    Ok(())
 }
 
 fn validate_sse_response(body: &[u8]) -> Result<(), String> {
@@ -705,12 +674,6 @@ struct RequestSummary {
     valid_json: bool,
 }
 
-#[derive(Default)]
-struct CodexImageRequestSummary {
-    model: Option<String>,
-    image_count: usize,
-}
-
 fn summarize_request(body: &[u8]) -> RequestSummary {
     let Ok(Value::Object(object)) = serde_json::from_slice::<Value>(body) else {
         return RequestSummary::default();
@@ -722,22 +685,6 @@ fn summarize_request(body: &[u8]) -> RequestSummary {
             .map(str::to_owned),
         stream: object.get("stream").and_then(Value::as_bool) == Some(true),
         valid_json: true,
-    }
-}
-
-fn summarize_codex_image_request(body: &[u8]) -> CodexImageRequestSummary {
-    let Ok(Value::Object(object)) = serde_json::from_slice::<Value>(body) else {
-        return CodexImageRequestSummary::default();
-    };
-    CodexImageRequestSummary {
-        model: object
-            .get("model")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        image_count: object
-            .get("images")
-            .and_then(Value::as_array)
-            .map_or(0, Vec::len),
     }
 }
 

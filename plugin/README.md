@@ -22,60 +22,10 @@ Codex OAuth 上游固定使用 SSE。下游传入 `stream=false` 时，套件会
 
 - `transform_request`：改造 OAuth 请求 header/body，并返回下游响应模式；
 - `transform_buffered_response`：处理非流式 JSON、错误响应以及完整 SSE 到 JSON 的转换；
-- `StreamResponseTransformer::{start, transform_item, finish}`：处理一条流式响应的完整生命周期；
-- `transform_image_generations_request`：把 OpenAI `/images/generations` JSON 转成 Codex
-  `/images/generations` JSON；
-- `transform_image_edits_request`：把 OpenAI `/images/edits` multipart 转成 Codex
-  `/images/edits` JSON；
-- `transform_image_response`：从 Codex 图片响应或工具输出的 `input_image` 中提取 base64，
-  输出统一的 OpenAI Images JSON。
+- `StreamResponseTransformer::{start, transform_item, finish}`：处理一条流式响应的完整生命周期。
 
 三个 WASM Component 只负责 WIT 类型映射，内部调用同一组函数，因此函数调用和上传到
 Dashboard 的组件不会形成两套业务实现。
-
-Images 三个函数目前只作为普通 Rust 函数提供，尚未增加 WIT 或 WASM Component 包装；
-测试服务会直接调用它们验证真实 Codex Images 端点。
-
-## Images API 转换
-
-下游提供标准 OpenAI Images API：
-
-- `POST /v1/images/generations` 接收 JSON；
-- `POST /v1/images/edits` 接收 `multipart/form-data`，支持单个或多个 `image`/`image[]`
-  文件字段。
-
-两个请求发往 Codex 前都会重建 OAuth header，并转成 `application/json`。Codex 当前图片
-扩展固定使用 `gpt-image-2`，因此函数忽略下游 `model` 并写入 `gpt-image-2`。共同支持的
-请求字段只有：
-
-| 下游端点 | 进入 Codex 上游的字段 |
-| --- | --- |
-| `/images/generations` | `prompt`、`background`、`n`、`quality`、`size`、固定 `model` |
-| `/images/edits` | `images`、`prompt`、`background`、`n`、`quality`、`size`、固定 `model` |
-
-edits 函数使用成熟的 multipart 解析库读取上传文件，根据字段 Content-Type 或文件扩展名
-确定媒体类型，并编码成 Codex 所需的：
-
-```json
-{
-  "images": [
-    {"image_url": "data:image/png;base64,..."}
-  ]
-}
-```
-
-Codex 请求结构没有的 `mask`、`input_fidelity`、`moderation`、`output_compression`、
-`output_format`、`partial_images`、`response_format`、`stream`、`style` 和 `user` 等参数
-直接丢弃。`quality=standard/hd` 也不会进入只接受 `low/medium/high/auto` 的 Codex 请求。
-
-成功响应同时兼容两种上游形态：直接响应的 `data[].b64_json`，以及任意工具输出 envelope
-内的 `type=input_image` + base64 data URL。下游最终只得到：
-
-```json
-{"data":[{"b64_json":"..."}]}
-```
-
-非 2xx 响应不改写错误 body，只清理上游敏感和连接级响应 header。
 
 ## 请求转换
 
@@ -257,50 +207,5 @@ make build
 
 构建会直接引用这些 WIT；宿主 ABI 改动后，插件会在编译阶段发现不兼容。
 
-## 测试服务
-
-`gpt-codex-plugin-test-server` 提供本地 `POST /v1/responses`、
-`POST /v1/images/generations` 和 `POST /v1/images/edits`，真实调用对应的 Codex 账号端点并
-执行转换函数。它会在返回前检查最终 JSON/SSE 是否符合对应 API 的核心结构；校验失败返回
-502 和 `plugin_test_error`。日志会记录请求大小、模型、图片数量、上游状态和具体校验错误，
-但不会记录 access token、完整 prompt 或图片 base64。
-
-启动时必须传入 Codex 登录态的 access token：
-
-```bash
-cargo run -p gpt-codex-plugin-test-server -- \
-  --access-token "$CODEX_ACCESS_TOKEN"
-```
-
-多账号 token 可以额外传入 `--chatgpt-account-id <ACCOUNT_ID>`，监听地址默认为
-`127.0.0.1:3000`。非流式验证示例：
-
-```bash
-curl http://127.0.0.1:3000/v1/responses \
-  -H 'content-type: application/json' \
-  -d '{"model":"gpt-5.6-sol","input":"只回复 OK","stream":false}'
-```
-
-流式验证只需把请求中的 `stream` 改为 `true`。测试服务为了能在写出 HTTP 响应前完成整条
-事件序列和终止事件校验，会先收集完整上游 SSE，再以 `text/event-stream` 返回；它用于验证
-插件协议转换，不用于测量首 token 延迟。
-
-文生图验证示例：
-
-```bash
-curl http://127.0.0.1:3000/v1/images/generations \
-  -H 'content-type: application/json' \
-  -d '{"model":"gpt-image-1","prompt":"一只坐在月球上的橘猫","size":"1024x1024"}'
-```
-
-图生图验证示例；curl 会自动把文件编码成 multipart：
-
-```bash
-curl http://127.0.0.1:3000/v1/images/edits \
-  -F 'image=@./cat.png' \
-  -F 'prompt=给猫加一顶红色帽子' \
-  -F 'quality=high'
-```
-
-三个 Codex 上游地址都可独立覆盖：Responses 继续使用 `--upstream-url`，图片端点使用
-`--image-generations-upstream-url` 和 `--image-edits-upstream-url`。
+用于真实调用 Codex 账号端点的验证服务已经独立到仓库根目录的
+[`../codex-proto-test-server`](../codex-proto-test-server)，不属于本插件 workspace 或构建产物。
