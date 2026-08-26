@@ -1,5 +1,7 @@
 use std::{
+    fs,
     net::SocketAddr,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -26,6 +28,7 @@ use gpt_codex_plugin_common::{
     sse::{JsonSseItem, split_sse_items},
 };
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -41,18 +44,6 @@ const MAX_REQUEST_BYTES: usize = 512 * 1024 * 1024;
     about = "通过 Codex 账号端点验证 Responses 协议转换"
 )]
 struct Arguments {
-    /// Codex 账号登录产生的 access token。传入后优先使用，不再消费 refresh token。
-    #[arg(long, value_name = "TOKEN")]
-    access_token: Option<String>,
-
-    /// 未提供 access token 时，用该 refresh token 向 OpenAI OAuth 端点换取 access token。
-    #[arg(long, value_name = "TOKEN")]
-    refresh_token: Option<String>,
-
-    /// OAuth 刷新请求使用的 client ID；默认与 Codex CLI 当前内置值保持一致。
-    #[arg(long, default_value = DEFAULT_OAUTH_CLIENT_ID, value_name = "CLIENT_ID")]
-    client_id: String,
-
     /// 多账号场景使用的 ChatGPT account ID；单账号 token 通常可以不传。
     #[arg(long, value_name = "ACCOUNT_ID")]
     chatgpt_account_id: Option<String>,
@@ -83,6 +74,14 @@ struct AppState {
 async fn main() {
     init_logging();
     let arguments = Arguments::parse();
+    let token_file_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("token.toml");
+    let mut token_config = match load_token_config(&token_file_path) {
+        Ok(config) => config,
+        Err(message) => {
+            error!(path = %token_file_path.display(), error = %message, "读取 token.toml 失败");
+            std::process::exit(2);
+        }
+    };
 
     let client = match Client::builder()
         .connect_timeout(Duration::from_secs(30))
@@ -96,20 +95,25 @@ async fn main() {
         }
     };
 
-    // 显式 access token 始终优先，避免调用方同时传入两种凭证时意外消费可能轮换的
-    // refresh token。只有 access token 缺失或全为空白时才执行 OAuth 刷新。
-    let (access_token, authentication_source) =
-        match resolve_access_token(&client, &arguments).await {
-            Ok(resolved) => resolved,
-            Err(TokenResolutionError::InvalidArguments(message)) => {
-                error!(error = %message, "启动参数中的 OAuth 凭证无效");
-                std::process::exit(2);
-            }
-            Err(TokenResolutionError::RefreshFailed(message)) => {
-                error!(error = %message, "使用 refresh token 获取 access token 失败");
-                std::process::exit(1);
-            }
-        };
+    // token.toml 中的 access token 始终优先，避免已有可用凭证时意外消费可能轮换的
+    // refresh token。只有 access token 缺失或全为空白时才执行 OAuth 刷新并回填文件。
+    let (access_token, authentication_source) = match resolve_access_token(
+        &client,
+        &mut token_config,
+        &token_file_path,
+    )
+    .await
+    {
+        Ok(resolved) => resolved,
+        Err(TokenResolutionError::InvalidConfiguration(message)) => {
+            error!(path = %token_file_path.display(), error = %message, "token.toml 中的 OAuth 凭证无效");
+            std::process::exit(2);
+        }
+        Err(TokenResolutionError::RefreshFailed(message)) => {
+            error!(error = %message, "使用 refresh token 获取 access token 失败");
+            std::process::exit(1);
+        }
+    };
     let state = AppState {
         client,
         access_token: Arc::from(access_token),
@@ -153,59 +157,95 @@ async fn main() {
 
 #[derive(Debug)]
 enum TokenResolutionError {
-    InvalidArguments(String),
+    InvalidConfiguration(String),
     RefreshFailed(String),
 }
 
-/// 根据启动参数解析服务实际使用的 access token。
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct TokenConfig {
+    /// 按配置文件既定协议保留 `accese_token` 拼写；同时接受常见的 `access_token`
+    /// 作为读取别名，回写时始终归一化为 `accese_token`。
+    #[serde(alias = "access_token")]
+    accese_token: String,
+    refresh_token: String,
+    client_id: String,
+}
+
+#[derive(Debug)]
+struct RefreshedTokens {
+    access_token: String,
+    refresh_token: Option<String>,
+}
+
+/// 从测试服务目录读取固定的 token.toml。日志只记录字段是否存在，不打印任何凭证值。
+fn load_token_config(path: &Path) -> Result<TokenConfig, String> {
+    let content = fs::read_to_string(path).map_err(|error| format!("无法读取凭证文件: {error}"))?;
+    let config: TokenConfig =
+        toml::from_str(&content).map_err(|error| format!("凭证文件不是合法 TOML: {error}"))?;
+    info!(
+        path = %path.display(),
+        access_token_present = !config.accese_token.trim().is_empty(),
+        refresh_token_present = !config.refresh_token.trim().is_empty(),
+        client_id_present = !config.client_id.trim().is_empty(),
+        "已读取 OAuth 凭证文件"
+    );
+    Ok(config)
+}
+
+/// 把刷新后的完整凭证状态写回原文件。`fs::write` 会保留现有 token.toml 的文件权限，
+/// 因此不会在业务代码中引入针对不同运行环境的权限兼容分支。
+fn persist_token_config(path: &Path, config: &TokenConfig) -> Result<(), String> {
+    let content = toml::to_string_pretty(config)
+        .map_err(|error| format!("序列化刷新后的凭证失败: {error}"))?;
+    fs::write(path, content).map_err(|error| format!("写回凭证文件失败: {error}"))?;
+    info!(path = %path.display(), "已把刷新后的 OAuth 凭证写回 token.toml");
+    Ok(())
+}
+
+/// 根据 token.toml 解析服务实际使用的 access token。
 ///
 /// refresh token 属于高敏感凭证，整个流程只按引用传递给 reqwest 的 JSON 序列化器，
 /// 错误与日志均不包含请求正文或 token 原文。
 async fn resolve_access_token(
     client: &Client,
-    arguments: &Arguments,
+    config: &mut TokenConfig,
+    token_file_path: &Path,
 ) -> Result<(String, &'static str), TokenResolutionError> {
-    if let Some(access_token) = arguments
-        .access_token
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        if arguments
-            .refresh_token
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-        {
-            info!("同时提供了 access token 和 refresh token，将优先使用 access token");
-        }
-        return Ok((access_token.to_owned(), "access-token"));
+    let access_token = config.accese_token.trim();
+    if !access_token.is_empty() {
+        return Ok((access_token.to_owned(), "token-file-access-token"));
     }
 
-    let refresh_token = arguments
-        .refresh_token
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            TokenResolutionError::InvalidArguments(
-                "必须提供非空 --access-token 或 --refresh-token".to_owned(),
-            )
-        })?;
-    let client_id = arguments.client_id.trim();
-    if client_id.is_empty() {
-        return Err(TokenResolutionError::InvalidArguments(
-            "使用 --refresh-token 时，--client-id 不能为空".to_owned(),
+    let refresh_token = config.refresh_token.trim().to_owned();
+    if refresh_token.is_empty() {
+        return Err(TokenResolutionError::InvalidConfiguration(
+            "accese_token 和 refresh_token 不能同时为空".to_owned(),
         ));
     }
+    let client_id = match config.client_id.trim() {
+        "" => DEFAULT_OAUTH_CLIENT_ID.to_owned(),
+        value => value.to_owned(),
+    };
 
     info!(
         oauth_token_url = DEFAULT_OAUTH_TOKEN_URL,
-        client_id, "未提供 access token，开始使用 refresh token 获取 access token"
+        client_id, "token.toml 中没有 access token，开始使用 refresh token 获取"
     );
-    let access_token = exchange_refresh_token(client, refresh_token, client_id)
+    let refreshed = exchange_refresh_token(client, &refresh_token, &client_id)
         .await
         .map_err(TokenResolutionError::RefreshFailed)?;
-    Ok((access_token, "refresh-token"))
+    let rotated_refresh_token_present = refreshed.refresh_token.is_some();
+    config.accese_token = refreshed.access_token.clone();
+    if let Some(refresh_token) = refreshed.refresh_token {
+        config.refresh_token = refresh_token;
+    }
+    config.client_id = client_id;
+    persist_token_config(token_file_path, config).map_err(|message| {
+        TokenResolutionError::RefreshFailed(format!("OAuth 刷新成功，但{message}"))
+    })?;
+    info!(rotated_refresh_token_present, "OAuth 刷新结果已完整保存");
+    Ok((refreshed.access_token, "token-file-refresh-token"))
 }
 
 /// 按 Codex CLI 当前协议向 OpenAI OAuth token 端点发送 JSON 刷新请求。
@@ -213,7 +253,7 @@ async fn exchange_refresh_token(
     client: &Client,
     refresh_token: &str,
     client_id: &str,
-) -> Result<String, String> {
+) -> Result<RefreshedTokens, String> {
     let started_at = Instant::now();
     let response = client
         .post(DEFAULT_OAUTH_TOKEN_URL)
@@ -249,15 +289,17 @@ async fn exchange_refresh_token(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "OAuth token 成功响应缺少非空 access_token".to_owned())?;
-    let rotated_refresh_token_present = value
+    let refresh_token = value
         .get("refresh_token")
         .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty());
-    info!(
-        rotated_refresh_token_present,
-        "已通过 refresh token 获取 access token"
-    );
-    Ok(access_token.to_owned())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    info!("已通过 refresh token 获取 access token");
+    Ok(RefreshedTokens {
+        access_token: access_token.to_owned(),
+        refresh_token,
+    })
 }
 
 /// 只提取 OAuth 错误码并映射为固定说明，避免服务端错误正文意外回显凭证后进入日志。

@@ -7,32 +7,26 @@
 的核心结构；校验失败返回 502 和 `plugin_test_error`。日志会记录请求大小、模型、上游状态
 和具体校验错误，但不会记录 access token、refresh token 或完整 prompt。
 
-启动时必须提供 access token 或 refresh token。显式 access token 的优先级更高；同时提供
-两者时不会消费 refresh token：
+服务固定读取本目录中的 `token.toml`，不再通过启动参数接收 OAuth 凭证。文件只包含三个字段；
+其中 `accese_token` 按当前配置协议保留该拼写：
 
-```bash
-cargo run --manifest-path codex-proto-test-server/Cargo.toml -- \
-  --access-token "$CODEX_ACCESS_TOKEN"
+```toml
+accese_token = ""
+refresh_token = "<CODEX_REFRESH_TOKEN>"
+client_id = "app_EMoamEEZ73f0CkXaXp7hrann"
 ```
 
-未提供 access token 时，服务会在开始监听前使用 refresh token 请求
-`https://auth.openai.com/oauth/token`：
+`accese_token` 非空时直接使用，不会消费 refresh token。`accese_token` 为空时，服务会在开始
+监听前使用 refresh token 请求 `https://auth.openai.com/oauth/token`；`client_id` 为空时使用
+Codex CLI 当前默认值 `app_EMoamEEZ73f0CkXaXp7hrann`。
+
+刷新成功后，服务会把新 access token 回填到 `accese_token`；OAuth 服务如果同时返回轮换后的
+refresh token，也会一起更新，避免下次启动继续使用已经失效的旧凭证。`token.toml` 已被 Git
+忽略，日志不会记录其中任何 token。
 
 ```bash
-cargo run --manifest-path codex-proto-test-server/Cargo.toml -- \
-  --refresh-token "$CODEX_REFRESH_TOKEN"
+cargo run --manifest-path codex-proto-test-server/Cargo.toml
 ```
-
-`--client-id` 默认是 Codex CLI 当前使用的 `app_EMoamEEZ73f0CkXaXp7hrann`，需要覆盖时可传：
-
-```bash
-cargo run --manifest-path codex-proto-test-server/Cargo.toml -- \
-  --refresh-token "$CODEX_REFRESH_TOKEN" \
-  --client-id "$CODEX_CLIENT_ID"
-```
-
-OAuth 服务可能同时返回轮换后的 refresh token。测试服务不会记录或持久化任何 token，调用方
-如需长期管理和轮换登录凭证，应继续使用 Codex CLI 的凭证存储，不要把测试服务作为凭证仓库。
 
 多账号 token 可以额外传入 `--chatgpt-account-id <ACCOUNT_ID>`，监听地址默认为
 `127.0.0.1:3000`。非流式验证示例：
