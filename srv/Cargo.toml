@@ -40,3 +40,13 @@ tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }
 uuid = { version = "1.23.3", features = ["v7", "serde"] }
 wasmtime = { version = "47.0.2", default-features = false, features = ["component-model", "cranelift", "runtime", "std"] }
+
+[profile.release]
+# 生产容器不需要 Rust 符号表；直接在 Cargo 产物阶段剥离，确保所有打包方式都能受益，
+# 而不是只依赖 Dockerfile 中额外执行一次平台相关的 strip 命令。
+strip = "symbols"
+# Thin LTO 可以跨 crate 删除 Wasmtime、HTTP 与数据库依赖中未实际引用的代码，同时避免
+# full LTO 对容器构建时间和内存造成过高压力。
+lto = "thin"
+# 单 codegen unit 为链接器提供完整的 release 优化视野，以更长的构建时间换取更小产物。
+codegen-units = 1

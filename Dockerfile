@@ -58,12 +58,12 @@ COPY --from=diesel-cli-downloader /usr/local/bin/diesel /usr/local/bin/diesel
 
 ENTRYPOINT ["diesel"]
 
-FROM debian:bookworm-slim AS runtime
+# 网关二进制只动态依赖 glibc、libm 与 libgcc_s；TLS 使用 rustls，不需要在最终镜像中
+# 安装 OpenSSL 或 libpq。distroless cc 提供这些基础运行库、CA 证书与时区数据，同时不带
+# shell、apt 和其他运行时无关工具。显式固定 Debian 13 系列，避免无发行版后缀标签未来
+# 自动切换到不兼容的新 Debian 大版本。
+FROM gcr.io/distroless/cc-debian13:latest AS runtime
 WORKDIR /app
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates libpq5 \
-    && rm -rf /var/lib/apt/lists/*
 
 COPY --from=srv-builder /app/srv/target/release/aestus /usr/local/bin/aestus-gateway
 COPY --from=web-builder /app/web/dist /app/web/dist
