@@ -16,6 +16,7 @@ use crate::{
         gpt::image_edits::GptImageEditsProxy,
         gpt::image_generations::GptImageGenerationsProxy,
         gpt::responses::GptResponsesProxy,
+        gpt::search::GptSearchProxy,
         protocol::{ProviderProtocol, ProviderVisibleError, ReplayableRequest},
         proxy,
     },
@@ -27,6 +28,7 @@ use crate::{
 };
 
 const RESPONSES_ROUTE: &str = "/v1/responses";
+const SEARCH_ROUTE: &str = "/v1/alpha/search";
 const IMAGE_GENERATIONS_ROUTE: &str = "/v1/images/generations";
 const IMAGE_EDITS_ROUTE: &str = "/v1/images/edits";
 const MESSAGES_ROUTE: &str = "/v1/messages";
@@ -40,6 +42,7 @@ const MESSAGES_COUNT_TOKENS_ROUTE: &str = "/v1/messages/count_tokens";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OperationId {
     Responses,
+    Search,
     ImageGenerations,
     ImageEdits,
     Messages,
@@ -50,6 +53,7 @@ impl OperationId {
     const fn as_str(self) -> &'static str {
         match self {
             Self::Responses => "responses",
+            Self::Search => "search",
             Self::ImageGenerations => "image_generations",
             Self::ImageEdits => "image_edits",
             Self::Messages => "messages",
@@ -60,9 +64,10 @@ impl OperationId {
 
 /// endpoint 对账号插件套件的使用策略。
 ///
-/// 当前 Dashboard 三个插件插槽只定义了 Responses/Messages 风格的通用 ABI，Images
-/// 普通 Rust 转换函数尚未包装成 Component。由 endpoint 显式声明策略，可以避免继续用
-/// URI 白名单暗示插件能力，也能防止绑定了 Responses 插件的 API Key 误处理图片请求。
+/// 当前 Dashboard 三个插件插槽只定义了 Responses/Messages 风格的通用 ABI；Search
+/// 要求原始 JSON 直接透传，Images 的普通 Rust 转换函数也尚未包装成 Component。由 endpoint
+/// 显式声明策略，可以避免继续用 URI 白名单暗示插件能力，也能防止绑定了 Responses 插件的
+/// API Key 误处理搜索或图片请求。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PluginPolicy {
     Disabled,
@@ -87,6 +92,7 @@ impl EndpointDescriptor {
     fn identify(method: &Method, uri: &Uri) -> AppResult<Self> {
         let operation = match (method, uri.path()) {
             (&Method::POST, RESPONSES_ROUTE) => OperationId::Responses,
+            (&Method::POST, SEARCH_ROUTE) => OperationId::Search,
             (&Method::POST, IMAGE_GENERATIONS_ROUTE) => OperationId::ImageGenerations,
             (&Method::POST, IMAGE_EDITS_ROUTE) => OperationId::ImageEdits,
             (&Method::POST, MESSAGES_ROUTE) => OperationId::Messages,
@@ -104,12 +110,14 @@ impl EndpointDescriptor {
                     crate::provider::claude::model::PROVIDER
                 }
                 OperationId::Responses
+                | OperationId::Search
                 | OperationId::ImageGenerations
                 | OperationId::ImageEdits => crate::provider::gpt::model::PROVIDER,
             },
             operation,
             route: match operation {
                 OperationId::Responses => RESPONSES_ROUTE,
+                OperationId::Search => SEARCH_ROUTE,
                 OperationId::ImageGenerations => IMAGE_GENERATIONS_ROUTE,
                 OperationId::ImageEdits => IMAGE_EDITS_ROUTE,
                 OperationId::Messages => MESSAGES_ROUTE,
@@ -117,7 +125,8 @@ impl EndpointDescriptor {
             },
             plugin_policy: match operation {
                 OperationId::Responses | OperationId::Messages => PluginPolicy::AccountAttempts,
-                OperationId::ImageGenerations
+                OperationId::Search
+                | OperationId::ImageGenerations
                 | OperationId::ImageEdits
                 | OperationId::MessagesCountTokens => PluginPolicy::Disabled,
             },
@@ -132,6 +141,7 @@ impl EndpointDescriptor {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route(RESPONSES_ROUTE, post(handle_provider_request))
+        .route(SEARCH_ROUTE, post(handle_provider_request))
         .route(IMAGE_GENERATIONS_ROUTE, post(handle_provider_request))
         .route(IMAGE_EDITS_ROUTE, post(handle_provider_request))
         .route(MESSAGES_ROUTE, post(handle_provider_request))
@@ -171,6 +181,9 @@ async fn handle_provider_request(
     match endpoint.operation {
         OperationId::Responses => {
             execute_pipeline::<GptResponsesProxy>(&state, endpoint, uri, request, request_id).await
+        }
+        OperationId::Search => {
+            execute_pipeline::<GptSearchProxy>(&state, endpoint, uri, request, request_id).await
         }
         OperationId::ImageGenerations => {
             execute_pipeline::<GptImageGenerationsProxy>(&state, endpoint, uri, request, request_id)

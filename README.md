@@ -8,6 +8,7 @@ AI 模型网关:统一管理上游账号资源,对外提供标准 API
 
 - 统一 API:对外提供 OpenAI / Anthropic 风格接口
 - 图片 API:提供 OpenAI 风格 `/v1/images/generations` 和 `/v1/images/edits`
+- 搜索 API:代理 Codex standalone search `/v1/alpha/search`
 - 资源池:自动调度与维护多个上游账号、Api Key
 - 插件:内置codex -> responses兼容转换插件
 - 面板:Web 管理页管理用户、网关Api Key、账号、分组、额度、请求日志
@@ -79,6 +80,15 @@ curl http://127.0.0.1:8080/v1/images/edits \
   -F 'prompt=给猫加一顶红色帽子' \
   -F 'quality=high'
 ```
+
+## 搜索 API
+
+`POST /v1/alpha/search` 供 Codex standalone web search 使用，进入与 Responses 相同的
+GPT 鉴权、模型白名单、资源调度和请求日志流程。请求 JSON 及上游 JSON 响应均直接透传，
+网关只替换所选 Account 或 Official API Key 的凭证；当前不解释上游错误响应，也不记录
+token usage。Codex model provider 的 Base URL 指向 Aestus 的 `/v1` 后，会自动请求该接口。
+
+GPT 搜索上游路径默认是 `/alpha/search`，可通过 `AESTUS_GPT_UPSTREAM_SEARCH_PATH` 覆盖。
 
 ## 目录结构
 

@@ -55,6 +55,10 @@ pub fn build_router(state: AppState) -> Router {
                 .expect("请求头名称固定有效"),
             "traceparent".parse().expect("请求头名称固定有效"),
             "tracestate".parse().expect("请求头名称固定有效"),
+            // Codex standalone search 会把线程来源和 turn 上下文放在这两个 header 中；
+            // 浏览器类客户端跨域调用搜索接口时需要允许它们通过预检。
+            "originator".parse().expect("请求头名称固定有效"),
+            "x-codex-turn-metadata".parse().expect("请求头名称固定有效"),
             "x-app".parse().expect("请求头名称固定有效"),
             "x-client-request-id".parse().expect("请求头名称固定有效"),
             "x-stainless-arch".parse().expect("请求头名称固定有效"),

@@ -9,5 +9,6 @@ pub mod model;
 pub mod quota;
 pub(crate) mod rate_limit_reset;
 pub mod responses;
+pub mod search;
 pub mod sql;
 mod upstream;

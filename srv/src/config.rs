@@ -13,6 +13,7 @@ const DEFAULT_PROVIDER_SCHEDULER_CANDIDATE_LIMIT: i64 = 32;
 const DEFAULT_GPT_UPSTREAM_API_KEY_PROBE_INTERVAL_SECONDS: u64 = 120;
 const DEFAULT_GPT_UPSTREAM_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const DEFAULT_GPT_UPSTREAM_RESPONSES_PATH: &str = "/responses";
+const DEFAULT_GPT_UPSTREAM_SEARCH_PATH: &str = "/alpha/search";
 const DEFAULT_GPT_UPSTREAM_IMAGE_GENERATIONS_PATH: &str = "/images/generations";
 const DEFAULT_GPT_UPSTREAM_IMAGE_EDITS_PATH: &str = "/images/edits";
 const DEFAULT_PROVIDER_UPSTREAM_CONNECT_TIMEOUT_SECONDS: u64 = 30;
@@ -69,6 +70,7 @@ pub struct AppConfig {
     pub gpt_upstream_api_key_probe_interval_seconds: u64,
     pub gpt_upstream_base_url: String,
     pub gpt_upstream_responses_path: String,
+    pub gpt_upstream_search_path: String,
     pub gpt_upstream_image_generations_path: String,
     pub gpt_upstream_image_edits_path: String,
     pub provider_upstream_connect_timeout_seconds: u64,
@@ -150,6 +152,10 @@ impl AppConfig {
             gpt_upstream_responses_path: parse_env_string(
                 "AESTUS_GPT_UPSTREAM_RESPONSES_PATH",
                 DEFAULT_GPT_UPSTREAM_RESPONSES_PATH,
+            )?,
+            gpt_upstream_search_path: parse_env_string(
+                "AESTUS_GPT_UPSTREAM_SEARCH_PATH",
+                DEFAULT_GPT_UPSTREAM_SEARCH_PATH,
             )?,
             gpt_upstream_image_generations_path: parse_env_string(
                 "AESTUS_GPT_UPSTREAM_IMAGE_GENERATIONS_PATH",

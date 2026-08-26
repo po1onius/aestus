@@ -619,6 +619,38 @@ pub mod header {
         upstream_headers
     }
 
+    /// 为 Codex standalone search 构造 JSON 请求头。
+    ///
+    /// Search 与 Responses 使用相同的 Codex 元数据白名单和受信任客户端身份，但响应是
+    /// buffered JSON，因此不能沿用 Responses 的 `text/event-stream` Accept。
+    pub fn build_codex_search_upstream_headers(
+        source_headers: &HeaderMap,
+        fallback_version_header: Option<&str>,
+    ) -> HeaderMap {
+        let mut upstream_headers =
+            build_codex_upstream_headers(source_headers, fallback_version_header);
+        // standalone search 的 originator 是 Codex 按 thread/service 计算的请求上下文，
+        // 例如 chatgpt_cca；它不一定等于 User-Agent 中的客户端名。Responses 会主动把
+        // originator 收敛到受信任客户端身份，而 Search 必须恢复调用方值，才能与官方
+        // Codex SearchClient 的 header 行为一致。认证与账号归属仍由最终 credential hook
+        // 强制覆盖，originator 不参与安全决策。
+        let originator = HeaderName::from_static(ORIGINATOR_HEADER);
+        if let Some(value) = source_headers.get(&originator) {
+            upstream_headers.insert(originator, value.clone());
+        }
+        apply_codex_search_protocol_headers(&mut upstream_headers);
+        upstream_headers
+    }
+
+    /// 在资源 override 之后恢复 standalone search 的权威 JSON 协议头。
+    pub fn apply_codex_search_protocol_headers(upstream_headers: &mut HeaderMap) {
+        upstream_headers.insert(header::ACCEPT, HeaderValue::from_static(JSON_CONTENT_TYPE));
+        upstream_headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static(JSON_CONTENT_TYPE),
+        );
+    }
+
     /// 为 Codex Images 账号端点构造最小 JSON 请求头。
     ///
     /// Images 不使用 Responses 的 SSE Accept、openai-beta 或 turn header，只保留下游语言
