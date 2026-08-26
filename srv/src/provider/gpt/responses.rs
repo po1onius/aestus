@@ -238,19 +238,24 @@ async fn process_upstream_response(
     );
 
     let account_signal = codex_response::parse_account_signal(status, &body);
-    let response_headers = filtered_response_headers(&headers, resource.kind);
     let classification = classify_http_failure(resource.kind, status, account_signal);
+    let response = if classification.retry {
+        BufferedProtocolResponse::Retry {
+            upstream_status: status,
+            exclude_current_resource: classification.exclude_resource_on_retry,
+            feedback: classification.feedback,
+        }
+    } else {
+        BufferedProtocolResponse::Respond {
+            status,
+            headers: filtered_response_headers(&headers, resource.kind),
+            body,
+            feedback: classification.feedback,
+            usage: None,
+        }
+    };
 
-    Ok(ProtocolResponse::Buffered(BufferedProtocolResponse {
-        status,
-        headers: response_headers,
-        body,
-        record_error_response: true,
-        retry: classification.retry,
-        exclude_resource_on_retry: classification.exclude_resource_on_retry,
-        feedback: classification.feedback,
-        usage: None,
-    }))
+    Ok(ProtocolResponse::Buffered(response))
 }
 
 /// GPT SSE observer 只保存协议解析状态；maintenance 回执、资源释放、额度扣减与日志收尾

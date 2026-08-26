@@ -262,16 +262,15 @@ async fn process_upstream_response(
             }
         }
         let response_headers = filtered_response_headers(&headers);
-        return Ok(ProtocolResponse::Buffered(BufferedProtocolResponse {
-            status,
-            headers: response_headers,
-            body,
-            record_error_response: false,
-            retry: false,
-            exclude_resource_on_retry: false,
-            feedback: None,
-            usage,
-        }));
+        return Ok(ProtocolResponse::Buffered(
+            BufferedProtocolResponse::Respond {
+                status,
+                headers: response_headers,
+                body,
+                feedback: None,
+                usage,
+            },
+        ));
     }
 
     let parsed_error = claude_response::parse_error(&body);
@@ -401,17 +400,22 @@ async fn process_upstream_response(
             .unwrap_or("none"),
         "Claude HTTP 失败已完成重试与请求级资源排除分类"
     );
-    let response_headers = filtered_response_headers(&headers);
-    Ok(ProtocolResponse::Buffered(BufferedProtocolResponse {
-        status,
-        headers: response_headers,
-        body,
-        record_error_response: true,
-        retry,
-        exclude_resource_on_retry,
-        feedback,
-        usage: None,
-    }))
+    let response = if retry {
+        BufferedProtocolResponse::Retry {
+            upstream_status: status,
+            exclude_current_resource: exclude_resource_on_retry,
+            feedback,
+        }
+    } else {
+        BufferedProtocolResponse::Respond {
+            status,
+            headers: filtered_response_headers(&headers),
+            body,
+            feedback,
+            usage: None,
+        }
+    };
+    Ok(ProtocolResponse::Buffered(response))
 }
 
 fn is_sse_response(headers: &HeaderMap) -> bool {

@@ -216,16 +216,15 @@ pub(super) async fn process_image_upstream_response(
             usage_present = usage.is_some(),
             "GPT Images 上游成功响应已完成 buffered 协议处理"
         );
-        return Ok(ProtocolResponse::Buffered(BufferedProtocolResponse {
-            status,
-            headers: filtered_response_headers(&headers, resource.kind),
-            body: downstream_body,
-            record_error_response: false,
-            retry: false,
-            exclude_resource_on_retry: false,
-            feedback: None,
-            usage,
-        }));
+        return Ok(ProtocolResponse::Buffered(
+            BufferedProtocolResponse::Respond {
+                status,
+                headers: filtered_response_headers(&headers, resource.kind),
+                body: downstream_body,
+                feedback: None,
+                usage,
+            },
+        ));
     }
 
     let tracing_body = response_body_for_tracing(&body);
@@ -245,14 +244,20 @@ pub(super) async fn process_image_upstream_response(
     );
     let account_signal = codex_response::parse_account_signal(status, &body);
     let classification = classify_http_failure(resource.kind, status, account_signal);
-    Ok(ProtocolResponse::Buffered(BufferedProtocolResponse {
-        status,
-        headers: filtered_response_headers(&headers, resource.kind),
-        body,
-        record_error_response: true,
-        retry: classification.retry,
-        exclude_resource_on_retry: classification.exclude_resource_on_retry,
-        feedback: classification.feedback,
-        usage: None,
-    }))
+    let response = if classification.retry {
+        BufferedProtocolResponse::Retry {
+            upstream_status: status,
+            exclude_current_resource: classification.exclude_resource_on_retry,
+            feedback: classification.feedback,
+        }
+    } else {
+        BufferedProtocolResponse::Respond {
+            status,
+            headers: filtered_response_headers(&headers, resource.kind),
+            body,
+            feedback: classification.feedback,
+            usage: None,
+        }
+    };
+    Ok(ProtocolResponse::Buffered(response))
 }

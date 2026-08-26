@@ -291,26 +291,36 @@ where
         };
 
         match protocol_response {
-            ProtocolResponse::Buffered(response) => {
-                let retry_next = response.retry && attempt_number < max_attempts;
-                let feedback_result = apply_optional_feedback::<P::Maintenance>(
-                    state,
-                    allocation,
-                    response.feedback.clone(),
-                )
-                .await;
-                if let Some(usage) = response.usage {
+            ProtocolResponse::Buffered(BufferedProtocolResponse::Respond {
+                status,
+                headers,
+                body,
+                feedback,
+                usage,
+            }) => {
+                let feedback_result =
+                    apply_optional_feedback::<P::Maintenance>(state, allocation, feedback).await;
+                if let Some(usage) = usage {
                     state.request_events().emit(RequestEvent::UsageObserved {
                         request_id: request.request_id,
                         attribution: usage_attribution,
                         usage,
                     });
                 }
-                let release_request_id = allocation.request_id;
-                let release_resource_type = allocation.resource_type();
-                let release_resource_id = allocation.resource.id;
-                let release_runtime_revision = allocation.resource.revision;
-                if retry_next && response.exclude_resource_on_retry {
+                release_buffered_lease::<P>(lease, status, attempt_number, max_attempts, false)
+                    .await;
+                feedback_result?;
+                return finish_buffered_response(state, request.request_id, status, headers, body);
+            }
+            ProtocolResponse::Buffered(BufferedProtocolResponse::Retry {
+                upstream_status,
+                exclude_current_resource,
+                feedback,
+            }) => {
+                let retry_next = attempt_number < max_attempts;
+                let feedback_result =
+                    apply_optional_feedback::<P::Maintenance>(state, allocation, feedback).await;
+                if retry_next && exclude_current_resource {
                     exclude_resource_for_retry(
                         &mut excluded_resource_members,
                         allocation,
@@ -318,49 +328,33 @@ where
                         max_attempts,
                     );
                 }
-
-                // 此时已经取得 provider 完成分类的真实 buffered 响应，lease 释放只负责
-                // 清理 Redis inflight 计数，不能改变随后“返回、重试或收口为资源错误”的
-                // 决策。`UpstreamLease::release` 失败时会保留 allocation，并在自身 Drop 中
-                // 使用同一个唯一 lease token 自动提交幂等释放；这里记录清理故障后继续执行
-                // 既定响应决策。
-                if let Err(error) = lease.release().await {
-                    error!(
-                        request_id = %release_request_id,
-                        provider = P::provider_name(),
-                        resource_type = release_resource_type,
-                        resource_id = %release_resource_id,
-                        runtime_revision = release_runtime_revision,
-                        upstream_status = response.status.as_u16(),
-                        attempt_number,
-                        max_attempts,
-                        retry_planned = retry_next,
-                        error = %error,
-                        "buffered 响应完成后释放上游资源失败；保留既定响应决策，RAII guard 已提交兜底释放"
-                    );
-                }
+                release_buffered_lease::<P>(
+                    lease,
+                    upstream_status,
+                    attempt_number,
+                    max_attempts,
+                    retry_next,
+                )
+                .await;
                 feedback_result?;
 
-                if response.retry {
-                    if retry_next {
-                        continue;
-                    }
-                    warn!(
-                        request_id = %request.request_id,
-                        provider = P::provider_name(),
-                        provider_group_id = %group_id,
-                        upstream_status = response.status.as_u16(),
-                        attempt_number,
-                        max_attempts,
-                        "可重试上游 HTTP 错误已耗尽 attempt，不向调用方返回最后一次原始响应"
-                    );
-                    return Err(retry_exhausted_resource_error::<P>(
-                        group_id,
-                        max_attempts,
-                        format!("最后一次可重试上游响应状态为 HTTP {}", response.status),
-                    ));
+                if retry_next {
+                    continue;
                 }
-                return finish_buffered_response(state, request.request_id, response);
+                warn!(
+                    request_id = %request.request_id,
+                    provider = P::provider_name(),
+                    provider_group_id = %group_id,
+                    upstream_status = upstream_status.as_u16(),
+                    attempt_number,
+                    max_attempts,
+                    "可重试上游 HTTP 错误已耗尽 attempt，不向调用方返回最后一次原始响应"
+                );
+                return Err(retry_exhausted_resource_error::<P>(
+                    group_id,
+                    max_attempts,
+                    format!("最后一次可重试上游响应状态为 HTTP {upstream_status}"),
+                ));
             }
             ProtocolResponse::Streaming(response) => {
                 return build_streaming_response::<P::Maintenance>(
@@ -460,6 +454,38 @@ async fn apply_optional_feedback<M: MaintenanceProvider>(
     )
     .await?;
     Ok(())
+}
+
+/// buffered 决策已经由封闭枚举固定，lease 清理失败不能再改变“返回”或“重试”的结果。
+/// 显式释放失败时 RAII guard 会使用同一 lease token 在后台幂等重试；这里保留完整 attempt
+/// 诊断后继续执行既定决策，避免资源计数清理故障覆盖真实的 provider 响应语义。
+async fn release_buffered_lease<P: ProviderProtocol>(
+    lease: UpstreamLease,
+    status: StatusCode,
+    attempt_number: usize,
+    max_attempts: usize,
+    retry_planned: bool,
+) {
+    let allocation = lease.allocation();
+    let request_id = allocation.request_id;
+    let resource_type = allocation.resource_type();
+    let resource_id = allocation.resource.id;
+    let runtime_revision = allocation.resource.revision;
+    if let Err(error) = lease.release().await {
+        error!(
+            request_id = %request_id,
+            provider = P::provider_name(),
+            resource_type,
+            resource_id = %resource_id,
+            runtime_revision,
+            upstream_status = status.as_u16(),
+            attempt_number,
+            max_attempts,
+            retry_planned,
+            error = %error,
+            "buffered 响应完成后释放上游资源失败；保留既定响应决策，RAII guard 已提交兜底释放"
+        );
+    }
 }
 
 struct PreparedUpstreamRequest {
@@ -798,13 +824,10 @@ async fn handle_response<P: ProviderProtocol>(
     let feedback = output.effects.feedback;
     let usage = output.effects.usage;
     let response = match output.disposition {
-        BufferedPluginDisposition::Respond(response) => BufferedProtocolResponse {
-            record_error_response: !response.status.is_success(),
+        BufferedPluginDisposition::Respond(response) => BufferedProtocolResponse::Respond {
             status: response.status,
             headers: response.headers,
             body: response.body,
-            retry: false,
-            exclude_resource_on_retry: false,
             feedback,
             usage,
         },
@@ -812,6 +835,23 @@ async fn handle_response<P: ProviderProtocol>(
             exclude_current_resource,
             reason,
         } => {
+            if let Some(usage) = usage {
+                warn!(
+                    request_id = %attempt.request_id,
+                    provider = attempt.provider,
+                    resource_type = attempt.resource_kind.as_str(),
+                    resource_id = %attempt.resource_id,
+                    plugin_release_id = %binding.release_id,
+                    plugin_slot = response_slot.as_str(),
+                    upstream_status = status.as_u16(),
+                    usage_total_tokens = usage.total_tokens,
+                    retry_reason = %reason,
+                    "buffered 响应插件同时声明重试和 usage，拒绝矛盾输出"
+                );
+                return Err(ProtocolFailure::adapter(AppError::Plugin {
+                    message: "buffered 响应插件不能同时声明重试和 usage".to_owned(),
+                }));
+            }
             info!(
                 request_id = %attempt.request_id,
                 provider = attempt.provider,
@@ -822,15 +862,10 @@ async fn handle_response<P: ProviderProtocol>(
                 retry_reason = %reason,
                 "buffered 响应插件要求通用 executor 重试"
             );
-            BufferedProtocolResponse {
-                status,
-                headers: HeaderMap::new(),
-                body: Bytes::new(),
-                record_error_response: true,
-                retry: true,
-                exclude_resource_on_retry: exclude_current_resource,
+            BufferedProtocolResponse::Retry {
+                upstream_status: status,
+                exclude_current_resource,
                 feedback,
-                usage,
             }
         }
     };
@@ -865,12 +900,14 @@ fn should_use_stream_response(
 fn finish_buffered_response(
     state: &AppState,
     request_id: uuid::Uuid,
-    response: BufferedProtocolResponse,
+    status: StatusCode,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> AppResult<Response<Body>> {
-    let result = if response.record_error_response {
+    let result = if !status.is_success() {
         RequestEndResult::HttpFailure {
-            status_code: response.status.as_u16(),
-            body: response.body.clone(),
+            status_code: status.as_u16(),
+            body: body.clone(),
         }
     } else {
         RequestEndResult::HttpSuccess
@@ -878,7 +915,7 @@ fn finish_buffered_response(
     let response_started_at = Utc::now();
     // Buffered 正文已经完整确定，返回后即可由 Axum 写向调用方；这里只记录最终下游
     // 响应就绪时间，任何被重试丢弃的上游响应头都不属于客户端首字。
-    if !response.body.is_empty() {
+    if !body.is_empty() {
         state.request_events().emit(RequestEvent::ResponseStarted {
             request_id,
             occurred_at: response_started_at,
@@ -891,12 +928,12 @@ fn finish_buffered_response(
         occurred_at: response_started_at,
         result,
     });
-    let mut builder = Response::builder().status(response.status);
-    if let Some(headers) = builder.headers_mut() {
-        *headers = response.headers;
+    let mut builder = Response::builder().status(status);
+    if let Some(response_headers) = builder.headers_mut() {
+        *response_headers = headers;
     }
     builder
-        .body(Body::from(response.body))
+        .body(Body::from(body))
         .map_err(|source| AppError::ProviderUpstream {
             provider: "gateway".to_owned(),
             message: format!("构造 buffered 下游响应失败: {source}"),

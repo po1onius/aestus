@@ -282,18 +282,30 @@ pub struct UpstreamAttemptContext {
     pub max_attempts: usize,
 }
 
-/// provider 对 buffered 上游响应的纯协议分类结果。
-pub struct BufferedProtocolResponse {
-    pub status: StatusCode,
-    pub headers: HeaderMap,
-    pub body: Bytes,
-    pub record_error_response: bool,
-    pub retry: bool,
-    /// 仅当 provider 能确认“当前请求不应再次使用同一资源、但该事实不应改变资源全局状态”
-    /// 时设置。通用 executor 只在确实还有下一次 attempt 时把当前资源加入请求级排除集合。
-    pub exclude_resource_on_retry: bool,
-    pub feedback: Option<UpstreamFeedback>,
-    pub usage: Option<TokenUsage>,
+/// provider 对 buffered 上游响应的封闭协议决策。
+///
+/// “向调用方返回响应”和“丢弃当前响应并重试”是互斥终态，不能再由多个布尔字段拼装。
+/// 每个 variant 只携带该决策真正需要的数据，从类型上排除“不重试却排除资源”、
+/// “重试响应仍携带下游正文或 usage”等矛盾状态。新增决策时，Rust 的穷尽匹配也会强制
+/// executor 与所有调用方同步处理。
+pub enum BufferedProtocolResponse {
+    /// 当前上游响应已经是最终下游响应。HTTP status 同时决定请求日志记录成功还是失败，
+    /// 避免 status 与独立的 `record_error_response` 标志发生分歧。
+    Respond {
+        status: StatusCode,
+        headers: HeaderMap,
+        body: Bytes,
+        feedback: Option<UpstreamFeedback>,
+        usage: Option<TokenUsage>,
+    },
+    /// 当前上游响应只作为重试依据，不会暴露给调用方。
+    Retry {
+        upstream_status: StatusCode,
+        /// 仅当 provider 能确认“当前请求不应再次使用同一资源、但该事实不应改变资源
+        /// 全局状态”时设置。executor 只在确实还有下一次 attempt 时应用请求级排除。
+        exclude_current_resource: bool,
+        feedback: Option<UpstreamFeedback>,
+    },
 }
 
 /// provider 流观察器处理一批上游字节后的结果。
