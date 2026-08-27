@@ -4,6 +4,7 @@
 //! 测试服务也直接调用同一组函数，从而保证本地验证覆盖的就是实际插件能力。
 
 use serde_json::Value;
+use std::time::UNIX_EPOCH;
 
 use crate::{
     Effects, Header,
@@ -88,7 +89,7 @@ pub fn transform_request(
         headers,
         body: transformed.body,
         response_mode,
-        response_context: None,
+        response_context: transformed.response_context,
     })
 }
 
@@ -121,11 +122,16 @@ pub struct BufferedTransformOutput {
 pub fn transform_buffered_response(
     input: BufferedTransformInput,
 ) -> Result<BufferedTransformOutput, PluginError> {
+    let BufferedTransformInput {
+        response,
+        request_context,
+    } = input;
     let HttpResponse {
         status: upstream_status,
         headers,
         body,
-    } = input.response;
+    } = response;
+    let response_date_unix_seconds = response_date_unix_seconds(&headers);
     let mut status = upstream_status;
     let mut converted_from_sse = false;
     let parsed_json = serde_json::from_slice::<Value>(&body).ok();
@@ -143,19 +149,24 @@ pub fn transform_buffered_response(
         let effects = effects_from_raw_json(&value, Some(upstream_status), false);
         (Some(value), effects)
     } else if (200..300).contains(&upstream_status) {
-        let converted = convert_responses_sse_to_json(&body, upstream_status)
-            .map_err(|message| {
-                PluginError::new(
-                    "invalid_upstream_responses_sse",
-                    format!("上游 buffered Responses SSE 无法转换: {message}"),
-                )
-            })?
-            .ok_or_else(|| {
-                PluginError::new(
-                    "invalid_upstream_responses_body",
-                    "上游成功响应既不是标准 Responses JSON，也不包含 SSE framing",
-                )
-            })?;
+        let converted = convert_responses_sse_to_json(
+            &body,
+            upstream_status,
+            request_context.as_deref(),
+            response_date_unix_seconds,
+        )
+        .map_err(|message| {
+            PluginError::new(
+                "invalid_upstream_responses_sse",
+                format!("上游 buffered Responses SSE 无法转换: {message}"),
+            )
+        })?
+        .ok_or_else(|| {
+            PluginError::new(
+                "invalid_upstream_responses_body",
+                "上游成功响应既不是标准 Responses JSON，也不包含 SSE framing",
+            )
+        })?;
         status = converted.status;
         converted_from_sse = true;
         (Some(converted.value), converted.effects)
@@ -198,6 +209,18 @@ pub fn transform_buffered_response(
         }),
         effects,
     })
+}
+
+/// HTTP Date 是精简 Codex SSE 缺少 `created_at` 时唯一由上游提供的时间依据。解析失败时
+/// 不做本地时钟兜底，后续聚合会明确报错，避免生成事实错误的时间戳。
+fn response_date_unix_seconds(headers: &[Header]) -> Option<i64> {
+    let value = headers
+        .iter()
+        .find(|header| header.name.eq_ignore_ascii_case("date"))
+        .and_then(|header| std::str::from_utf8(&header.value).ok())?;
+    let time = httpdate::parse_http_date(value.trim()).ok()?;
+    let seconds = time.duration_since(UNIX_EPOCH).ok()?.as_secs();
+    i64::try_from(seconds).ok()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

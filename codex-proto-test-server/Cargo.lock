@@ -425,6 +425,7 @@ dependencies = [
 name = "gpt-codex-plugin-common"
 version = "0.1.0"
 dependencies = [
+ "httpdate",
  "serde",
  "serde_json",
 ]

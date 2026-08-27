@@ -73,8 +73,11 @@ Dashboard 的组件不会形成两套业务实现。
 - 将 `role=tool` 转成 `function_call_output`；
 - 对 Spark 模型注入图片能力说明。
 
-请求插件当前始终返回空的 `response_context`，响应插件也不执行工具名称恢复或原始 model
-回写。
+下游为 `stream=false` 时，请求插件会把最终上游请求中需要由标准 Response 回显的配置字段
+写入版本化 `response_context`，宿主只在同一次 attempt 内把它交给 buffered 响应插件。
+上下文包含归一化后的 model、instructions、tools、tool_choice、reasoning、text 等响应外壳
+字段，不包含 input、账号凭证或下游鉴权 header；`stream=true` 不需要重建 JSON，因此仍返回
+空上下文。上下文超过宿主 64 KiB 限制时会在请求阶段明确拒绝，避免响应阶段静默丢字段。
 
 请求插件主动返回的 `transform-error` 表示调用方请求不受支持或结构非法。宿主不会发送
 上游 HTTP 请求，也不会调用 buffered/stream 响应插件，而是使用插件公开的 `code/message`
@@ -109,15 +112,18 @@ Dashboard 的组件不会形成两套业务实现。
 并执行通用响应字段修正；非 2xx JSON 或非 JSON 错误响应仍保持上游状态和 body。如果成功
 响应具有 SSE framing，则按以下顺序转换为一个 Responses JSON：
 
-1. 提取首个 completed、done、incomplete、failed 或 cancelled 终止事件中的完整
-   `response` object，并保持它的原始状态和 HTTP 状态；
-2. 终止对象的 `output` 为空时，优先按到达顺序保留去重后的
-   `response.output_item.done.item` 原始对象；
-3. 不使用文本或工具 delta 臆造缺失协议字段的 output item；没有完整 done item 时保持
-   终止 Response 的空 output；
-4. 转换结果必须具有合法的 `id/object/status/output` 核心结构；
-5. 缺少终止事件、终止事件缺少 Response object 或结构非法时返回插件错误，绝不会把 SSE
-   body 作为 `stream=false` 的成功响应透传给客户端。
+1. 以请求 `response_context` 为兜底外壳，依次合并 `response.created/in_progress` 和唯一的
+   completed、done、incomplete、failed 或 cancelled 终止对象，越靠后的上游字段优先；
+2. 终止对象的 `output` 缺失或为空时，使用完整 `response.output_item.done.item`；全部事件
+   提供 `output_index` 时按索引排序并要求从零连续，Codex 全部省略索引时才按到达顺序保留；
+3. 不使用文本或工具 delta 臆造 output 内容；done message/reasoning 缺少标准必需 id 时，只
+   根据 response id 和 output index 生成稳定代理 id，并为 done item 补充确定性的 completed
+   状态及 output_text 空 annotations；
+4. 精简终止事件缺少 `object/status/error/incomplete_details/usage` 时按终止类型补齐；缺少
+   `created_at` 时使用上游 HTTP `Date`，不会调用本地时钟伪造时间；
+5. 转换结果会校验标准 Response 外壳、message item、usage 和状态一致性；非法 JSON data、
+   多个终止事件、终止后的 done item、索引冲突或无法重建的字段都会返回插件错误，绝不会把
+   残缺 SSE 作为 `stream=false` 的成功响应返回。
 
 当前 buffered disposition 只有 `respond`，插件自身不会要求宿主重试。
 
@@ -141,7 +147,9 @@ Dashboard 的组件不会形成两套业务实现。
 - `response.failed` 发给下游前删除 `instructions`、`output`、`usage`、`metadata`、
   `reasoning`、`tools`、`tool_choice`、`parallel_tool_calls`、`text`、`truncation`、
   `max_output_tokens` 和 `incomplete_details`，保留错误身份和消息；
-- 原生 message、function/custom tool call 和 `image_generation_call` 的所有字段保持不变。
+- 流式原生 message、function/custom tool call 和 `image_generation_call` 字段保持不变；
+  buffered 聚合只补充标准非流式对象所需的确定性 id/status/annotations，不改写文本、工具
+  参数、图片结果或其他模型输出语义字段。
 
 响应 header 会删除 hop-by-hop、`Connection` 声明的动态连接级 header、失效的
 `content-length`、上游 cookie 和鉴权信息。SSE 转 JSON 成功时输出
@@ -181,7 +189,8 @@ buffered 响应和 stream 响应三个插槽，执行 Provider 原生代理流�
 
 宿主允许单个完整 SSE item 最大 500 MiB。stream Component 使用独立的 2 GiB 线性内存
 边界，为 canonical ABI、JSON DOM 及必要重写产生的瞬时副本预留空间；请求和 buffered
-响应 Component 使用 64 MiB 内存边界。插件输出 body 不能超过 64 MiB。
+响应 Component 使用 64 MiB 内存边界。插件输出 body 不能超过 64 MiB，请求插件输出的
+`response_context` 不能超过 64 KiB。
 
 ## 构建与上传
 

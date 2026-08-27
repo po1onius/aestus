@@ -1,5 +1,7 @@
 use serde_json::{Map, Value, json};
 
+use crate::response_context::encode_response_context;
+
 const CODEX_INSTRUCTIONS: &str = include_str!("instructions/codex.txt");
 const GPT_5_1_INSTRUCTIONS: &str = include_str!("instructions/gpt5_1.txt");
 const GPT_5_2_INSTRUCTIONS: &str = include_str!("instructions/gpt5_2.txt");
@@ -24,6 +26,9 @@ pub struct OAuthTransformOutput {
     /// 调用方原始请求是否要求 SSE。OAuth 上游 body 随后仍会固定为 `stream=true`，
     /// 因此这个值必须在覆盖字段前保存，供请求插件选择下游响应交付模式。
     pub downstream_streaming: bool,
+    /// 仅非流式下游需要。它保存最终上游请求中会被标准 Response 回显的配置字段，供
+    /// buffered 插件在 Codex 终止事件采用精简结构时补齐响应外壳。
+    pub response_context: Option<Vec<u8>>,
 }
 
 pub fn transform_oauth_body(body: &[u8]) -> Result<OAuthTransformOutput, String> {
@@ -60,11 +65,17 @@ pub fn transform_oauth_body(body: &[u8]) -> Result<OAuthTransformOutput, String>
     normalize_system_messages(object);
     normalize_input(object);
 
+    let response_context = if downstream_streaming {
+        None
+    } else {
+        Some(encode_response_context(&value)?)
+    };
     let body =
         serde_json::to_vec(&value).map_err(|error| format!("改造后的请求体无法序列化: {error}"))?;
     Ok(OAuthTransformOutput {
         body,
         downstream_streaming,
+        response_context,
     })
 }
 
