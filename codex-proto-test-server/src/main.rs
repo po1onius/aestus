@@ -1,5 +1,6 @@
 use std::{
-    fs,
+    fs::{self, File, OpenOptions},
+    io::{self, BufWriter, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{
@@ -17,6 +18,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use chrono::{SecondsFormat, Utc};
 use clap::Parser;
 use gpt_codex_plugin_common::{
     Effects, Header,
@@ -25,7 +27,7 @@ use gpt_codex_plugin_common::{
         RequestTransformInput, ResponseHead, ResponseMode, StreamResponseTransformer,
         StreamStartInput, transform_buffered_response, transform_request,
     },
-    sse::{JsonSseItem, split_sse_items},
+    sse::{JsonSseItem, body_has_sse_framing, split_sse_items},
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -37,6 +39,7 @@ const DEFAULT_UPSTREAM_URL: &str = "https://chatgpt.com/backend-api/codex/respon
 const DEFAULT_OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const DEFAULT_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const MAX_REQUEST_BYTES: usize = 512 * 1024 * 1024;
+const TRACE_DIRECTORY_NAME: &str = "trace";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -68,6 +71,195 @@ struct AppState {
     chatgpt_account_id: Option<Arc<str>>,
     responses_upstream_url: Arc<str>,
     request_sequence: Arc<AtomicU64>,
+}
+
+/// 单次下游请求对应一个调试记录文件。文件始终使用 append 模式打开；创建文件时同时使用
+/// `create_new`，避免同一秒内的并发请求或服务重启后意外复用已有记录。
+///
+/// 调试记录只包含请求体、响应体和转换错误，不写入请求 header，因此 OAuth access token、
+/// refresh token、下游鉴权信息和账号 header 都不会进入文件。
+struct TraceRecorder {
+    file: BufWriter<File>,
+    path: PathBuf,
+}
+
+impl TraceRecorder {
+    fn create(request_id: u64) -> io::Result<Self> {
+        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(TRACE_DIRECTORY_NAME);
+        fs::create_dir_all(&directory)?;
+
+        // 文件名时间精确到秒且便于人工识别。同一秒有多个请求时添加递增序号，仍保证每个
+        // 请求拥有独立文件；`create_new` 使并发创建过程具备原子性。
+        let timestamp = Utc::now().format("%Y-%m-%d_%H-%M-%S_UTC").to_string();
+        for collision_index in 0_u64.. {
+            let file_name = if collision_index == 0 {
+                format!("{timestamp}.trace.log")
+            } else {
+                format!("{timestamp}_{collision_index:02}.trace.log")
+            };
+            let path = directory.join(file_name);
+            match OpenOptions::new().append(true).create_new(true).open(&path) {
+                Ok(file) => {
+                    // pretty JSON 序列化会产生大量小块写入，使用缓冲写入器避免调试记录对
+                    // 大响应产生不必要的系统调用开销；每个逻辑 section 结束时仍显式 flush。
+                    let mut recorder = Self {
+                        file: BufWriter::new(file),
+                        path,
+                    };
+                    recorder.write_text_section(
+                        "调试记录开始",
+                        &format!(
+                            "request_id: {request_id}\ncreated_at: {}",
+                            trace_timestamp()
+                        ),
+                    )?;
+                    return Ok(recorder);
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        unreachable!("文件名碰撞序号不会耗尽")
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// JSON 合法时以缩进格式写入；不合法时保留原始字节并同时记录反序列化错误，确保请求
+    /// 或响应协议损坏时仍能从同一个文件直接定位问题。
+    fn write_json_section(&mut self, title: &str, body: &[u8]) -> io::Result<()> {
+        self.write_section_header(title)?;
+        match serde_json::from_slice::<Value>(body) {
+            Ok(value) => {
+                serde_json::to_writer_pretty(&mut self.file, &value).map_err(json_io_error)?;
+                self.file.write_all(b"\n\n")?;
+            }
+            Err(error) => {
+                writeln!(self.file, "JSON 反序列化失败: {error}")?;
+                writeln!(self.file, "原始内容（{} bytes）：", body.len())?;
+                self.file.write_all(body)?;
+                self.file.write_all(b"\n\n")?;
+            }
+        }
+        self.file.flush()
+    }
+
+    fn write_text_section(&mut self, title: &str, content: &str) -> io::Result<()> {
+        self.write_section_header(title)?;
+        self.file.write_all(content.as_bytes())?;
+        self.file.write_all(b"\n\n")?;
+        self.file.flush()
+    }
+
+    /// 记录上游响应的协议状态。SSE 按空行切成完整 event，再分别反序列化 event 的全部
+    /// `data:` 行；单个 event 损坏时会把错误和原始 event 一起写入，但不会改变后续插件
+    /// 原本应执行的校验与错误返回。
+    fn write_upstream_response(&mut self, status: u16, body: &[u8]) -> io::Result<()> {
+        self.write_text_section(
+            "Codex 上游响应概要",
+            &format!(
+                "received_at: {}\nstatus: {status}\nbody_bytes: {}\nsse_framing: {}",
+                trace_timestamp(),
+                body.len(),
+                body_has_sse_framing(body)
+            ),
+        )?;
+
+        if !body_has_sse_framing(body) {
+            return self.write_json_section("Codex 上游非 SSE 响应体", body);
+        }
+
+        let items = match split_sse_items(body) {
+            Ok(items) => items,
+            Err(message) => {
+                self.write_text_section(
+                    "Codex 上游 SSE 切分失败",
+                    &format!("error: {message}\n原始响应体（{} bytes）：", body.len()),
+                )?;
+                self.file.write_all(body)?;
+                self.file.write_all(b"\n\n")?;
+                return self.file.flush();
+            }
+        };
+
+        for (index, item) in items.into_iter().enumerate() {
+            let title = format!("Codex 上游完整 SSE event #{}", index + 1);
+            self.write_section_header(&title)?;
+            match JsonSseItem::parse(&item) {
+                Ok(Some(parsed)) => {
+                    serde_json::to_writer_pretty(&mut self.file, parsed.value())
+                        .map_err(json_io_error)?;
+                    self.file.write_all(b"\n\n")?;
+                }
+                Ok(None) => {
+                    writeln!(
+                        self.file,
+                        "该 event 不包含可反序列化的 JSON data（可能是注释、空 data 或 [DONE]）。"
+                    )?;
+                    writeln!(self.file, "原始 SSE event（{} bytes）：", item.len())?;
+                    self.file.write_all(&item)?;
+                    self.file.write_all(b"\n")?;
+                }
+                Err(message) => {
+                    writeln!(self.file, "SSE event JSON 反序列化失败: {message}")?;
+                    writeln!(self.file, "原始 SSE event（{} bytes）：", item.len())?;
+                    self.file.write_all(&item)?;
+                    self.file.write_all(b"\n")?;
+                }
+            }
+        }
+        self.file.flush()
+    }
+
+    fn write_error(&mut self, stage: &str, code: &str, message: &str) -> io::Result<()> {
+        self.write_text_section(
+            &format!("处理错误：{stage}"),
+            &format!(
+                "occurred_at: {}\ncode: {code}\nmessage: {message}",
+                trace_timestamp()
+            ),
+        )
+    }
+
+    fn write_section_header(&mut self, title: &str) -> io::Result<()> {
+        writeln!(
+            self.file,
+            "================================================================================"
+        )?;
+        writeln!(self.file, "[{title}]")?;
+        writeln!(
+            self.file,
+            "--------------------------------------------------------------------------------"
+        )
+    }
+}
+
+fn trace_timestamp() -> String {
+    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn json_io_error(error: serde_json::Error) -> io::Error {
+    io::Error::other(error)
+}
+
+/// 统一处理调试文件的写入错误。记录功能属于测试服务的核心职责，因此一旦文件无法继续
+/// 写入就明确终止当前请求，避免调用方误以为已经生成了一份完整可用的调试记录。
+fn write_trace_record(
+    trace: &mut TraceRecorder,
+    request_id: u64,
+    write: impl FnOnce(&mut TraceRecorder) -> io::Result<()>,
+) -> Result<(), ServiceError> {
+    let trace_path = trace.path().to_path_buf();
+    write(trace).map_err(|error| {
+        error!(
+            request_id,
+            trace_path = %trace_path.display(),
+            error = %error,
+            "写入请求调试记录失败"
+        );
+        ServiceError::internal(format!("写入请求调试记录失败: {error}"))
+    })
 }
 
 #[tokio::main]
@@ -351,6 +543,25 @@ async fn create_response(
     body: Bytes,
 ) -> Result<Response, ServiceError> {
     let request_id = state.request_sequence.fetch_add(1, Ordering::Relaxed);
+    let mut trace = TraceRecorder::create(request_id).map_err(|error| {
+        let trace_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(TRACE_DIRECTORY_NAME);
+        error!(
+            request_id,
+            trace_directory = %trace_directory.display(),
+            error = %error,
+            "创建请求调试记录文件失败"
+        );
+        ServiceError::internal(format!("创建请求调试记录文件失败: {error}"))
+    })?;
+    info!(
+        request_id,
+        trace_path = %trace.path().display(),
+        "已创建请求调试记录文件"
+    );
+    write_trace_record(&mut trace, request_id, |trace| {
+        trace.write_json_section("原始下游 Responses 请求体", &body)
+    })?;
+
     let request_summary = summarize_request(&body);
     let model = request_summary
         .model
@@ -368,7 +579,7 @@ async fn create_response(
         "收到 Responses 测试请求"
     );
 
-    let transformed_request = transform_request(RequestTransformInput {
+    let transformed_request = match transform_request(RequestTransformInput {
         account: AccountResource {
             access_token: state.access_token.to_string(),
             chatgpt_account_id: state.chatgpt_account_id.as_deref().map(str::to_owned),
@@ -376,24 +587,48 @@ async fn create_response(
         },
         headers: from_axum_headers(&headers),
         body: body.to_vec(),
-    })
-    .map_err(|error| {
-        warn!(request_id, code = %error.code, message = %error.message, "请求插件函数拒绝请求");
-        ServiceError::bad_request(error.code, error.message)
+    }) {
+        Ok(transformed) => transformed,
+        Err(error) => {
+            warn!(request_id, code = %error.code, message = %error.message, "请求插件函数拒绝请求");
+            write_trace_record(&mut trace, request_id, |trace| {
+                trace.write_error("请求插件转换", &error.code, &error.message)
+            })?;
+            return Err(ServiceError::bad_request(error.code, error.message));
+        }
+    };
+    write_trace_record(&mut trace, request_id, |trace| {
+        trace.write_json_section(
+            "请求插件转换后实际发送至 Codex 的请求体",
+            &transformed_request.body,
+        )
     })?;
 
     let started_at = Instant::now();
-    let upstream = send_upstream(
+    let upstream = match send_upstream(
         &state,
         state.responses_upstream_url.as_ref(),
         &transformed_request.headers,
         transformed_request.body,
     )
     .await
-    .map_err(|error| {
-        error!(request_id, error = %error, "请求 Codex 上游失败");
-        ServiceError::bad_gateway("upstream_request_failed", error.to_string())
-    })?;
+    {
+        Ok(response) => response,
+        Err(error) => {
+            error!(request_id, error = %error, "请求 Codex 上游失败");
+            write_trace_record(&mut trace, request_id, |trace| {
+                trace.write_error(
+                    "请求 Codex 上游",
+                    "upstream_request_failed",
+                    &error.to_string(),
+                )
+            })?;
+            return Err(ServiceError::bad_gateway(
+                "upstream_request_failed",
+                error.to_string(),
+            ));
+        }
+    };
     info!(
         request_id,
         upstream_status = upstream.status,
@@ -401,14 +636,27 @@ async fn create_response(
         elapsed_ms = started_at.elapsed().as_millis(),
         "已收到 Codex 上游响应"
     );
+    write_trace_record(&mut trace, request_id, |trace| {
+        trace.write_upstream_response(upstream.status, &upstream.body)
+    })?;
 
     // 与真实宿主一致：非 2xx 永远走 buffered；成功响应才使用请求插件声明的模式。
     if !(200..300).contains(&upstream.status)
         || transformed_request.response_mode == ResponseMode::Buffered
     {
-        handle_buffered_response(request_id, upstream, transformed_request.response_context)
+        handle_buffered_response(
+            request_id,
+            upstream,
+            transformed_request.response_context,
+            &mut trace,
+        )
     } else {
-        handle_stream_response(request_id, upstream, transformed_request.response_context)
+        handle_stream_response(
+            request_id,
+            upstream,
+            transformed_request.response_context,
+            &mut trace,
+        )
     }
 }
 
@@ -439,33 +687,73 @@ fn handle_buffered_response(
     request_id: u64,
     response: HttpResponse,
     request_context: Option<Vec<u8>>,
+    trace: &mut TraceRecorder,
 ) -> Result<Response, ServiceError> {
-    let transformed = transform_buffered_response(BufferedTransformInput {
+    let upstream_was_sse = body_has_sse_framing(&response.body);
+    let transformed = match transform_buffered_response(BufferedTransformInput {
         response,
         request_context,
-    })
-    .map_err(|error| {
-        error!(request_id, code = %error.code, message = %error.message, "缓冲响应插件函数执行失败");
-        ServiceError::bad_gateway(error.code, error.message)
-    })?;
+    }) {
+        Ok(transformed) => transformed,
+        Err(error) => {
+            error!(request_id, code = %error.code, message = %error.message, "缓冲响应插件函数执行失败");
+            write_trace_record(trace, request_id, |trace| {
+                trace.write_error("缓冲响应插件转换", &error.code, &error.message)
+            })?;
+            return Err(ServiceError::bad_gateway(error.code, error.message));
+        }
+    };
     log_effects(request_id, &transformed.effects);
     let BufferedDisposition::Respond(response) = transformed.disposition;
-    validate_json_response(response.status, &response.body).map_err(|message| {
+    if upstream_was_sse {
+        write_trace_record(trace, request_id, |trace| {
+            trace.write_json_section("流式转非流式后的最终 Responses 响应体", &response.body)
+        })?;
+    }
+    if let Err(message) = validate_json_response(response.status, &response.body) {
         error!(request_id, validation_error = %message, "插件输出不是合法 Responses JSON");
-        ServiceError::bad_gateway("invalid_responses_json", message)
-    })?;
+        write_trace_record(trace, request_id, |trace| {
+            trace.write_error(
+                "最终非流式 Responses 校验",
+                "invalid_responses_json",
+                &message,
+            )
+        })?;
+        return Err(ServiceError::bad_gateway("invalid_responses_json", message));
+    }
     info!(
         request_id,
         status = response.status,
         "Responses JSON 格式校验通过"
     );
-    build_response(response)
+    match build_response(response) {
+        Ok(response) => {
+            write_trace_record(trace, request_id, |trace| {
+                trace.write_text_section(
+                    "请求处理完成",
+                    &format!(
+                        "completed_at: {}\nresponse_mode: buffered",
+                        trace_timestamp()
+                    ),
+                )
+            })?;
+            Ok(response)
+        }
+        Err(error) => {
+            error!(request_id, error = %error.message, "构造下游非流式响应失败");
+            write_trace_record(trace, request_id, |trace| {
+                trace.write_error("构造下游非流式 HTTP 响应", &error.code, &error.message)
+            })?;
+            Err(error)
+        }
+    }
 }
 
 fn handle_stream_response(
     request_id: u64,
     response: HttpResponse,
     request_context: Option<Vec<u8>>,
+    trace: &mut TraceRecorder,
 ) -> Result<Response, ServiceError> {
     let HttpResponse {
         status,
@@ -473,47 +761,92 @@ fn handle_stream_response(
         body,
     } = response;
     let mut transformer = StreamResponseTransformer::default();
-    let head = transformer
-        .start(StreamStartInput {
-            head: ResponseHead { status, headers },
-            request_context,
-        })
-        .map_err(|error| ServiceError::bad_gateway(error.code, error.message))?;
-    let items = split_sse_items(&body)
-        .map_err(|message| ServiceError::bad_gateway("invalid_upstream_sse", message))?;
+    let head = match transformer.start(StreamStartInput {
+        head: ResponseHead { status, headers },
+        request_context,
+    }) {
+        Ok(head) => head,
+        Err(error) => {
+            write_trace_record(trace, request_id, |trace| {
+                trace.write_error("流式响应插件启动", &error.code, &error.message)
+            })?;
+            return Err(ServiceError::bad_gateway(error.code, error.message));
+        }
+    };
+    let items = match split_sse_items(&body) {
+        Ok(items) => items,
+        Err(message) => {
+            write_trace_record(trace, request_id, |trace| {
+                trace.write_error("切分 Codex SSE 响应", "invalid_upstream_sse", &message)
+            })?;
+            return Err(ServiceError::bad_gateway("invalid_upstream_sse", message));
+        }
+    };
     let mut transformed_body = Vec::with_capacity(body.len());
     for item in items {
-        let transformed = transformer.transform_item(item).map_err(|error| {
-            error!(request_id, code = %error.code, message = %error.message, "流式响应插件函数执行失败");
-            ServiceError::bad_gateway(error.code, error.message)
-        })?;
+        let transformed = match transformer.transform_item(item) {
+            Ok(transformed) => transformed,
+            Err(error) => {
+                error!(request_id, code = %error.code, message = %error.message, "流式响应插件函数执行失败");
+                write_trace_record(trace, request_id, |trace| {
+                    trace.write_error("流式响应插件 event 转换", &error.code, &error.message)
+                })?;
+                return Err(ServiceError::bad_gateway(error.code, error.message));
+            }
+        };
         log_effects(request_id, &transformed.effects);
         if let Some(item) = transformed.item {
             transformed_body.extend_from_slice(&item);
         }
     }
-    let finished = transformer
-        .finish()
-        .map_err(|error| ServiceError::bad_gateway(error.code, error.message))?;
+    let finished = match transformer.finish() {
+        Ok(finished) => finished,
+        Err(error) => {
+            write_trace_record(trace, request_id, |trace| {
+                trace.write_error("流式响应插件结束", &error.code, &error.message)
+            })?;
+            return Err(ServiceError::bad_gateway(error.code, error.message));
+        }
+    };
     log_effects(request_id, &finished.effects);
     for item in finished.items {
         transformed_body.extend_from_slice(&item);
     }
 
-    validate_sse_response(&transformed_body).map_err(|message| {
+    if let Err(message) = validate_sse_response(&transformed_body) {
         error!(request_id, validation_error = %message, "插件输出不是合法 Responses SSE");
-        ServiceError::bad_gateway("invalid_responses_sse", message)
-    })?;
+        write_trace_record(trace, request_id, |trace| {
+            trace.write_error("最终流式 Responses 校验", "invalid_responses_sse", &message)
+        })?;
+        return Err(ServiceError::bad_gateway("invalid_responses_sse", message));
+    }
     info!(
         request_id,
         event_stream_bytes = transformed_body.len(),
         "Responses SSE 格式校验通过"
     );
-    build_response(HttpResponse {
+    match build_response(HttpResponse {
         status: head.status,
         headers: head.headers,
         body: transformed_body,
-    })
+    }) {
+        Ok(response) => {
+            write_trace_record(trace, request_id, |trace| {
+                trace.write_text_section(
+                    "请求处理完成",
+                    &format!("completed_at: {}\nresponse_mode: stream", trace_timestamp()),
+                )
+            })?;
+            Ok(response)
+        }
+        Err(error) => {
+            error!(request_id, error = %error.message, "构造下游流式响应失败");
+            write_trace_record(trace, request_id, |trace| {
+                trace.write_error("构造下游流式 HTTP 响应", &error.code, &error.message)
+            })?;
+            Err(error)
+        }
+    }
 }
 
 fn validate_json_response(status: u16, body: &[u8]) -> Result<(), String> {

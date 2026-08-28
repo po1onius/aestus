@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 axum = "0.8.9"
+chrono = "0.4.45"
 clap = { version = "4.6.6", features = ["derive"] }
 gpt-codex-plugin-common = { path = "../plugin/crates/common" }
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }

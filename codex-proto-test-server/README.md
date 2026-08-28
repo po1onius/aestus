@@ -41,4 +41,20 @@ curl http://127.0.0.1:3000/v1/responses \
 事件序列和终止事件校验，会先收集完整上游 SSE，再以 `text/event-stream` 返回；它用于验证
 插件协议转换，不用于测量首 token 延迟。
 
+## 请求调试记录
+
+每个进入 `/v1/responses` 的请求都会在本目录的 `trace/` 下创建一个独立调试文件。文件名使用
+精确到秒的 UTC 时间，例如 `2026-08-28_12-34-56_UTC.trace.log`；同一秒内存在多个请求时会
+自动追加递增序号。文件以 append 模式打开，并按处理顺序记录：
+
+- 美化后的原始下游 JSON 请求体；
+- 请求插件转换后实际发送给 Codex 的 JSON 请求体；
+- Codex 上游响应状态，以及每个完整 SSE event 的 `data:` 反序列化 JSON；
+- 流式 SSE 转非流式响应时，最终生成的完整 Responses JSON；
+- 请求转换、上游请求、SSE 切分或反序列化、响应转换和最终协议校验期间发生的错误。
+
+非法 JSON/SSE 会同时记录解析错误和原始内容，便于直接定位协议问题。调试文件不会写入 HTTP
+header，因此不会包含 OAuth token、下游鉴权信息或 ChatGPT account header；请求和响应正文
+可能包含完整 prompt 及模型输出，只应在受控的本地调试环境中保存。
+
 Responses 上游地址可通过 `--upstream-url` 覆盖。
