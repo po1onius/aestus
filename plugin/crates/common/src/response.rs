@@ -70,7 +70,6 @@ pub fn is_terminal_event(value: &Value) -> bool {
                 | "response.failed"
                 | "response.incomplete"
                 | "response.cancelled"
-                | "response.canceled"
         )
     )
 }

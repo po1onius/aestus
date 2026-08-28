@@ -69,8 +69,7 @@ pub fn convert_responses_sse_to_json(
             | "response.done"
             | "response.incomplete"
             | "response.failed"
-            | "response.cancelled"
-            | "response.canceled" => {
+            | "response.cancelled" => {
                 if let Some(previous) = terminal_type.as_deref() {
                     return Err(format!(
                         "Responses SSE 包含多个终止事件: {previous} 和 {event_type}"
