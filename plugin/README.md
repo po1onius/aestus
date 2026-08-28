@@ -73,11 +73,8 @@ Dashboard 的组件不会形成两套业务实现。
 - 将 `role=tool` 转成 `function_call_output`；
 - 对 Spark 模型注入图片能力说明。
 
-下游为 `stream=false` 时，请求插件会把最终上游请求中需要由标准 Response 回显的配置字段
-写入版本化 `response_context`，宿主只在同一次 attempt 内把它交给 buffered 响应插件。
-上下文包含归一化后的 model、instructions、tools、tool_choice、reasoning、text 等响应外壳
-字段，不包含 input、账号凭证或下游鉴权 header；`stream=true` 不需要重建 JSON，因此仍返回
-空上下文。上下文超过宿主 64 KiB 限制时会在请求阶段明确拒绝，避免响应阶段静默丢字段。
+请求 ABI 仍保留 `response_context` 字段以维持宿主接口形状，但当前请求插件始终返回空值。
+buffered 响应插件也不会使用请求上下文补齐 Response，避免把请求配置误当成上游响应事实。
 
 请求插件主动返回的 `transform-error` 表示调用方请求不受支持或结构非法。宿主不会发送
 上游 HTTP 请求，也不会调用 buffered/stream 响应插件，而是使用插件公开的 `code/message`
@@ -108,22 +105,19 @@ Dashboard 的组件不会形成两套业务实现。
 
 缓冲响应插件用于下游 `stream=false` 的成功响应，以及所有非 2xx HTTP 响应。
 
-如果上游 2xx body 已经是 JSON，插件会先校验它是标准的 Response object，再提取 effects
-并执行通用响应字段修正；非 2xx JSON 或非 JSON 错误响应仍保持上游状态和 body。如果成功
-响应具有 SSE framing，则按以下顺序转换为一个 Responses JSON：
+如果上游 body 已经是 JSON，插件只提取 effects 并执行通用响应字段转换，不校验它是否为
+标准 Response object；非 2xx JSON 或非 JSON 错误响应仍保持上游状态和 body。如果成功响应
+具有 SSE framing，则按以下顺序转换为一个 JSON：
 
-1. 以请求 `response_context` 为兜底外壳，依次合并 `response.created/in_progress` 和唯一的
-   completed、done、incomplete、failed 或 cancelled 终止对象，越靠后的上游字段优先；
-2. 终止对象的 `output` 缺失或为空时，使用完整 `response.output_item.done.item`；全部事件
+1. 仅采用唯一的 completed、done、incomplete、failed 或 cancelled 终止对象作为最终
+   Response 外壳，不从请求上下文或 `response.created/in_progress` 快照补齐字段；
+2. 终止对象的 `output` 缺失或为空时，使用原始 `response.output_item.done.item`；全部事件
    提供 `output_index` 时按索引排序并要求从零连续，Codex 全部省略索引时才按到达顺序保留；
-3. 不使用文本或工具 delta 臆造 output 内容；done message/reasoning 缺少标准必需 id 时，只
-   根据 response id 和 output index 生成稳定代理 id，并为 done item 补充确定性的 completed
-   状态及 output_text 空 annotations；
-4. 精简终止事件缺少 `object/status/error/incomplete_details/usage` 时按终止类型补齐；缺少
-   `created_at` 时使用上游 HTTP `Date`，不会调用本地时钟伪造时间；
-5. 转换结果会校验标准 Response 外壳、message item、usage 和状态一致性；非法 JSON data、
-   多个终止事件、终止后的 done item、索引冲突或无法重建的字段都会返回插件错误，绝不会把
-   残缺 SSE 作为 `stream=false` 的成功响应返回。
+3. 不使用文本或工具 delta 臆造 output，不生成 item id/status/annotations，也不补充
+   object、status、时间、error、incomplete_details、usage 或 usage 明细；
+4. 插件不校验最终 Response 外壳、output item、usage 或状态是否符合 OpenAI Schema；这些
+   校验由下游负责。非法 SSE JSON、缺少终止事件、多个终止事件、终止后的 done item 或索引
+   冲突等导致转换本身无法确定的情况仍会返回插件错误。
 
 当前 buffered disposition 只有 `respond`，插件自身不会要求宿主重试。
 
@@ -148,8 +142,8 @@ Dashboard 的组件不会形成两套业务实现。
   `reasoning`、`tools`、`tool_choice`、`parallel_tool_calls`、`text`、`truncation`、
   `max_output_tokens` 和 `incomplete_details`，保留错误身份和消息；
 - 流式原生 message、function/custom tool call 和 `image_generation_call` 字段保持不变；
-  buffered 聚合只补充标准非流式对象所需的确定性 id/status/annotations，不改写文本、工具
-  参数、图片结果或其他模型输出语义字段。
+  buffered 聚合也原样保留 done item，不改写 id、status、annotations、文本、工具参数、
+  图片结果或其他模型输出语义字段。
 
 响应 header 会删除 hop-by-hop、`Connection` 声明的动态连接级 header、失效的
 `content-length`、上游 cookie 和鉴权信息。SSE 转 JSON 成功时输出
@@ -189,8 +183,8 @@ buffered 响应和 stream 响应三个插槽，执行 Provider 原生代理流�
 
 宿主允许单个完整 SSE item 最大 500 MiB。stream Component 使用独立的 2 GiB 线性内存
 边界，为 canonical ABI、JSON DOM 及必要重写产生的瞬时副本预留空间；请求和 buffered
-响应 Component 使用 64 MiB 内存边界。插件输出 body 不能超过 64 MiB，请求插件输出的
-`response_context` 不能超过 64 KiB。
+响应 Component 使用 64 MiB 内存边界。插件输出 body 不能超过 64 MiB。请求 ABI 虽保留
+`response_context`，当前插件不会输出它。
 
 ## 构建与上传
 

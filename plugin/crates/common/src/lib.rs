@@ -8,7 +8,6 @@ pub mod functions;
 pub mod headers;
 pub mod request;
 pub mod response;
-pub mod response_context;
 pub mod responses_sse;
 pub mod sse;
 

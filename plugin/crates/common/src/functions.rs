@@ -4,14 +4,13 @@
 //! 测试服务也直接调用同一组函数，从而保证本地验证覆盖的就是实际插件能力。
 
 use serde_json::Value;
-use std::time::UNIX_EPOCH;
 
 use crate::{
     Effects, Header,
     headers::{ResponseHeaderMode, build_account_headers, sanitize_response_headers},
     request::transform_oauth_body,
     response::{effects_from_raw_json, is_terminal_event, transform_response_value},
-    responses_sse::{convert_responses_sse_to_json, validate_non_streaming_response},
+    responses_sse::convert_responses_sse_to_json,
     sse::JsonSseItem,
 };
 
@@ -117,56 +116,43 @@ pub struct BufferedTransformOutput {
     pub effects: Effects,
 }
 
-/// 执行完整的非流式响应插件逻辑，包括上游 SSE 到 Responses JSON 的转换、响应字段
-/// 修正、敏感 header 清理和 usage/maintenance effects 提取。
+/// 执行完整的非流式响应插件逻辑，包括上游 SSE 到 Responses JSON 的转换、敏感 header
+/// 清理和 usage/maintenance effects 提取。转换过程不会根据请求或本地信息补齐响应字段。
 pub fn transform_buffered_response(
     input: BufferedTransformInput,
 ) -> Result<BufferedTransformOutput, PluginError> {
     let BufferedTransformInput {
         response,
-        request_context,
+        // ABI 仍保留该字段，但响应转换明确不使用请求上下文，避免生成上游没有返回的字段。
+        request_context: _,
     } = input;
     let HttpResponse {
         status: upstream_status,
         headers,
         body,
     } = response;
-    let response_date_unix_seconds = response_date_unix_seconds(&headers);
     let mut status = upstream_status;
     let mut converted_from_sse = false;
     let parsed_json = serde_json::from_slice::<Value>(&body).ok();
     let (mut parsed, effects) = if let Some(value) = parsed_json {
-        // HTTP 2xx 的 buffered Responses 必须直接是标准 Response object。若上游返回了
-        // SSE event envelope、HTML 或业务错误 JSON，不能继续以成功响应透传给客户端。
-        if (200..300).contains(&upstream_status) {
-            validate_non_streaming_response(&value).map_err(|message| {
-                PluginError::new(
-                    "invalid_upstream_responses_json",
-                    format!("上游非流式 Responses JSON 结构非法: {message}"),
-                )
-            })?;
-        }
+        // JSON 响应只执行协议转换和 effects 提取，不在插件内复制 Responses Schema。
+        // 最终对象是否符合下游期望由消费方校验，避免插件越权拒绝可透传的新协议字段。
         let effects = effects_from_raw_json(&value, Some(upstream_status), false);
         (Some(value), effects)
     } else if (200..300).contains(&upstream_status) {
-        let converted = convert_responses_sse_to_json(
-            &body,
-            upstream_status,
-            request_context.as_deref(),
-            response_date_unix_seconds,
-        )
-        .map_err(|message| {
-            PluginError::new(
-                "invalid_upstream_responses_sse",
-                format!("上游 buffered Responses SSE 无法转换: {message}"),
-            )
-        })?
-        .ok_or_else(|| {
-            PluginError::new(
-                "invalid_upstream_responses_body",
-                "上游成功响应既不是标准 Responses JSON，也不包含 SSE framing",
-            )
-        })?;
+        let converted = convert_responses_sse_to_json(&body, upstream_status)
+            .map_err(|message| {
+                PluginError::new(
+                    "invalid_upstream_responses_sse",
+                    format!("上游 buffered Responses SSE 无法转换: {message}"),
+                )
+            })?
+            .ok_or_else(|| {
+                PluginError::new(
+                    "invalid_upstream_responses_body",
+                    "上游成功响应既不是 JSON，也不包含 SSE framing",
+                )
+            })?;
         status = converted.status;
         converted_from_sse = true;
         (Some(converted.value), converted.effects)
@@ -193,7 +179,7 @@ pub fn transform_buffered_response(
         // 非 JSON 错误页或空 body 不臆测业务协议，但 header 仍按插件契约执行安全过滤。
         body
     };
-    // 能走到这里的 2xx body 已经确认或转换为 Response JSON，统一输出 JSON Content-Type，
+    // 能走到这里的 2xx body 是上游 JSON 或由 SSE 转成的 JSON，统一输出 JSON Content-Type，
     // 避免上游错误标注为 text/event-stream 后让非流式客户端按 SSE 解析。
     let header_mode = if (200..300).contains(&status) {
         ResponseHeaderMode::Json
@@ -209,18 +195,6 @@ pub fn transform_buffered_response(
         }),
         effects,
     })
-}
-
-/// HTTP Date 是精简 Codex SSE 缺少 `created_at` 时唯一由上游提供的时间依据。解析失败时
-/// 不做本地时钟兜底，后续聚合会明确报错，避免生成事实错误的时间戳。
-fn response_date_unix_seconds(headers: &[Header]) -> Option<i64> {
-    let value = headers
-        .iter()
-        .find(|header| header.name.eq_ignore_ascii_case("date"))
-        .and_then(|header| std::str::from_utf8(&header.value).ok())?;
-    let time = httpdate::parse_http_date(value.trim()).ok()?;
-    let seconds = time.duration_since(UNIX_EPOCH).ok()?.as_secs();
-    i64::try_from(seconds).ok()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
