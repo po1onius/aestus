@@ -18,6 +18,10 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use base64::{
+    Engine,
+    engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD},
+};
 use chrono::{SecondsFormat, Utc};
 use clap::Parser;
 use gpt_codex_plugin_common::{
@@ -243,6 +247,18 @@ fn json_io_error(error: serde_json::Error) -> io::Error {
     io::Error::other(error)
 }
 
+/// `reqwest::Error` 的 Display 通常只包含最外层阶段和 URL。调试服务需要保留完整 source
+/// 链才能区分 DNS、TCP、TLS、代理及 HTTP body 读取错误；错误链不包含请求 header。
+fn format_error_chain(error: &dyn std::error::Error) -> String {
+    let mut messages = vec![error.to_string()];
+    let mut source = error.source();
+    while let Some(error) = source {
+        messages.push(error.to_string());
+        source = error.source();
+    }
+    messages.join(" -> ")
+}
+
 /// 统一处理调试文件的写入错误。记录功能属于测试服务的核心职责，因此一旦文件无法继续
 /// 写入就明确终止当前请求，避免调用方误以为已经生成了一份完整可用的调试记录。
 fn write_trace_record(
@@ -306,15 +322,31 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    // CLI 参数只用于临时覆盖，便于多 workspace 调试；常规启动优先使用刷新后回填或
+    // token.toml 中保留的账号 ID。两处都为空时保持 None，请求插件不会生成账号 header。
+    let argument_account_id = arguments
+        .chatgpt_account_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let configured_account_id = match token_config.chatgpt_account_id.trim() {
+        "" => None,
+        value => Some(value.to_owned()),
+    };
+    let account_id_source = if argument_account_id.is_some() {
+        "command-line"
+    } else if configured_account_id.is_some() {
+        "token-file"
+    } else {
+        "absent"
+    };
+    let chatgpt_account_id = argument_account_id.or(configured_account_id).map(Arc::from);
+    let account_id_present = chatgpt_account_id.is_some();
     let state = AppState {
         client,
         access_token: Arc::from(access_token),
-        chatgpt_account_id: arguments
-            .chatgpt_account_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(Arc::from),
+        chatgpt_account_id,
         responses_upstream_url: Arc::from(arguments.upstream_url.as_str()),
         request_sequence: Arc::new(AtomicU64::new(1)),
     };
@@ -334,7 +366,8 @@ async fn main() {
     info!(
         listen = %arguments.listen,
         responses_upstream = %arguments.upstream_url,
-        account_id_present = arguments.chatgpt_account_id.is_some(),
+        account_id_present,
+        account_id_source,
         authentication_source,
         "Codex 协议测试服务已启动"
     );
@@ -356,18 +389,20 @@ enum TokenResolutionError {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct TokenConfig {
-    /// 按配置文件既定协议保留 `accese_token` 拼写；同时接受常见的 `access_token`
-    /// 作为读取别名，回写时始终归一化为 `accese_token`。
-    #[serde(alias = "access_token")]
-    accese_token: String,
+    access_token: String,
     refresh_token: String,
     client_id: String,
+    /// ChatGPT 多 workspace 路由使用的 Account ID。兼容旧版三字段配置；缺失字段按空值
+    /// 处理，并在下一次 refresh 成功提取到 ID 时自动回填。
+    #[serde(default)]
+    chatgpt_account_id: String,
 }
 
 #[derive(Debug)]
 struct RefreshedTokens {
     access_token: String,
     refresh_token: Option<String>,
+    chatgpt_account_id: Option<String>,
 }
 
 /// 从测试服务目录读取固定的 token.toml。日志只记录字段是否存在，不打印任何凭证值。
@@ -377,9 +412,10 @@ fn load_token_config(path: &Path) -> Result<TokenConfig, String> {
         toml::from_str(&content).map_err(|error| format!("凭证文件不是合法 TOML: {error}"))?;
     info!(
         path = %path.display(),
-        access_token_present = !config.accese_token.trim().is_empty(),
+        access_token_present = !config.access_token.trim().is_empty(),
         refresh_token_present = !config.refresh_token.trim().is_empty(),
         client_id_present = !config.client_id.trim().is_empty(),
+        chatgpt_account_id_present = !config.chatgpt_account_id.trim().is_empty(),
         "已读取 OAuth 凭证文件"
     );
     Ok(config)
@@ -404,7 +440,7 @@ async fn resolve_access_token(
     config: &mut TokenConfig,
     token_file_path: &Path,
 ) -> Result<(String, &'static str), TokenResolutionError> {
-    let access_token = config.accese_token.trim();
+    let access_token = config.access_token.trim();
     if !access_token.is_empty() {
         return Ok((access_token.to_owned(), "token-file-access-token"));
     }
@@ -412,7 +448,7 @@ async fn resolve_access_token(
     let refresh_token = config.refresh_token.trim().to_owned();
     if refresh_token.is_empty() {
         return Err(TokenResolutionError::InvalidConfiguration(
-            "accese_token 和 refresh_token 不能同时为空".to_owned(),
+            "access_token 和 refresh_token 不能同时为空".to_owned(),
         ));
     }
     let client_id = match config.client_id.trim() {
@@ -428,15 +464,24 @@ async fn resolve_access_token(
         .await
         .map_err(TokenResolutionError::RefreshFailed)?;
     let rotated_refresh_token_present = refreshed.refresh_token.is_some();
-    config.accese_token = refreshed.access_token.clone();
+    config.access_token = refreshed.access_token.clone();
     if let Some(refresh_token) = refreshed.refresh_token {
         config.refresh_token = refresh_token;
+    }
+    let refreshed_account_id_present = refreshed.chatgpt_account_id.is_some();
+    if let Some(chatgpt_account_id) = refreshed.chatgpt_account_id {
+        config.chatgpt_account_id = chatgpt_account_id;
     }
     config.client_id = client_id;
     persist_token_config(token_file_path, config).map_err(|message| {
         TokenResolutionError::RefreshFailed(format!("OAuth 刷新成功，但{message}"))
     })?;
-    info!(rotated_refresh_token_present, "OAuth 刷新结果已完整保存");
+    info!(
+        rotated_refresh_token_present,
+        refreshed_account_id_present,
+        effective_account_id_present = !config.chatgpt_account_id.trim().is_empty(),
+        "OAuth 刷新结果已完整保存"
+    );
     Ok((refreshed.access_token, "token-file-refresh-token"))
 }
 
@@ -487,11 +532,60 @@ async fn exchange_refresh_token(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
-    info!("已通过 refresh token 获取 access token");
+    let chatgpt_account_id = extract_refreshed_chatgpt_account_id(&value, access_token);
+    info!(
+        chatgpt_account_id_present = chatgpt_account_id.is_some(),
+        "已通过 refresh token 获取 OAuth 身份"
+    );
     Ok(RefreshedTokens {
         access_token: access_token.to_owned(),
         refresh_token,
+        chatgpt_account_id,
     })
+}
+
+/// 按 OAuth 响应的显式字段、id_token、access_token 顺序提取 ChatGPT Account ID。
+/// JWT payload 只用于取得上游路由提示，不参与本地认证决策；bearer token 的真实性仍由
+/// OpenAI 上游验证，因此这里不重复实现 JWT 签名校验。
+fn extract_refreshed_chatgpt_account_id(value: &Value, access_token: &str) -> Option<String> {
+    value
+        .get("chatgpt_account_id")
+        .and_then(Value::as_str)
+        .and_then(non_empty_owned)
+        .or_else(|| {
+            value
+                .get("id_token")
+                .and_then(Value::as_str)
+                .and_then(extract_chatgpt_account_id_from_jwt)
+        })
+        .or_else(|| extract_chatgpt_account_id_from_jwt(access_token))
+}
+
+fn extract_chatgpt_account_id_from_jwt(token: &str) -> Option<String> {
+    let payload = token.split('.').nth(1)?;
+    let decoded = URL_SAFE_NO_PAD
+        .decode(payload)
+        .or_else(|_| URL_SAFE.decode(payload))
+        .ok()?;
+    let value: Value = serde_json::from_slice(&decoded).ok()?;
+    value
+        .get("chatgpt_account_id")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            value
+                .get("https://api.openai.com/auth")
+                .and_then(Value::as_object)
+                .and_then(|auth| auth.get("chatgpt_account_id"))
+                .and_then(Value::as_str)
+        })
+        .and_then(non_empty_owned)
+}
+
+fn non_empty_owned(value: &str) -> Option<String> {
+    match value.trim() {
+        "" => None,
+        value => Some(value.to_owned()),
+    }
 }
 
 /// 只提取 OAuth 错误码并映射为固定说明，避免服务端错误正文意外回显凭证后进入日志。
@@ -615,17 +709,14 @@ async fn create_response(
     {
         Ok(response) => response,
         Err(error) => {
-            error!(request_id, error = %error, "请求 Codex 上游失败");
+            let error_detail = format_error_chain(&error);
+            error!(request_id, error = %error_detail, "请求 Codex 上游失败");
             write_trace_record(&mut trace, request_id, |trace| {
-                trace.write_error(
-                    "请求 Codex 上游",
-                    "upstream_request_failed",
-                    &error.to_string(),
-                )
+                trace.write_error("请求 Codex 上游", "upstream_request_failed", &error_detail)
             })?;
             return Err(ServiceError::bad_gateway(
                 "upstream_request_failed",
-                error.to_string(),
+                error_detail,
             ));
         }
     };
