@@ -40,8 +40,8 @@ Dashboard 的组件不会形成两套业务实现。
 - 删除 `prompt=null`，并拒绝非空的顶层 `prompt`。非空值用于引用标准 Responses API 的
   可复用 Prompt 模板，但 ChatGPT Codex OAuth 上游不支持；请改用 `instructions` 和
   `input`；
-- 归一化已知 Codex model alias，并从 `-minimal/-none/-low/-medium/-high/-xhigh` 后缀
-  推导 reasoning effort；未知 model 保持调用方原值；
+- `model` 作为不透明的上游路由标识原样透传；插件不解析 alias、版本或 effort 后缀，也不
+  使用 model 推导任何其他请求字段；
 - 删除 Codex OAuth 上游不支持的字段：`max_output_tokens`、`temperature`、`top_p`、
   `frequency_penalty`、`presence_penalty`、`user`、`metadata`、
   `prompt_cache_retention`、`safety_identifier` 和 `stream_options`；
@@ -49,7 +49,7 @@ Dashboard 的组件不会形成两套业务实现。
   `reasoning` 非空而自动添加 `reasoning.encrypted_content`；
 - 将 `service_tier=fast` 归一化为 `priority`；`text` 完全保持调用方原值，插件不再针对
   `text.verbosity` 做模型判断或删除；
-- `instructions` 缺失或为空时，按照调用方的原始 model 注入对应的内置 Codex base prompt；
+- `instructions` 缺失或为空时，注入固定的内置 Codex base prompt，不根据 model 选择；
 - 将 input 中的 `role=system` 原位改为 `developer`，不会重复复制到顶层 `instructions`；
 - 将字符串 `input` 转为 user message 数组；空字符串转为空数组；
 - 所有 input item 的 `id` 以及 `item_reference` 完全保持调用方原值，不再判断续链输入或
