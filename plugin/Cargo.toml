@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "crates/common",
+    "crates/utils",
     "crates/request",
     "crates/buffered-response",
     "crates/stream-response",

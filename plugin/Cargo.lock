@@ -30,12 +30,13 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 name = "gpt-codex-buffered-response-plugin"
 version = "0.1.0"
 dependencies = [
- "gpt-codex-plugin-common",
+ "gpt-codex-plugin-utils",
+ "serde_json",
  "wit-bindgen",
 ]
 
 [[package]]
-name = "gpt-codex-plugin-common"
+name = "gpt-codex-plugin-utils"
 version = "0.1.0"
 dependencies = [
  "serde",
@@ -46,7 +47,6 @@ dependencies = [
 name = "gpt-codex-request-plugin"
 version = "0.1.0"
 dependencies = [
- "gpt-codex-plugin-common",
  "serde_json",
  "wit-bindgen",
 ]
@@ -55,7 +55,7 @@ dependencies = [
 name = "gpt-codex-stream-response-plugin"
 version = "0.1.0"
 dependencies = [
- "gpt-codex-plugin-common",
+ "gpt-codex-plugin-utils",
  "serde_json",
  "wit-bindgen",
 ]

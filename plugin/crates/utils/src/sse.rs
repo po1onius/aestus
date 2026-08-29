@@ -12,18 +12,21 @@ pub fn body_has_sse_framing(body: &[u8]) -> bool {
     })
 }
 
-/// 严格解析完整 SSE body 中的 JSON data payload。
+/// 严格遍历完整 SSE body 中的 JSON data payload。
 ///
 /// buffered 转非流式响应必须知道是否丢失了任何事件，因此非空且不是 `[DONE]` 的 data
 /// 一旦无法解析就立即报错。多行 data 严格按照 SSE 规范用换行拼接，不兼容缺少事件空行
-/// 的畸形传输；这种上游协议错误不能被悄悄解释成多条独立事件。
-pub fn parse_json_data_values(body: &[u8]) -> Result<Option<Vec<Value>>, String> {
+/// 的畸形传输；这种上游协议错误不能被悄悄解释成多条独立事件。每个 JSON value 在回调
+/// 返回后立即释放，避免把不会参与最终响应构造的 delta 事件全部保存在内存中。
+pub fn try_for_each_json_data_value(
+    body: &[u8],
+    mut visit: impl FnMut(Value) -> Result<(), String>,
+) -> Result<bool, String> {
     if !body_has_sse_framing(body) {
-        return Ok(None);
+        return Ok(false);
     }
     let text =
         std::str::from_utf8(body).map_err(|error| format!("SSE 响应体不是合法 UTF-8: {error}"))?;
-    let mut values = Vec::new();
     let mut data_lines = Vec::<&str>::new();
     for raw_line in text.split('\n') {
         let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
@@ -32,15 +35,18 @@ pub fn parse_json_data_values(body: &[u8]) -> Result<Option<Vec<Value>>, String>
             continue;
         }
         if line.is_empty() {
-            parse_json_event_data(&data_lines, &mut values)?;
+            visit_json_event_data(&data_lines, &mut visit)?;
             data_lines.clear();
         }
     }
-    parse_json_event_data(&data_lines, &mut values)?;
-    Ok(Some(values))
+    visit_json_event_data(&data_lines, &mut visit)?;
+    Ok(true)
 }
 
-fn parse_json_event_data(lines: &[&str], values: &mut Vec<Value>) -> Result<(), String> {
+fn visit_json_event_data(
+    lines: &[&str],
+    visit: &mut impl FnMut(Value) -> Result<(), String>,
+) -> Result<(), String> {
     if lines.is_empty() {
         return Ok(());
     }
@@ -51,8 +57,7 @@ fn parse_json_event_data(lines: &[&str], values: &mut Vec<Value>) -> Result<(), 
     }
     let value = serde_json::from_str::<Value>(data)
         .map_err(|error| format!("SSE data 不是合法 JSON: {error}"))?;
-    values.push(value);
-    Ok(())
+    visit(value)
 }
 
 /// 遍历完整 SSE body 中的 JSON data payload。

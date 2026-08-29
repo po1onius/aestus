@@ -1,7 +1,8 @@
 # Codex 协议测试服务
 
-本目录是独立的 Cargo 项目，不属于 `plugin` workspace。服务通过 path dependency 直接复用
-`plugin/crates/common` 的转换实现，用于真实调用 Codex 账号端点并验证 Responses 插件转换。
+本目录是独立的 Cargo 项目，不属于 `plugin` workspace。服务通过 path dependency 分别调用
+`plugin/crates/request`、`buffered-response` 和 `stream-response` 的独立转换入口，并只从
+`plugin/crates/utils` 复用通用 SSE 工具，用于真实调用 Codex 账号端点并验证 Responses 插件转换。
 
 服务提供本地 `POST /v1/responses`。它会在返回前检查最终 JSON/SSE 是否符合 Responses API
 的核心结构；校验失败返回 502 和 `plugin_test_error`。日志会记录请求大小、模型、上游状态

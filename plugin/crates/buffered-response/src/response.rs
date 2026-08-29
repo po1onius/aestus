@@ -1,27 +1,14 @@
 use serde_json::Value;
 
-use crate::{Effects, Feedback, LimitFeedback, StreamFailure, Usage};
+use crate::{Effects, Feedback, LimitFeedback, Usage};
 
 /// 必须在修改 JSON 之前调用：response.failed 的下游瘦身会删除 `response.usage`，
 /// maintenance/usage/failure 则必须依据上游原始事实生成。
-pub fn effects_from_raw_json(value: &Value, status: Option<u16>, stream: bool) -> Effects {
+pub fn effects_from_raw_json(value: &Value, status: Option<u16>) -> Effects {
     let error = ErrorView::from_value(value);
     Effects {
         feedback: feedback_from_error(status, error.as_ref()),
         usage: extract_usage(value),
-        failure: (stream && is_failed_event(value)).then(|| StreamFailure {
-            kind: error
-                .as_ref()
-                .and_then(|error| error.code.as_deref().or(error.kind.as_deref()))
-                .filter(|value| !value.is_empty())
-                .unwrap_or("response_failed")
-                .to_owned(),
-            message: error
-                .as_ref()
-                .map(ErrorView::reason)
-                .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| "OpenAI upstream response failed".to_owned()),
-        }),
     }
 }
 
@@ -59,19 +46,6 @@ pub fn extract_usage(value: &Value) -> Option<Usage> {
         reasoning_output_tokens,
         total_tokens,
     })
-}
-
-pub fn is_terminal_event(value: &Value) -> bool {
-    matches!(
-        value.get("type").and_then(Value::as_str).map(str::trim),
-        Some(
-            "response.completed"
-                | "response.done"
-                | "response.failed"
-                | "response.incomplete"
-                | "response.cancelled"
-        )
-    )
 }
 
 fn is_failed_event(value: &Value) -> bool {
@@ -271,7 +245,7 @@ mod tests {
                 }
             }
         });
-        let effects = effects_from_raw_json(&value, Some(200), true);
+        let effects = effects_from_raw_json(&value, Some(200));
         assert_eq!(
             effects.usage,
             Some(Usage {
@@ -286,7 +260,6 @@ mod tests {
             effects.feedback,
             Some(Feedback::EntitlementMissing(_))
         ));
-        assert_eq!(effects.failure.unwrap().kind, "usage_not_included");
 
         transform_response_value(&mut value);
         assert!(value.pointer("/response/usage").is_none());
@@ -321,9 +294,8 @@ mod tests {
             "type":"response.failed",
             "response":{"error":{"code":"content_policy","message":"blocked"}}
         });
-        let effects = effects_from_raw_json(&value, Some(200), true);
+        let effects = effects_from_raw_json(&value, Some(200));
         assert!(effects.feedback.is_none());
-        assert!(effects.failure.is_some());
     }
 
     #[test]
@@ -339,12 +311,12 @@ mod tests {
     fn http_error_statuses_emit_precise_feedback() {
         let value = json!({"error":{"code":"insufficient_quota","message":"no quota"}});
         assert!(matches!(
-            effects_from_raw_json(&value, Some(429), false).feedback,
+            effects_from_raw_json(&value, Some(429)).feedback,
             Some(Feedback::QuotaExhausted(_))
         ));
         let value = json!({"error":{"message":"bad token"}});
         assert!(matches!(
-            effects_from_raw_json(&value, Some(401), false).feedback,
+            effects_from_raw_json(&value, Some(401)).feedback,
             Some(Feedback::AuthenticationRejected(_))
         ));
         let value = json!({
@@ -352,7 +324,7 @@ mod tests {
             "response":{"error":{"code":"server_error","message":"overloaded"}}
         });
         assert!(matches!(
-            effects_from_raw_json(&value, Some(200), true).feedback,
+            effects_from_raw_json(&value, Some(200)).feedback,
             Some(Feedback::TemporarilyUnavailable(_))
         ));
     }

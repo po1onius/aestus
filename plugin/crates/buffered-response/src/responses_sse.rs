@@ -2,12 +2,13 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-use crate::{Effects, response::effects_from_raw_json, sse::parse_json_data_values};
+use gpt_codex_plugin_utils::sse::try_for_each_json_data_value;
+
+use crate::{Effects, response::effects_from_raw_json};
 
 /// 成功的 SSE→JSON 转换结果。`effects` 在任何字段改造前从原始终止事件中提取，确保
 /// usage 与 maintenance 不受下游响应瘦身或 output 修复影响。
 pub struct ConvertedResponsesBody {
-    pub status: u16,
     pub value: Value,
     pub effects: Effects,
 }
@@ -22,20 +23,16 @@ pub fn convert_responses_sse_to_json(
     body: &[u8],
     upstream_status: u16,
 ) -> Result<Option<ConvertedResponsesBody>, String> {
-    let Some(events) = parse_json_data_values(body)? else {
-        return Ok(None);
-    };
     let mut terminal_event = None::<Value>;
     let mut terminal_type = None::<String>;
     let mut done_items = Vec::<DoneItem>::new();
-    let mut seen_done_identities = BTreeMap::<String, (Option<usize>, Value)>::new();
 
-    for event in events {
+    let has_sse_framing = try_for_each_json_data_value(body, |mut event| {
         let event_object = event
             .as_object()
             .ok_or_else(|| "Responses SSE data 必须是 JSON object".to_owned())?;
-        let event_type = required_non_empty_string(&event, "type", "SSE event")?;
-        match event_type {
+        let event_type = required_non_empty_string(&event, "type", "SSE event")?.to_owned();
+        match event_type.as_str() {
             "response.created" | "response.in_progress" => {
                 if terminal_event.is_some() {
                     return Err(format!("终止事件之后不能再出现 {event_type}"));
@@ -47,22 +44,12 @@ pub fn convert_responses_sse_to_json(
                 }
                 // done item 只做原值搬运，不校验具体 output item Schema。即使上游返回了新
                 // 类型或非标准结构，也交给最终消费方决定是否接受。
-                let item = event_object
-                    .get("item")
-                    .cloned()
-                    .ok_or_else(|| "response.output_item.done 缺少 item".to_owned())?;
                 let output_index = parse_output_index(event_object.get("output_index"))?;
-                if let Some(identity) = output_item_identity(&item) {
-                    if let Some((previous_index, previous_item)) =
-                        seen_done_identities.get(&identity)
-                    {
-                        if previous_index != &output_index || previous_item != &item {
-                            return Err(format!("同一 output item 标识出现冲突内容: {identity}"));
-                        }
-                        continue;
-                    }
-                    seen_done_identities.insert(identity, (output_index, item.clone()));
-                }
+                let item = event
+                    .as_object_mut()
+                    .expect("SSE data 已校验为 JSON object")
+                    .remove("item")
+                    .ok_or_else(|| "response.output_item.done 缺少 item".to_owned())?;
                 done_items.push(DoneItem { output_index, item });
             }
             "response.completed"
@@ -84,22 +71,28 @@ pub fn convert_responses_sse_to_json(
             }
             _ => {}
         }
+        Ok(())
+    })?;
+    if !has_sse_framing {
+        return Ok(None);
     }
 
-    let terminal = terminal_event.ok_or_else(|| {
+    let mut terminal = terminal_event.ok_or_else(|| {
         "Responses SSE 缺少 completed、done、incomplete、failed 或 cancelled 终止事件".to_owned()
     })?;
-    let effects = effects_from_raw_json(&terminal, Some(upstream_status), false);
-    let mut response = terminal
-        .get("response")
-        .and_then(Value::as_object)
-        .cloned()
+    let effects = effects_from_raw_json(&terminal, Some(upstream_status));
+    let response = terminal
+        .as_object_mut()
+        .expect("终止事件已校验为 JSON object")
+        .remove("response")
         .expect("终止事件的 response 已在事件遍历阶段校验");
+    let Value::Object(mut response) = response else {
+        unreachable!("终止事件的 response 已在事件遍历阶段校验为 JSON object");
+    };
     finalize_response(&mut response, done_items)?;
     let response = Value::Object(response);
 
     Ok(Some(ConvertedResponsesBody {
-        status: upstream_status,
         value: response,
         effects,
     }))
@@ -119,22 +112,6 @@ fn parse_output_index(value: Option<&Value>) -> Result<Option<usize>, String> {
         .and_then(|index| usize::try_from(index).ok())
         .ok_or_else(|| "response.output_item.done.output_index 必须是非负整数".to_owned())?;
     Ok(Some(index))
-}
-
-fn output_item_identity(item: &Value) -> Option<String> {
-    let kind = item.get("type").and_then(Value::as_str)?;
-    item.get("id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .map(|id| format!("{kind}:id:{id}"))
-        .or_else(|| {
-            item.get("call_id")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|call_id| !call_id.is_empty())
-                .map(|call_id| format!("{kind}:call_id:{call_id}"))
-        })
 }
 
 fn finalize_response(
@@ -221,7 +198,6 @@ data: [DONE]
 
 "#;
         let converted = convert(body);
-        assert_eq!(converted.status, 200);
         assert_eq!(converted.value["id"], "resp_1");
         assert_eq!(converted.value["output"][0]["content"][0]["text"], "hello");
         assert_eq!(
@@ -281,9 +257,8 @@ data: {"type":"response.completed","response":{"id":"resp_3","object":"response"
 
 data: [DONE]
 
-"#;
+        "#;
         let converted = convert(body);
-        assert_eq!(converted.status, 200);
         assert_eq!(converted.value["status"], "failed");
         assert_eq!(converted.value["error"]["message"], "overloaded");
         assert!(matches!(
@@ -298,9 +273,8 @@ data: [DONE]
 
 data: [DONE]
 
-"#;
+        "#;
         let converted = convert(body);
-        assert_eq!(converted.status, 200);
         assert_eq!(converted.value["id"], "resp_incomplete");
         assert_eq!(converted.value["status"], "incomplete");
         assert_eq!(

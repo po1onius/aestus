@@ -24,14 +24,18 @@ use base64::{
 };
 use chrono::{SecondsFormat, Utc};
 use clap::Parser;
-use gpt_codex_plugin_common::{
-    Effects, Header,
-    functions::{
-        AccountResource, BufferedDisposition, BufferedTransformInput, HttpResponse,
-        RequestTransformInput, ResponseHead, ResponseMode, StreamResponseTransformer,
-        StreamStartInput, transform_buffered_response, transform_request,
-    },
-    sse::{JsonSseItem, body_has_sse_framing, split_sse_items},
+use gpt_codex_buffered_response_plugin::{
+    BufferedDisposition, BufferedTransformInput, Effects as BufferedEffects,
+    Header as BufferedHeader, HttpResponse as BufferedHttpResponse, transform_buffered_response,
+};
+use gpt_codex_plugin_utils::sse::{JsonSseItem, body_has_sse_framing, split_sse_items};
+use gpt_codex_request_plugin::{
+    AccountResource, Header as RequestHeader, RequestTransformInput, ResponseMode,
+    transform_request,
+};
+use gpt_codex_stream_response_plugin::{
+    Effects as StreamEffects, Header as StreamHeader, ResponseHead, StreamResponseTransformer,
+    StreamStartInput,
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -44,6 +48,17 @@ const DEFAULT_OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const DEFAULT_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const MAX_REQUEST_BYTES: usize = 512 * 1024 * 1024;
 const TRACE_DIRECTORY_NAME: &str = "trace";
+
+struct Header {
+    name: String,
+    value: Vec<u8>,
+}
+
+struct HttpResponse {
+    status: u16,
+    headers: Vec<Header>,
+    body: Vec<u8>,
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -679,7 +694,7 @@ async fn create_response(
             chatgpt_account_id: state.chatgpt_account_id.as_deref().map(str::to_owned),
             chatgpt_account_is_fedramp: false,
         },
-        headers: from_axum_headers(&headers),
+        headers: request_headers_from_axum(&headers),
         body: body.to_vec(),
     }) {
         Ok(transformed) => transformed,
@@ -754,7 +769,7 @@ async fn create_response(
 async fn send_upstream(
     state: &AppState,
     upstream_url: &str,
-    headers: &[Header],
+    headers: &[RequestHeader],
     body: Vec<u8>,
 ) -> Result<HttpResponse, reqwest::Error> {
     let response = state
@@ -782,7 +797,18 @@ fn handle_buffered_response(
 ) -> Result<Response, ServiceError> {
     let upstream_was_sse = body_has_sse_framing(&response.body);
     let transformed = match transform_buffered_response(BufferedTransformInput {
-        response,
+        response: BufferedHttpResponse {
+            status: response.status,
+            headers: response
+                .headers
+                .into_iter()
+                .map(|header| BufferedHeader {
+                    name: header.name,
+                    value: header.value,
+                })
+                .collect(),
+            body: response.body,
+        },
         request_context,
     }) {
         Ok(transformed) => transformed,
@@ -794,7 +820,7 @@ fn handle_buffered_response(
             return Err(ServiceError::bad_gateway(error.code, error.message));
         }
     };
-    log_effects(request_id, &transformed.effects);
+    log_buffered_effects(request_id, &transformed.effects);
     let BufferedDisposition::Respond(response) = transformed.disposition;
     if upstream_was_sse {
         write_trace_record(trace, request_id, |trace| {
@@ -817,7 +843,18 @@ fn handle_buffered_response(
         status = response.status,
         "Responses JSON 格式校验通过"
     );
-    match build_response(response) {
+    match build_response(HttpResponse {
+        status: response.status,
+        headers: response
+            .headers
+            .into_iter()
+            .map(|header| Header {
+                name: header.name,
+                value: header.value,
+            })
+            .collect(),
+        body: response.body,
+    }) {
         Ok(response) => {
             write_trace_record(trace, request_id, |trace| {
                 trace.write_text_section(
@@ -853,7 +890,16 @@ fn handle_stream_response(
     } = response;
     let mut transformer = StreamResponseTransformer::default();
     let head = match transformer.start(StreamStartInput {
-        head: ResponseHead { status, headers },
+        head: ResponseHead {
+            status,
+            headers: headers
+                .into_iter()
+                .map(|header| StreamHeader {
+                    name: header.name,
+                    value: header.value,
+                })
+                .collect(),
+        },
         request_context,
     }) {
         Ok(head) => head,
@@ -885,7 +931,7 @@ fn handle_stream_response(
                 return Err(ServiceError::bad_gateway(error.code, error.message));
             }
         };
-        log_effects(request_id, &transformed.effects);
+        log_stream_effects(request_id, &transformed.effects);
         if let Some(item) = transformed.item {
             transformed_body.extend_from_slice(&item);
         }
@@ -899,7 +945,7 @@ fn handle_stream_response(
             return Err(ServiceError::bad_gateway(error.code, error.message));
         }
     };
-    log_effects(request_id, &finished.effects);
+    log_stream_effects(request_id, &finished.effects);
     for item in finished.items {
         transformed_body.extend_from_slice(&item);
     }
@@ -918,7 +964,14 @@ fn handle_stream_response(
     );
     match build_response(HttpResponse {
         status: head.status,
-        headers: head.headers,
+        headers: head
+            .headers
+            .into_iter()
+            .map(|header| Header {
+                name: header.name,
+                value: header.value,
+            })
+            .collect(),
         body: transformed_body,
     }) {
         Ok(response) => {
@@ -1097,17 +1150,17 @@ fn build_response(response: HttpResponse) -> Result<Response, ServiceError> {
         .map_err(|error| ServiceError::internal(error.to_string()))
 }
 
-fn from_axum_headers(headers: &HeaderMap) -> Vec<Header> {
+fn request_headers_from_axum(headers: &HeaderMap) -> Vec<RequestHeader> {
     headers
         .iter()
-        .map(|(name, value)| Header {
+        .map(|(name, value)| RequestHeader {
             name: name.as_str().to_owned(),
             value: value.as_bytes().to_vec(),
         })
         .collect()
 }
 
-fn to_reqwest_headers(headers: &[Header]) -> reqwest::header::HeaderMap {
+fn to_reqwest_headers(headers: &[RequestHeader]) -> reqwest::header::HeaderMap {
     let mut output = reqwest::header::HeaderMap::new();
     for header in headers {
         let Ok(name) = reqwest::header::HeaderName::from_bytes(header.name.as_bytes()) else {
@@ -1154,7 +1207,24 @@ fn summarize_request(body: &[u8]) -> RequestSummary {
     }
 }
 
-fn log_effects(request_id: u64, effects: &Effects) {
+fn log_buffered_effects(request_id: u64, effects: &BufferedEffects) {
+    if let Some(usage) = effects.usage {
+        info!(
+            request_id,
+            input_tokens = usage.input_tokens,
+            cached_input_tokens = usage.cached_input_tokens,
+            output_tokens = usage.output_tokens,
+            reasoning_output_tokens = usage.reasoning_output_tokens,
+            total_tokens = usage.total_tokens,
+            "插件提取到累计 usage"
+        );
+    }
+    if let Some(feedback) = effects.feedback.as_ref() {
+        warn!(request_id, feedback = ?feedback, "插件产生上游 maintenance feedback");
+    }
+}
+
+fn log_stream_effects(request_id: u64, effects: &StreamEffects) {
     if let Some(usage) = effects.usage {
         info!(
             request_id,

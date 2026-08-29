@@ -17,15 +17,19 @@ Codex OAuth 上游固定使用 SSE。下游传入 `stream=false` 时，套件会
 
 ## 函数调用接口
 
-实际转换能力集中在 `gpt-codex-plugin-common::functions`，不依赖 WASM 或 WIT 类型，可由
-普通 Rust 程序直接调用：
+三个插件分别拥有自己的完整转换实现，不依赖其他插件的业务类型或业务函数。每个 crate
+公开不依赖 WASM/WIT 的 Rust 入口，可由普通 Rust 程序直接调用：
 
-- `transform_request`：改造 OAuth 请求 header/body，并返回下游响应模式；
-- `transform_buffered_response`：处理非流式 JSON、错误响应以及完整 SSE 到 JSON 的转换；
-- `StreamResponseTransformer::{start, transform_item, finish}`：处理一条流式响应的完整生命周期。
+- `gpt-codex-request-plugin::transform_request`：改造 OAuth 请求 header/body，并返回下游响应模式；
+- `gpt-codex-buffered-response-plugin::transform_buffered_response`：处理非流式 JSON、错误响应
+  以及完整 SSE 到 JSON 的转换；
+- `gpt-codex-stream-response-plugin::StreamResponseTransformer`：处理一条流式响应的完整生命周期。
 
-三个 WASM Component 只负责 WIT 类型映射，内部调用同一组函数，因此函数调用和上传到
-Dashboard 的组件不会形成两套业务实现。
+`gpt-codex-plugin-utils` 只提供通用 SSE framing 解析、切分和重渲染工具，不包含请求字段、
+响应字段、header、usage、maintenance、重试或聚合规则。buffered 与 stream 即使当前存在
+相同响应规则，也各自在自己的 crate 内实现，后续修改不会隐式改变另一个插件。三个 WASM
+Component 只负责各自 WIT 类型映射，因此 Rust 函数入口和上传到 Dashboard 的组件仍使用
+同一份插件内业务实现。
 
 ## 请求转换
 
@@ -130,15 +134,19 @@ buffered 响应插件也不会使用请求上下文补齐 Response，避免把�
 - 没有 JSON data 的合法 SSE item 原样透传；
 - data 是 JSON 时先从原始事件提取 effects，再执行通用响应字段修正；
 - 非终止事件不会上报 usage；同一条流中的 maintenance feedback 最多上报一次；
+- `response.failed` 的 `error.code` 为 `usage_not_included` 或 `insufficient_quota` 时，先按
+  原始事件上报 effects，再把整个下游 item 替换为固定的 `rate_limit_exceeded` client retry
+  事件，与网关 GPT 原生 SSE observer 的行为一致；
 - JSON 没有变化时保留原始 item 字节；发生变化时仅重新序列化 data，保留
   `event/id/retry/comment` 以及 CRLF/LF 风格；
 - `finish` 不追加事件，只重置该实例的生命周期状态。
 
 ## 通用响应字段和 Header
 
-非流式 JSON 与每个 SSE data JSON 共用以下字段修正：
+非流式插件与流式插件分别实现并遵循以下字段修正规则：
 
-- `response.failed` 发给下游前删除 `instructions`、`output`、`usage`、`metadata`、
+- 除上述会替换为 client retry event 的两种账号额度失败外，`response.failed` 发给下游前
+  删除 `instructions`、`output`、`usage`、`metadata`、
   `reasoning`、`tools`、`tool_choice`、`parallel_tool_calls`、`text`、`truncation`、
   `max_output_tokens` 和 `incomplete_details`，保留错误身份和消息；
 - 流式原生 message、function/custom tool call 和 `image_generation_call` 字段保持不变；
