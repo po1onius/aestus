@@ -22,7 +22,7 @@ use crate::{
         self, StreamPluginBatchOutput,
         model::{PluginBinding, PluginSlot},
         runtime::{
-            BufferedPluginDisposition, BufferedPluginInput, PluginEffects, PluginResponseMode,
+            BufferedPluginDisposition, BufferedPluginInput, PluginEffects, PluginResponseContext,
             RawPluginResponse, RequestPluginInput, StreamPluginFinishOutput,
             StreamPluginItemOutput, StreamPluginSession,
         },
@@ -502,12 +502,10 @@ struct ReceivedUpstreamResponse {
     plugin_response_input: Option<PluginAttemptResponseInput>,
 }
 
-/// 请求插件为响应阶段生成的全部 attempt-local 输入。把模式与透明 context 包在同一个
-/// `Option` 中，使类型直接表达“无请求插件时二者都不存在”，避免后续扩展时产生半初始化
-/// 状态；该值始终和实际发出的请求一起移动，重试或切换资源不会串用上一 attempt 的数据。
+/// 请求插件为响应阶段生成的 attempt-local context。外层 `Option` 直接表达是否执行了请求
+/// 插件；该值始终和实际发出的请求一起移动，重试或切换资源不会串用上一 attempt 的模式。
 struct PluginAttemptResponseInput {
-    response_mode: PluginResponseMode,
-    request_context: Option<Bytes>,
+    response_context: PluginResponseContext,
 }
 
 /// 插件模式只复用 provider 的目标地址选择；原生 header 白名单、资源 override 和
@@ -550,11 +548,9 @@ async fn prepare_plugin_upstream_request<P: ProviderProtocol>(
         method = %method,
         upstream_header_count = output.headers.len(),
         upstream_body_bytes = output.body.len(),
-        plugin_response_mode = output.response_mode.as_str(),
-        plugin_context_present = output.response_context.is_some(),
-        plugin_context_bytes = output.response_context.as_ref().map_or(0, Bytes::len),
+        plugin_response_mode = output.response_context.response_mode_str(),
         http_client_profile = client_profile.as_str(),
-        "插件输出已成为本次 attempt 的最终上游 header/body，透明 context 已绑定到该 attempt"
+        "插件输出已成为本次 attempt 的最终上游 header/body，响应 context 已绑定到该 attempt"
     );
 
     Ok(PreparedUpstreamRequest {
@@ -564,8 +560,7 @@ async fn prepare_plugin_upstream_request<P: ProviderProtocol>(
         headers: output.headers,
         body: reqwest::Body::from(output.body),
         plugin_response_input: Some(PluginAttemptResponseInput {
-            response_mode: output.response_mode,
-            request_context: output.response_context,
+            response_context: output.response_context,
         }),
     })
 }
@@ -701,10 +696,8 @@ async fn handle_response<P: ProviderProtocol>(
         response: upstream_response,
         plugin_response_input,
     } = upstream;
-    let (response_mode, request_context) = match plugin_response_input {
-        Some(input) => (Some(input.response_mode), input.request_context),
-        None => (None, None),
-    };
+    let response_context = plugin_response_input.map(|input| input.response_context);
+    let response_mode = response_context.map(|context| context.response_mode);
     let status = upstream_response.status();
     let raw_headers = upstream_response.headers().clone();
     let upstream_declares_sse = is_sse_response(&raw_headers);
@@ -731,7 +724,7 @@ async fn handle_response<P: ProviderProtocol>(
             resource_type = attempt.resource_kind.as_str(),
             resource_id = %attempt.resource_id,
             upstream_status = status.as_u16(),
-            request_plugin_response_mode = response_mode.map(PluginResponseMode::as_str),
+            request_plugin_response_mode = response_mode.map(response_mode_as_str),
             response_mode_source,
             upstream_declares_sse,
             selected_plugin_slot = response_slot.as_str(),
@@ -746,8 +739,7 @@ async fn handle_response<P: ProviderProtocol>(
     };
 
     if is_stream {
-        let context_bytes = request_context.as_ref().map_or(0, Bytes::len);
-        let output = plugin::start_stream(state, binding, status, raw_headers, request_context)
+        let output = plugin::start_stream(state, binding, status, raw_headers, response_context)
             .await
             .map_err(ProtocolFailure::adapter)?;
         info!(
@@ -760,8 +752,8 @@ async fn handle_response<P: ProviderProtocol>(
             upstream_status = status.as_u16(),
             downstream_status = output.status.as_u16(),
             downstream_header_count = output.headers.len(),
-            plugin_context_present = context_bytes > 0,
-            plugin_context_bytes = context_bytes,
+            response_context_present = response_context.is_some(),
+            response_context_mode = response_context.map(PluginResponseContext::response_mode_str),
             "stream 响应插件已完全接管响应头和原始 SSE item"
         );
         return Ok((
@@ -795,7 +787,6 @@ async fn handle_response<P: ProviderProtocol>(
             "响应插件接管的上游 HTTP 失败正文已完整写入 tracing"
         );
     }
-    let context_bytes = request_context.as_ref().map_or(0, Bytes::len);
     let output = plugin::execute_buffered(
         state,
         binding,
@@ -805,7 +796,7 @@ async fn handle_response<P: ProviderProtocol>(
                 headers: raw_headers,
                 body,
             },
-            request_context,
+            response_context,
         },
     )
     .await
@@ -817,9 +808,9 @@ async fn handle_response<P: ProviderProtocol>(
         resource_id = %attempt.resource_id,
         plugin_release_id = %binding.release_id,
         plugin_slot = response_slot.as_str(),
-        plugin_context_present = context_bytes > 0,
-        plugin_context_bytes = context_bytes,
-        "buffered 响应插件已消费本次 attempt 的透明请求 context"
+        response_context_present = response_context.is_some(),
+        response_context_mode = response_context.map(PluginResponseContext::response_mode_str),
+        "buffered 响应插件已完成本次 attempt 的响应转换"
     );
     let feedback = output.effects.feedback;
     let usage = output.effects.usage;
@@ -884,17 +875,20 @@ fn is_sse_response(headers: &HeaderMap) -> bool {
 /// 和 body 一次性交给 buffered 插件产生 maintenance 回执、重试指令或最终错误响应。
 fn should_use_stream_response(
     status: StatusCode,
-    response_mode: Option<PluginResponseMode>,
+    response_mode: Option<bool>,
     headers: &HeaderMap,
 ) -> bool {
     if !status.is_success() {
         return false;
     }
     match response_mode {
-        Some(PluginResponseMode::Stream) => true,
-        Some(PluginResponseMode::Buffered) => false,
+        Some(response_mode) => response_mode,
         None => is_sse_response(headers),
     }
+}
+
+const fn response_mode_as_str(response_mode: bool) -> &'static str {
+    if response_mode { "stream" } else { "buffered" }
 }
 
 fn finish_buffered_response(

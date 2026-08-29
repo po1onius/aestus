@@ -26,16 +26,16 @@ use chrono::{SecondsFormat, Utc};
 use clap::Parser;
 use gpt_codex_buffered_response_plugin::{
     BufferedDisposition, BufferedTransformInput, Effects as BufferedEffects,
-    Header as BufferedHeader, HttpResponse as BufferedHttpResponse, transform_buffered_response,
+    Header as BufferedHeader, HttpResponse as BufferedHttpResponse,
+    ResponseContext as BufferedResponseContext, transform_buffered_response,
 };
 use gpt_codex_plugin_utils::sse::{JsonSseItem, body_has_sse_framing, split_sse_items};
 use gpt_codex_request_plugin::{
-    AccountResource, Header as RequestHeader, RequestTransformInput, ResponseMode,
-    transform_request,
+    AccountResource, Header as RequestHeader, RequestTransformInput, transform_request,
 };
 use gpt_codex_stream_response_plugin::{
-    Effects as StreamEffects, Header as StreamHeader, ResponseHead, StreamResponseTransformer,
-    StreamStartInput,
+    Effects as StreamEffects, Header as StreamHeader, ResponseContext as StreamResponseContext,
+    ResponseHead, StreamResponseTransformer, StreamStartInput,
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -747,20 +747,19 @@ async fn create_response(
     })?;
 
     // 与真实宿主一致：非 2xx 永远走 buffered；成功响应才使用请求插件声明的模式。
-    if !(200..300).contains(&upstream.status)
-        || transformed_request.response_mode == ResponseMode::Buffered
+    if !(200..300).contains(&upstream.status) || !transformed_request.response_context.response_mode
     {
         handle_buffered_response(
             request_id,
             upstream,
-            transformed_request.response_context,
+            transformed_request.response_context.response_mode,
             &mut trace,
         )
     } else {
         handle_stream_response(
             request_id,
             upstream,
-            transformed_request.response_context,
+            transformed_request.response_context.response_mode,
             &mut trace,
         )
     }
@@ -792,7 +791,7 @@ async fn send_upstream(
 fn handle_buffered_response(
     request_id: u64,
     response: HttpResponse,
-    request_context: Option<Vec<u8>>,
+    response_mode: bool,
     trace: &mut TraceRecorder,
 ) -> Result<Response, ServiceError> {
     let upstream_was_sse = body_has_sse_framing(&response.body);
@@ -809,7 +808,7 @@ fn handle_buffered_response(
                 .collect(),
             body: response.body,
         },
-        request_context,
+        response_context: Some(BufferedResponseContext { response_mode }),
     }) {
         Ok(transformed) => transformed,
         Err(error) => {
@@ -880,7 +879,7 @@ fn handle_buffered_response(
 fn handle_stream_response(
     request_id: u64,
     response: HttpResponse,
-    request_context: Option<Vec<u8>>,
+    response_mode: bool,
     trace: &mut TraceRecorder,
 ) -> Result<Response, ServiceError> {
     let HttpResponse {
@@ -900,7 +899,7 @@ fn handle_stream_response(
                 })
                 .collect(),
         },
-        request_context,
+        response_context: Some(StreamResponseContext { response_mode }),
     }) {
         Ok(head) => head,
         Err(error) => {

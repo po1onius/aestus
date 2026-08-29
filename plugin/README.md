@@ -36,8 +36,9 @@ Component 只负责各自 WIT 类型映射，因此 Rust 函数入口和上传�
 请求插件会执行以下操作：
 
 - 请求体必须是 JSON object，并且包含非空字符串 `model`；
-- 保存调用方原始 `stream`。只有原始值为布尔 `true` 时输出 `response-mode=stream`，
-  其他情况输出 `buffered`；
+- 保存调用方原始 `stream`。请求输出统一使用 `response-context` record，其中
+  `response-mode=true` 表示 stream，`false` 表示 buffered；只有原始值为布尔 `true`
+  时才输出 `true`；
 - 发给 Codex 上游的 body 无论下游模式如何，都固定为 `store=false`、`stream=true`；
 - 拒绝非空 `previous_response_id`。HTTP `/v1/responses` 不支持 Responses WebSocket v2 的
   连接态续链语义；
@@ -49,7 +50,7 @@ Component 只负责各自 WIT 类型映射，因此 Rust 函数入口和上传�
 - 删除 Codex OAuth 上游不支持的字段：`max_output_tokens`、`temperature`、`top_p`、
   `frequency_penalty`、`presence_penalty`、`user`、`metadata`、
   `prompt_cache_retention`、`safety_identifier` 和 `stream_options`；
-- 将 `reasoning.effort=minimal` 改为 `none`；`include` 完全保持调用方原值，插件不会因
+- `reasoning` 和 `include` 完全保持调用方原值；插件不归一化 `reasoning.effort`，也不会因
   `reasoning` 非空而自动添加 `reasoning.encrypted_content`；
 - 将 `service_tier=fast` 归一化为 `priority`；`text` 完全保持调用方原值，插件不再针对
   `text.verbosity` 做模型判断或删除；
@@ -77,8 +78,10 @@ Component 只负责各自 WIT 类型映射，因此 Rust 函数入口和上传�
 - 将 `role=tool` 转成 `function_call_output`；
 - 对 Spark 模型注入图片能力说明。
 
-请求 ABI 仍保留 `response_context` 字段以维持宿主接口形状，但当前请求插件始终返回空值。
-buffered 响应插件也不会使用请求上下文补齐 Response，避免把请求配置误当成上游响应事实。
+请求 ABI 不再提供独立的 `response-mode` enum 或透明字节 `response-context`。模式被收敛到
+必填的 `response-context.response-mode: bool`。宿主会把同一 record 按 attempt 传给被选中的
+buffered 或 stream 响应插件；未执行请求插件时，响应插件输入中的 `response-context` 为
+`none`。当前响应转换不使用该模式补齐 Response，避免把请求配置误当成上游响应事实。
 
 请求插件主动返回的 `transform-error` 表示调用方请求不受支持或结构非法。宿主不会发送
 上游 HTTP 请求，也不会调用 buffered/stream 响应插件，而是使用插件公开的 `code/message`
@@ -184,15 +187,14 @@ WASM 组件不访问数据库、缓存、文件系统或网络，也没有日志
 buffered 响应和 stream 响应三个插槽，执行 Provider 原生代理流程；混合资源分组会在每次
 调度后按实际资源类型决定。
 
-成功响应优先使用请求插件声明的 `response-mode` 选择响应插槽，不依赖上游
-`Content-Type`。401、429、5xx 等非成功响应固定交给 buffered 插件，以便完整解析错误正文
-和产生 maintenance 回执。如果被选择的响应插槽没有上传组件，宿主会回到 Provider 原生
-响应处理流程。
+成功响应优先使用请求插件声明的 `response-context.response-mode` 选择响应插槽，不依赖
+上游 `Content-Type`。值为 `true` 时选择 stream，值为 `false` 时选择 buffered。401、429、
+5xx 等非成功响应固定交给 buffered 插件，以便完整解析错误正文和产生 maintenance 回执。
+如果被选择的响应插槽没有上传组件，宿主会回到 Provider 原生响应处理流程。
 
 宿主允许单个完整 SSE item 最大 500 MiB。stream Component 使用独立的 2 GiB 线性内存
 边界，为 canonical ABI、JSON DOM 及必要重写产生的瞬时副本预留空间；请求和 buffered
-响应 Component 使用 64 MiB 内存边界。插件输出 body 不能超过 64 MiB。请求 ABI 虽保留
-`response_context`，当前插件不会输出它。
+响应 Component 使用 64 MiB 内存边界。插件输出 body 不能超过 64 MiB。
 
 ## 构建与上传
 
@@ -210,13 +212,16 @@ make build
 套件版本发布。创建网关 API Key 时选择该套件版本即可。调用方原始请求的 inspection、
 模型白名单授权、请求日志和 sticky 调度仍在插件之前由宿主完成。
 
-三个 ABI 的唯一真源分别是：
+共享响应上下文和三个 ABI 的唯一真源分别是：
 
+- [`../srv/wit/plugin-types.wit`](../srv/wit/plugin-types.wit)：共享的
+  `response-context` record；
 - [`../srv/wit/request-transformer.wit`](../srv/wit/request-transformer.wit)
 - [`../srv/wit/buffered-response-transformer.wit`](../srv/wit/buffered-response-transformer.wit)
 - [`../srv/wit/stream-response-transformer.wit`](../srv/wit/stream-response-transformer.wit)
 
-构建会直接引用这些 WIT；宿主 ABI 改动后，插件会在编译阶段发现不兼容。
+三个 ABI 都通过 `use` 引用同一个 `aestus:plugin-types/response-types`，构建会直接加载这些
+WIT；共享类型或宿主 ABI 改动后，插件会在编译阶段发现不兼容。
 
 用于真实调用 Codex 账号端点的验证服务已经独立到仓库根目录的
 [`../codex-proto-test-server`](../codex-proto-test-server)，不属于本插件 workspace 或构建产物。

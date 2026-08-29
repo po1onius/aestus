@@ -79,10 +79,15 @@ pub struct HttpResponse {
     pub body: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResponseContext {
+    pub response_mode: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BufferedTransformInput {
     pub response: HttpResponse,
-    pub request_context: Option<Vec<u8>>,
+    pub response_context: Option<ResponseContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,7 +107,7 @@ pub fn transform_buffered_response(
 ) -> Result<BufferedTransformOutput, PluginError> {
     let BufferedTransformInput {
         response,
-        request_context: _,
+        response_context: _,
     } = input;
     let HttpResponse {
         status: upstream_status,

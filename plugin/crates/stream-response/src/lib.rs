@@ -90,10 +90,15 @@ pub struct ResponseHead {
     pub headers: Vec<Header>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResponseContext {
+    pub response_mode: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamStartInput {
     pub head: ResponseHead,
-    pub request_context: Option<Vec<u8>>,
+    pub response_context: Option<ResponseContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

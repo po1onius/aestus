@@ -1,6 +1,8 @@
 package aestus:buffered-response-transformer@1.0.0;
 
 interface common-types {
+    use aestus:plugin-types/response-types@1.0.0.{response-context};
+
     record header {
         name: string,
         value: list<u8>,
@@ -14,8 +16,8 @@ interface common-types {
 
     record transform-input {
         response: response,
-        /// 同一 attempt 的请求插件输出；请求插槽为空或未产生上下文时为 none。
-        request-context: option<list<u8>>,
+        /// 同一 attempt 的请求插件输出；没有执行请求插件时为 none。
+        response-context: option<response-context>,
     }
 
     record transform-error {

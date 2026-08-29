@@ -1,0 +1,9 @@
+package aestus:plugin-types@1.0.0;
+
+interface response-types {
+    /// 请求插件生成、宿主按 attempt 传递给响应插件的响应阶段上下文。
+    /// `true` 表示成功响应走 stream 插槽，`false` 表示走 buffered 插槽。
+    record response-context {
+        response-mode: bool,
+    }
+}

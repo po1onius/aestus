@@ -3,16 +3,21 @@
 
 use crate::{
     AccountResource as CommonAccountResource, Header as CommonHeader,
-    RequestTransformInput as CommonTransformInput, ResponseMode as CommonResponseMode,
-    transform_request,
+    RequestTransformInput as CommonTransformInput, transform_request,
 };
 
 wit_bindgen::generate!({
-    path: "../../../srv/wit/request-transformer.wit",
-    world: "gpt-request-transformer",
+    path: [
+        "../../../srv/wit/plugin-types.wit",
+        "../../../srv/wit/request-transformer.wit",
+    ],
+    world: "aestus:request-transformer/gpt-request-transformer@1.0.0",
+    with: {
+        "aestus:plugin-types/response-types@1.0.0": generate,
+    },
 });
 
-use aestus::request_transformer::common_types::{Header, ResponseMode};
+use aestus::request_transformer::common_types::{Header, ResponseContext};
 
 struct GptCodexRequestPlugin;
 
@@ -20,11 +25,6 @@ impl Guest for GptCodexRequestPlugin {
     fn transform(input: TransformInput) -> Result<TransformOutput, TransformError> {
         let transformed = transform_request(to_common_input(input))
             .map_err(|error| plugin_error(error.code, error.message))?;
-        let response_mode = match transformed.response_mode {
-            CommonResponseMode::Stream => ResponseMode::Stream,
-            CommonResponseMode::Buffered => ResponseMode::Buffered,
-        };
-
         Ok(TransformOutput {
             headers: transformed
                 .headers
@@ -32,8 +32,9 @@ impl Guest for GptCodexRequestPlugin {
                 .map(from_common_header)
                 .collect(),
             body: transformed.body,
-            response_mode,
-            response_context: transformed.response_context,
+            response_context: ResponseContext {
+                response_mode: transformed.response_context.response_mode,
+            },
         })
     }
 }

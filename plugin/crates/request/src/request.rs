@@ -23,9 +23,6 @@ pub struct OAuthTransformOutput {
     /// 调用方原始请求是否要求 SSE。OAuth 上游 body 随后仍会固定为 `stream=true`，
     /// 因此这个值必须在覆盖字段前保存，供请求插件选择下游响应交付模式。
     pub downstream_streaming: bool,
-    /// WIT ABI 预留字段。当前插件不再通过请求上下文补齐响应字段，始终返回 `None`。
-    /// 保留字段仅为避免改变宿主与已发布组件之间的接口形状。
-    pub response_context: Option<Vec<u8>>,
 }
 
 pub fn transform_oauth_body(body: &[u8]) -> Result<OAuthTransformOutput, String> {
@@ -50,7 +47,6 @@ pub fn transform_oauth_body(body: &[u8]) -> Result<OAuthTransformOutput, String>
         object.remove(*field);
     }
 
-    normalize_reasoning(object);
     normalize_service_tier(object);
 
     // 顶层 instructions 只承载调用方显式指令或 Codex base prompt；system 输入消息单独
@@ -64,8 +60,6 @@ pub fn transform_oauth_body(body: &[u8]) -> Result<OAuthTransformOutput, String>
     Ok(OAuthTransformOutput {
         body,
         downstream_streaming,
-        // 非流式响应只能采用上游实际返回的数据；禁止把请求字段作为响应兜底值。
-        response_context: None,
     })
 }
 
@@ -128,19 +122,6 @@ fn looks_like_message_id(value: &str) -> bool {
         && suffix
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-}
-
-fn normalize_reasoning(object: &mut Map<String, Value>) {
-    let Some(Value::Object(reasoning)) = object.get_mut("reasoning") else {
-        return;
-    };
-    if reasoning
-        .get("effort")
-        .and_then(Value::as_str)
-        .is_some_and(|effort| effort.eq_ignore_ascii_case("minimal"))
-    {
-        reasoning.insert("effort".to_owned(), Value::String("none".to_owned()));
-    }
 }
 
 /// 官方 Responses 将 `fast` 定义为 `priority` 的请求别名，响应也统一回显

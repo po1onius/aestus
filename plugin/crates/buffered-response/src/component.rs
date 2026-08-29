@@ -3,13 +3,19 @@
 use crate::{
     BufferedDisposition as CommonDisposition, BufferedTransformInput as CommonTransformInput,
     Effects as CommonEffects, Feedback as CommonFeedback, Header as CommonHeader,
-    HttpResponse as CommonResponse, LimitFeedback as CommonLimitFeedback, Usage as CommonUsage,
-    transform_buffered_response,
+    HttpResponse as CommonResponse, LimitFeedback as CommonLimitFeedback,
+    ResponseContext as CommonResponseContext, Usage as CommonUsage, transform_buffered_response,
 };
 
 wit_bindgen::generate!({
-    path: "../../../srv/wit/buffered-response-transformer.wit",
-    world: "gpt-buffered-response-transformer",
+    path: [
+        "../../../srv/wit/plugin-types.wit",
+        "../../../srv/wit/buffered-response-transformer.wit",
+    ],
+    world: "aestus:buffered-response-transformer/gpt-buffered-response-transformer@1.0.0",
+    with: {
+        "aestus:plugin-types/response-types@1.0.0": generate,
+    },
 });
 
 use aestus::buffered_response_transformer::common_types::{
@@ -52,7 +58,9 @@ fn to_common_input(input: TransformInput) -> CommonTransformInput {
                 .collect(),
             body: input.response.body,
         },
-        request_context: input.request_context,
+        response_context: input.response_context.map(|context| CommonResponseContext {
+            response_mode: context.response_mode,
+        }),
     }
 }
 

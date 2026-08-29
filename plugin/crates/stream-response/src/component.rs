@@ -4,14 +4,20 @@ use std::cell::RefCell;
 
 use crate::{
     Effects as CommonEffects, Feedback as CommonFeedback, Header as CommonHeader,
-    LimitFeedback as CommonLimitFeedback, ResponseHead as CommonResponseHead,
-    StreamFailure as CommonStreamFailure, StreamResponseTransformer,
-    StreamStartInput as CommonStartInput, Usage as CommonUsage,
+    LimitFeedback as CommonLimitFeedback, ResponseContext as CommonResponseContext,
+    ResponseHead as CommonResponseHead, StreamFailure as CommonStreamFailure,
+    StreamResponseTransformer, StreamStartInput as CommonStartInput, Usage as CommonUsage,
 };
 
 wit_bindgen::generate!({
-    path: "../../../srv/wit/stream-response-transformer.wit",
-    world: "gpt-stream-response-transformer",
+    path: [
+        "../../../srv/wit/plugin-types.wit",
+        "../../../srv/wit/stream-response-transformer.wit",
+    ],
+    world: "aestus:stream-response-transformer/gpt-stream-response-transformer@1.0.0",
+    with: {
+        "aestus:plugin-types/response-types@1.0.0": generate,
+    },
 });
 
 use aestus::stream_response_transformer::common_types::{
@@ -40,7 +46,9 @@ impl Guest for GptCodexStreamResponsePlugin {
                         .map(to_common_header)
                         .collect(),
                 },
-                request_context: input.request_context,
+                response_context: input.response_context.map(|context| CommonResponseContext {
+                    response_mode: context.response_mode,
+                }),
             })
         });
         let transformed = transformed.map_err(from_common_error)?;
