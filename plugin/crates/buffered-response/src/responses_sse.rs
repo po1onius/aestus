@@ -180,7 +180,7 @@ fn required_non_empty_string<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Feedback, Usage};
+    use crate::Usage;
 
     fn convert(body: &[u8]) -> ConvertedResponsesBody {
         convert_responses_sse_to_json(body, 200).unwrap().unwrap()
@@ -252,7 +252,7 @@ data: {"type":"response.completed","response":{"id":"resp_3","object":"response"
     }
 
     #[test]
-    fn failed_event_keeps_standard_response_and_feedback() {
+    fn failed_event_without_account_signal_keeps_standard_response() {
         let body = br#"data: {"type":"response.failed","response":{"id":"resp_failed","object":"response","created_at":0,"status":"failed","error":{"code":"server_error","message":"overloaded"},"incomplete_details":null,"instructions":null,"metadata":{},"model":"gpt-test","output":[],"parallel_tool_calls":true,"tools":[],"tool_choice":"auto","text":{},"truncation":"disabled","temperature":null,"top_p":null,"usage":null}}
 
 data: [DONE]
@@ -261,10 +261,7 @@ data: [DONE]
         let converted = convert(body);
         assert_eq!(converted.value["status"], "failed");
         assert_eq!(converted.value["error"]["message"], "overloaded");
-        assert!(matches!(
-            converted.effects.feedback,
-            Some(Feedback::TemporarilyUnavailable(_))
-        ));
+        assert!(converted.effects.feedback.is_none());
     }
 
     #[test]

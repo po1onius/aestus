@@ -143,7 +143,7 @@ pub fn transform_buffered_response(
     };
 
     let body = if let Some(value) = parsed.as_mut() {
-        let transformed = !converted_from_sse && transform_response_value(value);
+        let transformed = !converted_from_sse && transform_response_value(value, upstream_status);
         if converted_from_sse || transformed {
             serde_json::to_vec(value).map_err(|error| {
                 PluginError::new(
@@ -187,6 +187,7 @@ fn sanitize_response_headers(headers: Vec<Header>, mode: ResponseHeaderMode) -> 
             let name = header.name.to_ascii_lowercase();
             !is_hop_by_hop(&name)
                 && !connection_scoped.contains(&name)
+                && !is_codex_private_header(&name)
                 && !matches!(
                     name.as_str(),
                     "host"
@@ -207,6 +208,13 @@ fn sanitize_response_headers(headers: Vec<Header>, mode: ResponseHeaderMode) -> 
         );
     }
     output
+}
+
+/// ChatGPT Codex 上游的私有响应 header 不属于公开 Responses API，也可能包含账号额度、
+/// 会话状态或内部路由信息。匹配时同时拦截没有后缀的保留名称，避免未来新增 header 时
+/// 需要逐项维护黑名单。
+fn is_codex_private_header(name: &str) -> bool {
+    name == "x-codex" || name.starts_with("x-codex-")
 }
 
 fn connection_scoped_header_names(headers: &[Header]) -> BTreeSet<String> {

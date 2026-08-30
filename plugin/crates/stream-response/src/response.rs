@@ -7,7 +7,7 @@ use crate::{Effects, Feedback, LimitFeedback, StreamFailure, Usage};
 pub fn effects_from_raw_json(value: &Value, status: Option<u16>, stream: bool) -> Effects {
     let error = ErrorView::from_value(value);
     Effects {
-        feedback: feedback_from_error(status, error.as_ref()),
+        feedback: feedback_from_response(value, status),
         usage: extract_usage(value),
         failure: (stream && is_failed_event(value)).then(|| StreamFailure {
             kind: error
@@ -88,7 +88,7 @@ pub fn requires_client_retry_event(value: &Value) -> bool {
 }
 
 fn is_failed_event(value: &Value) -> bool {
-    value.get("type").and_then(Value::as_str).map(str::trim) == Some("response.failed")
+    value.get("type").and_then(Value::as_str) == Some("response.failed")
 }
 
 fn non_negative_i64(value: Option<&Value>) -> Option<i64> {
@@ -131,7 +131,6 @@ struct ErrorView {
     kind: Option<String>,
     code: Option<String>,
     message: Option<String>,
-    resets_at: Option<i64>,
 }
 
 impl ErrorView {
@@ -143,12 +142,6 @@ impl ErrorView {
             kind: string_field(error, "type"),
             code: string_field(error, "code"),
             message: string_field(error, "message"),
-            resets_at: non_negative_i64(
-                error
-                    .get("resets_at")
-                    .or_else(|| error.get("reset_at"))
-                    .or_else(|| value.get("resets_at")),
-            ),
         })
     }
 
@@ -161,16 +154,6 @@ impl ErrorView {
                 .unwrap_or("OpenAI upstream request failed"),
         )
     }
-
-    fn searchable(&self) -> String {
-        format!(
-            "{} {} {}",
-            self.kind.as_deref().unwrap_or_default(),
-            self.code.as_deref().unwrap_or_default(),
-            self.message.as_deref().unwrap_or_default(),
-        )
-        .to_ascii_lowercase()
-    }
 }
 
 fn string_field(value: &Value, field: &str) -> Option<String> {
@@ -182,76 +165,85 @@ fn string_field(value: &Value, field: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn feedback_from_error(status: Option<u16>, error: Option<&ErrorView>) -> Option<Feedback> {
-    let searchable = error.map(ErrorView::searchable).unwrap_or_default();
-    let reason = error
-        .map(ErrorView::reason)
-        .unwrap_or_else(|| format!("OpenAI upstream HTTP {}", status.unwrap_or_default()));
-    let resets_at = error.and_then(|error| error.resets_at);
-
-    if status == Some(401)
-        || contains_any(
-            &searchable,
-            &[
-                "authentication",
-                "unauthorized",
-                "invalid_api_key",
-                "invalid token",
-            ],
-        )
-    {
-        return Some(Feedback::AuthenticationRejected(reason));
-    }
-    if contains_any(
-        &searchable,
-        &[
-            "usage_not_included",
-            "usage_limit_reached",
-            "entitlement",
-            "not entitled",
-        ],
-    ) {
-        return Some(Feedback::EntitlementMissing(reason));
-    }
-    if contains_any(
-        &searchable,
-        &[
-            "insufficient_quota",
-            "quota_exhausted",
-            "usage limit reached",
-        ],
-    ) {
-        return Some(Feedback::QuotaExhausted(LimitFeedback {
-            resets_at_unix_seconds: resets_at,
-            reason,
-        }));
-    }
-    if status == Some(429) || contains_any(&searchable, &["rate_limit", "rate limit", "slow_down"])
-    {
-        return Some(Feedback::RateLimited(LimitFeedback {
-            resets_at_unix_seconds: resets_at,
-            reason,
-        }));
-    }
-    if status.is_some_and(|status| status >= 500)
-        || contains_any(
-            &searchable,
-            &[
-                "server_is_overloaded",
-                "server_error",
-                "internal_error",
-                "overloaded",
-                "temporarily_unavailable",
-            ],
-        )
-    {
-        return Some(Feedback::TemporarilyUnavailable(reason));
-    }
-    None
+struct SignalErrorView<'a> {
+    kind: Option<&'a str>,
+    code: Option<&'a str>,
+    plan_type: Option<&'a str>,
+    resets_at: Option<i64>,
 }
 
-fn contains_any(haystack: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|needle| haystack.contains(needle))
+impl<'a> SignalErrorView<'a> {
+    /// 与网关内置 `CodexResponseError` 的 serde 解析保持一致：已知字段类型错误时整条
+    /// error 都不参与资源反馈分类，未知字段则忽略。
+    fn from_value(error: &'a Value) -> Option<Self> {
+        error.as_object()?;
+        let _message = optional_string_field(error, "message")?;
+        Some(Self {
+            kind: optional_string_field(error, "type")?,
+            code: optional_string_field(error, "code")?,
+            plan_type: optional_string_field(error, "plan_type")?,
+            resets_at: optional_i64_field(error, "resets_at")?,
+        })
+    }
+}
+
+fn optional_string_field<'a>(value: &'a Value, field: &str) -> Option<Option<&'a str>> {
+    match value.get(field) {
+        None | Some(Value::Null) => Some(None),
+        Some(Value::String(value)) => Some(Some(value)),
+        Some(_) => None,
+    }
+}
+
+fn optional_i64_field(value: &Value, field: &str) -> Option<Option<i64>> {
+    match value.get(field) {
+        None | Some(Value::Null) => Some(None),
+        Some(value) => value
+            .as_i64()
+            .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+            .map(Some),
+    }
+}
+
+/// 与网关内置 GPT Account 响应分类保持相同的精确规则。HTTP 失败只识别状态 401 和
+/// HTTP 429 的两个 `error.type`；成功 SSE 终止事件只识别两个 `response.error.code`。
+fn feedback_from_response(value: &Value, status: Option<u16>) -> Option<Feedback> {
+    if status == Some(401) {
+        return Some(Feedback::AuthenticationRejected("unauthorized".to_owned()));
+    }
+
+    if status == Some(429) {
+        let error = SignalErrorView::from_value(value.get("error")?)?;
+        return match error.kind {
+            Some("usage_limit_reached") => Some(Feedback::QuotaExhausted(LimitFeedback {
+                resets_at_unix_seconds: error.resets_at,
+                reason: format!(
+                    "usage_limit_reached: plan_type={}",
+                    error.plan_type.unwrap_or("<unknown>")
+                ),
+            })),
+            Some("usage_not_included") => Some(Feedback::EntitlementMissing(
+                "usage_not_included".to_owned(),
+            )),
+            _ => None,
+        };
+    }
+
+    if !status.is_some_and(|status| (200..300).contains(&status)) || !is_failed_event(value) {
+        return None;
+    }
+
+    let error = SignalErrorView::from_value(value.pointer("/response/error")?)?;
+    match error.code {
+        Some("usage_not_included") => Some(Feedback::EntitlementMissing(
+            "usage_not_included".to_owned(),
+        )),
+        Some("insufficient_quota") => Some(Feedback::QuotaExhausted(LimitFeedback {
+            resets_at_unix_seconds: error.resets_at,
+            reason: "quota_exhausted".to_owned(),
+        })),
+        _ => None,
+    }
 }
 
 fn bounded_reason(reason: &str) -> String {

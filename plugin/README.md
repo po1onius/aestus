@@ -157,7 +157,8 @@ buffered 或 stream 响应插件；未执行请求插件时，响应插件输入
   图片结果或其他模型输出语义字段。
 
 响应 header 会删除 hop-by-hop、`Connection` 声明的动态连接级 header、失效的
-`content-length`、上游 cookie 和鉴权信息。SSE 转 JSON 成功时输出
+`content-length`、上游 cookie、鉴权信息和所有 `x-codex` / `x-codex-*` 私有 header。
+SSE 转 JSON 成功时输出
 `application/json; charset=utf-8`；流式响应输出 `text/event-stream; charset=utf-8`、
 `cache-control: no-cache` 和 `connection: keep-alive`。
 
@@ -165,13 +166,18 @@ buffered 或 stream 响应插件；未执行请求插件时，响应插件输入
 
 响应插件在改造原始 JSON/SSE item 之前提取 `effects`：
 
-- `401` 或明确的鉴权错误：`authentication-rejected`；
-- `usage_not_included/entitlement`：`entitlement-missing`；
-- `insufficient_quota/quota_exhausted`：`quota-exhausted`；
-- `429/rate_limit`：`rate-limited`；
-- `5xx/overloaded`：`temporarily-unavailable`；
+- HTTP `401`：`authentication-rejected`；
+- HTTP `429` 且 `error.type=usage_limit_reached`：`quota-exhausted`；
+- HTTP `429` 且 `error.type=usage_not_included`：`entitlement-missing`；
+- SSE `response.failed` 且 `response.error.code=insufficient_quota`：`quota-exhausted`；
+- SSE `response.failed` 且 `response.error.code=usage_not_included`：`entitlement-missing`；
+- 其他 HTTP 状态、错误 type/code 或错误消息不产生 maintenance feedback；
 - 流式 `response.failed`：额外返回 `stream-failure`；policy/safety 等业务拒绝不会误报
   maintenance feedback。
+
+buffered 插件完成上述 HTTP `429` feedback 提取后，会把 `usage_limit_reached` 和
+`usage_not_included` 的下游错误统一改写为 `error.type=rate_limit_exceeded`、
+`error.message=Rate limit reached`；HTTP 状态仍为 `429`，其他错误字段保持不变。
 
 usage 从最终 response 或终止 SSE event 的 `usage` 读取。`cached_tokens` 和
 `reasoning_tokens` 分别映射到 ABI 明细字段，`total_tokens` 按 input + output 重新计算。
