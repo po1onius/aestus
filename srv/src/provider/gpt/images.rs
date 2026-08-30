@@ -1,7 +1,7 @@
 //! OpenAI Images API 与 ChatGPT Codex Images 端点之间的纯协议转换。
 //!
-//! 网关只公开所有 GPT 资源都能稳定执行的 `gpt-image-2` buffered 子集。任何会因
-//! Account/API Key 调度结果不同而改变语义的参数都在调度前显式拒绝，不能静默丢弃。
+//! 网关固定使用 `gpt-image-2` buffered 协议，只在调度前限制 `model` 与 `stream`。
+//! 其他参数保持原值并交给实际 Account/API Key 上游解释，避免网关字段白名单落后于上游。
 
 use std::convert::Infallible;
 
@@ -13,16 +13,13 @@ use serde_json::{Map, Value};
 use crate::provider::protocol::TokenUsage;
 
 pub(super) const CODEX_IMAGE_MODEL: &str = "gpt-image-2";
-const MAX_PROMPT_CHARS: usize = 32_000;
-const MAX_EDIT_IMAGES: usize = 16;
-const MAX_EDIT_IMAGE_BYTES: usize = 50 * 1024 * 1024;
 
 /// 调度前验证调用方请求，并返回用于模型白名单授权和请求日志的有效模型。
 pub(super) fn inspect_generations_body(body: &[u8]) -> Result<&'static str, String> {
     build_codex_generations_body(body).map(|_| CODEX_IMAGE_MODEL)
 }
 
-/// 把公开的 Images generations 子集转换为 Codex 账号端点接受的 JSON。
+/// 保留 Images generations 参数并补齐 Codex 账号端点要求的权威协议字段。
 pub(super) fn transform_generations_body(body: &[u8]) -> Result<Bytes, String> {
     build_codex_generations_body(body).map(Bytes::from)
 }
@@ -51,7 +48,7 @@ pub(super) async fn transform_edits_multipart_body(
     let body_stream = stream::once(async move { Result::<Bytes, Infallible>::Ok(body) });
     let mut multipart = multer::Multipart::new(body_stream, boundary);
     let mut images = Vec::new();
-    let mut text_fields = Map::new();
+    let mut request_fields = Map::new();
 
     while let Some(field) = multipart
         .next_field()
@@ -67,71 +64,55 @@ pub(super) async fn transform_edits_multipart_body(
             .map_err(|error| format!("读取图片编辑 multipart 字段 `{name}` 失败: {error}"))?;
 
         if matches!(name.as_str(), "image" | "image[]") {
-            if bytes.is_empty() {
-                return Err("图片编辑请求中的 image 文件不能为空".to_owned());
-            }
-            if bytes.len() >= MAX_EDIT_IMAGE_BYTES {
-                return Err(format!(
-                    "图片编辑 image 文件必须小于 {} MiB",
-                    MAX_EDIT_IMAGE_BYTES / 1024 / 1024
-                ));
-            }
-            if images.len() >= MAX_EDIT_IMAGES {
-                return Err(format!(
-                    "图片编辑请求最多支持 {MAX_EDIT_IMAGES} 个 image 文件"
-                ));
-            }
             let media_type =
-                resolve_image_media_type(field_content_type.as_deref(), file_name.as_deref())?;
+                resolve_file_media_type(field_content_type.as_deref(), file_name.as_deref());
             let encoded = BASE64_STANDARD.encode(&bytes);
-            images.push(Value::Object(Map::from_iter([(
-                "image_url".to_owned(),
-                Value::String(format!("data:{media_type};base64,{encoded}")),
-            )])));
+            images.push(image_url_value(format!(
+                "data:{media_type};base64,{encoded}"
+            )));
             continue;
         }
 
-        const TEXT_FIELDS: [&str; 7] = [
-            "prompt",
-            "model",
-            "background",
-            "n",
-            "quality",
-            "size",
-            "stream",
-        ];
-        if !TEXT_FIELDS.contains(&name.as_str()) {
-            return Err(format!(
-                "图片编辑参数 `{name}` 当前不受网关的 gpt-image-2 buffered 接口支持"
-            ));
-        }
         if file_name.is_some() {
-            return Err(format!("图片编辑字段 `{name}` 必须是文本字段"));
-        }
-        if text_fields.contains_key(&name) {
-            return Err(format!("图片编辑字段 `{name}` 不能重复提交"));
+            let media_type =
+                resolve_file_media_type(field_content_type.as_deref(), file_name.as_deref());
+            let encoded = BASE64_STANDARD.encode(&bytes);
+            let data_url = format!("data:{media_type};base64,{encoded}");
+            // Codex JSON edits 使用与 images 元素相同的 image_url object 表示 mask；
+            // 其他未来文件参数没有统一 schema，保留为 data URL 字符串交给上游解释。
+            let value = if name == "mask" {
+                image_url_value(data_url)
+            } else {
+                Value::String(data_url)
+            };
+            insert_multipart_value(&mut request_fields, name, value);
+            continue;
         }
         let text = String::from_utf8(bytes.to_vec())
             .map_err(|error| format!("图片编辑字段 `{name}` 不是 UTF-8 文本: {error}"))?;
         let value = match name.as_str() {
-            "n" => Value::from(
-                text.trim()
-                    .parse::<u64>()
-                    .map_err(|_| "图片编辑字段 `n` 必须是整数".to_owned())?,
-            ),
             "stream" => Value::Bool(match text.trim() {
                 "true" => true,
                 "false" => false,
                 _ => return Err("图片编辑字段 `stream` 必须是 boolean".to_owned()),
             }),
+            // multipart 没有 JSON scalar 类型。对 Images API 当前的数字字段做无损
+            // best-effort 转换；非法值保持字符串并交给上游解释，网关不再限制它们。
+            "n" | "output_compression" | "partial_images" => text
+                .trim()
+                .parse::<u64>()
+                .map(Value::from)
+                .unwrap_or_else(|_| Value::String(text)),
             _ => Value::String(text),
         };
-        text_fields.insert(name, value);
+        insert_multipart_value(&mut request_fields, name, value);
     }
 
-    text_fields.insert("images".to_owned(), Value::Array(images));
-    let normalized = normalize_edits_value(&Value::Object(text_fields))?;
-    serialize_edits_intermediate(&normalized)
+    if !images.is_empty() {
+        request_fields.insert("images".to_owned(), Value::Array(images));
+    }
+    normalize_edits_object(&mut request_fields)?;
+    serialize_json_object(request_fields, "图片编辑中间请求序列化失败")
 }
 
 pub(super) struct FinalizedEditsBody {
@@ -143,304 +124,91 @@ pub(super) struct FinalizedEditsBody {
 pub(super) fn finalize_edits_body(body: &[u8]) -> Result<FinalizedEditsBody, String> {
     let value: Value = serde_json::from_slice(body)
         .map_err(|error| format!("图片编辑中间请求不是合法 JSON: {error}"))?;
-    let normalized = normalize_edits_value(&value)?;
-    let mut output = common_edits_fields(&normalized);
-    output.insert(
-        "images".to_owned(),
-        Value::Array(
-            normalized
-                .images
-                .iter()
-                .map(|image_url| image_json_value(image_url))
-                .collect(),
-        ),
-    );
-    let body = serde_json::to_vec(&Value::Object(output))
-        .map(Bytes::from)
-        .map_err(|error| format!("图片编辑请求序列化失败: {error}"))?;
-    Ok(FinalizedEditsBody {
-        body,
-        image_count: normalized.images.len(),
-    })
-}
-
-#[derive(Debug)]
-struct NormalizedEditRequest {
-    images: Vec<String>,
-    prompt: String,
-    background: Option<String>,
-    n: Option<u64>,
-    quality: Option<String>,
-    size: Option<String>,
-}
-
-fn normalize_edits_value(value: &Value) -> Result<NormalizedEditRequest, String> {
-    let input = value
+    let mut output = value
         .as_object()
+        .cloned()
         .ok_or_else(|| "图片编辑中间请求必须是 JSON object".to_owned())?;
-    const SUPPORTED_FIELDS: [&str; 8] = [
-        "images",
-        "prompt",
-        "model",
-        "background",
-        "n",
-        "quality",
-        "size",
-        "stream",
-    ];
-    if let Some((field, _)) = input
-        .iter()
-        .find(|(field, value)| !SUPPORTED_FIELDS.contains(&field.as_str()) && !value.is_null())
-    {
-        return Err(format!(
-            "图片编辑参数 `{field}` 当前不受网关的 gpt-image-2 buffered 接口支持"
-        ));
-    }
-
-    let prompt = required_non_empty_string_for(input, "prompt", "图片编辑请求")?;
-    if prompt.chars().count() > MAX_PROMPT_CHARS {
-        return Err(format!(
-            "图片编辑 prompt 不能超过 {MAX_PROMPT_CHARS} 个字符"
-        ));
-    }
-    validate_image_model(input.get("model"), "图片编辑")?;
-    validate_image_stream(input.get("stream"), "图片编辑")?;
-
-    let image_values = input
+    normalize_edits_object(&mut output)?;
+    let image_count = output
         .get("images")
         .and_then(Value::as_array)
-        .filter(|images| !images.is_empty())
-        .ok_or_else(|| "图片编辑请求至少需要一个 image 文件".to_owned())?;
-    if image_values.len() > MAX_EDIT_IMAGES {
-        return Err(format!(
-            "图片编辑请求最多支持 {MAX_EDIT_IMAGES} 个 image 文件"
-        ));
-    }
-    let mut images = Vec::with_capacity(image_values.len());
-    for (index, image) in image_values.iter().enumerate() {
-        let image = image
-            .as_object()
-            .ok_or_else(|| format!("图片编辑 images[{index}] 必须是 JSON object"))?;
-        const SUPPORTED_IMAGE_FIELDS: [&str; 1] = ["image_url"];
-        if let Some((field, _)) = image.iter().find(|(field, value)| {
-            !SUPPORTED_IMAGE_FIELDS.contains(&field.as_str()) && !value.is_null()
-        }) {
-            return Err(format!(
-                "图片编辑 images[{index}].{field} 不受上游中间协议支持"
-            ));
-        }
-        let image_url = image
-            .get("image_url")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| format!("图片编辑 images[{index}].image_url 不能为空"))?;
-        let (_, payload) = parse_image_data_url(image_url)?;
-        let decoded_bytes = BASE64_STANDARD
-            .decode(payload)
-            .map_err(|error| {
-                format!("图片编辑 images[{index}].image_url 不是合法 base64: {error}")
-            })?
-            .len();
-        if decoded_bytes >= MAX_EDIT_IMAGE_BYTES {
-            return Err(format!(
-                "图片编辑 images[{index}] 必须小于 {} MiB",
-                MAX_EDIT_IMAGE_BYTES / 1024 / 1024
-            ));
-        }
-        images.push(image_url.to_owned());
-    }
-
-    Ok(NormalizedEditRequest {
-        images,
-        prompt: prompt.to_owned(),
-        background: optional_enum_value(
-            input,
-            "background",
-            &["transparent", "opaque", "auto"],
-            "图片编辑",
-        )?,
-        n: optional_image_count(input, "图片编辑")?,
-        quality: optional_enum_value(
-            input,
-            "quality",
-            &["low", "medium", "high", "auto"],
-            "图片编辑",
-        )?,
-        size: optional_non_empty_string_value(input, "size", "图片编辑")?,
-    })
+        .map_or(0, Vec::len);
+    let body = serialize_json_object(output, "图片编辑请求序列化失败")?;
+    Ok(FinalizedEditsBody { body, image_count })
 }
 
-fn serialize_edits_intermediate(request: &NormalizedEditRequest) -> Result<Bytes, String> {
-    let mut output = common_edits_fields(request);
-    output.insert(
-        "images".to_owned(),
-        Value::Array(
-            request
-                .images
-                .iter()
-                .map(|image_url| image_json_value(image_url))
-                .collect(),
-        ),
-    );
+fn serialize_json_object(output: Map<String, Value>, owner: &str) -> Result<Bytes, String> {
     serde_json::to_vec(&Value::Object(output))
         .map(Bytes::from)
-        .map_err(|error| format!("图片编辑中间请求序列化失败: {error}"))
+        .map_err(|error| format!("{owner}: {error}"))
 }
 
-fn image_json_value(image_url: &str) -> Value {
-    Value::Object(Map::from_iter([(
-        "image_url".to_owned(),
-        Value::String(image_url.to_owned()),
-    )]))
-}
-
-fn common_edits_fields(request: &NormalizedEditRequest) -> Map<String, Value> {
-    let mut output = Map::new();
-    output.insert("prompt".to_owned(), Value::String(request.prompt.clone()));
+fn normalize_edits_object(output: &mut Map<String, Value>) -> Result<(), String> {
+    validate_image_model(output.get("model"), "图片编辑")?;
+    validate_image_stream(output.get("stream"), "图片编辑")?;
     output.insert(
         "model".to_owned(),
         Value::String(CODEX_IMAGE_MODEL.to_owned()),
     );
-    if let Some(value) = &request.background {
-        output.insert("background".to_owned(), Value::String(value.clone()));
-    }
-    if let Some(value) = request.n {
-        output.insert("n".to_owned(), Value::from(value));
-    }
-    if let Some(value) = &request.quality {
-        output.insert("quality".to_owned(), Value::String(value.clone()));
-    }
-    if let Some(value) = &request.size {
-        output.insert("size".to_owned(), Value::String(value.clone()));
-    }
-    output
+    output.remove("stream");
+    Ok(())
 }
 
-fn resolve_image_media_type(
-    content_type: Option<&str>,
-    file_name: Option<&str>,
-) -> Result<String, String> {
-    let media_type = content_type
+fn insert_multipart_value(output: &mut Map<String, Value>, name: String, value: Value) {
+    match output.remove(&name) {
+        None => {
+            output.insert(name, value);
+        }
+        Some(Value::Array(mut values)) => {
+            values.push(value);
+            output.insert(name, Value::Array(values));
+        }
+        Some(previous) => {
+            output.insert(name, Value::Array(vec![previous, value]));
+        }
+    }
+}
+
+fn image_url_value(image_url: String) -> Value {
+    Value::Object(Map::from_iter([(
+        "image_url".to_owned(),
+        Value::String(image_url),
+    )]))
+}
+
+fn resolve_file_media_type(content_type: Option<&str>, file_name: Option<&str>) -> String {
+    content_type
         .map(str::trim)
-        .filter(|value| value.starts_with("image/"))
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
         .map(str::to_owned)
         .or_else(|| {
             file_name
                 .and_then(|name| mime_guess::from_path(name).first_raw())
-                .filter(|value| value.starts_with("image/"))
                 .map(str::to_owned)
         })
-        .ok_or_else(|| "图片编辑 image 文件缺少可识别的 image/* 媒体类型".to_owned())?;
-    match media_type.split(';').next().map(str::trim) {
-        Some("image/png" | "image/jpeg" | "image/webp") => Ok(media_type),
-        _ => Err("图片编辑 image 文件只支持 PNG、JPEG 或 WebP".to_owned()),
-    }
-}
-
-fn parse_image_data_url(url: &str) -> Result<(&str, &str), String> {
-    let (metadata, payload) = url
-        .strip_prefix("data:")
-        .and_then(|url| url.split_once(','))
-        .ok_or_else(|| "图片编辑 image_url 必须是 base64 data URL".to_owned())?;
-    let mut parts = metadata.split(';');
-    let media_type = parts.next().unwrap_or_default().trim();
-    if !matches!(media_type, "image/png" | "image/jpeg" | "image/webp")
-        || !parts.any(|part| part.eq_ignore_ascii_case("base64"))
-    {
-        return Err("图片编辑 image_url 必须是 PNG、JPEG 或 WebP 的 base64 data URL".to_owned());
-    }
-    let payload = payload.trim();
-    if payload.is_empty() {
-        return Err("图片编辑 image_url 的 base64 数据不能为空".to_owned());
-    }
-    Ok((media_type, payload))
+        .unwrap_or_else(|| "application/octet-stream".to_owned())
 }
 
 fn build_codex_generations_body(body: &[u8]) -> Result<Vec<u8>, String> {
     let input: Value = serde_json::from_slice(body)
         .map_err(|error| format!("图片生成请求体不是合法 JSON: {error}"))?;
-    let input = input
+    let mut output = input
         .as_object()
+        .cloned()
         .ok_or_else(|| "图片生成请求体必须是 JSON object".to_owned())?;
 
-    // null 是 OpenAI SDK 常见的“未设置”编码，可以安全忽略；任何非 null 未支持字段都
-    // 必须报错，否则混合资源分组可能在 Account 与 API Key 之间产生不同结果。
-    const SUPPORTED_FIELDS: [&str; 7] = [
-        "prompt",
-        "model",
-        "background",
-        "n",
-        "quality",
-        "size",
-        "stream",
-    ];
-    if let Some((field, _)) = input
-        .iter()
-        .find(|(field, value)| !SUPPORTED_FIELDS.contains(&field.as_str()) && !value.is_null())
-    {
-        return Err(format!(
-            "图片生成参数 `{field}` 当前不受网关的 gpt-image-2 buffered 接口支持"
-        ));
-    }
-
-    let prompt = required_non_empty_string(input, "prompt")?;
-    if prompt.chars().count() > MAX_PROMPT_CHARS {
-        return Err(format!(
-            "图片生成 prompt 不能超过 {MAX_PROMPT_CHARS} 个字符"
-        ));
-    }
-    validate_model(input.get("model"))?;
-    validate_stream(input.get("stream"))?;
-
-    let mut output = Map::new();
-    output.insert("prompt".to_owned(), Value::String(prompt.to_owned()));
+    validate_model(output.get("model"))?;
+    validate_stream(output.get("stream"))?;
     output.insert(
         "model".to_owned(),
         Value::String(CODEX_IMAGE_MODEL.to_owned()),
     );
-    copy_optional_enum(
-        input,
-        &mut output,
-        "background",
-        &["transparent", "opaque", "auto"],
-    )?;
-    copy_optional_image_count(input, &mut output)?;
-    copy_optional_enum(
-        input,
-        &mut output,
-        "quality",
-        &["low", "medium", "high", "auto"],
-    )?;
-    copy_optional_non_empty_string(input, &mut output, "size")?;
+    output.remove("stream");
 
     serde_json::to_vec(&Value::Object(output))
         .map_err(|error| format!("Codex 图片生成请求序列化失败: {error}"))
-}
-
-fn required_non_empty_string<'a>(
-    object: &'a Map<String, Value>,
-    field: &str,
-) -> Result<&'a str, String> {
-    object
-        .get(field)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| format!("图片生成请求缺少非空字符串 `{field}`"))
-}
-
-fn required_non_empty_string_for<'a>(
-    object: &'a Map<String, Value>,
-    field: &str,
-    owner: &str,
-) -> Result<&'a str, String> {
-    object
-        .get(field)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| format!("{owner}缺少非空字符串 `{field}`"))
 }
 
 fn validate_model(value: Option<&Value>) -> Result<(), String> {
@@ -485,129 +253,6 @@ fn validate_image_stream(value: Option<&Value>, owner: &str) -> Result<(), Strin
         )),
         Some(_) => Err(format!("{owner}字段 `stream` 必须是 boolean 或 null")),
     }
-}
-
-fn optional_enum_value(
-    input: &Map<String, Value>,
-    field: &str,
-    allowed: &[&str],
-    owner: &str,
-) -> Result<Option<String>, String> {
-    let Some(value) = input.get(field) else {
-        return Ok(None);
-    };
-    if value.is_null() {
-        return Ok(None);
-    }
-    let value = value
-        .as_str()
-        .ok_or_else(|| format!("{owner}字段 `{field}` 必须是字符串或 null"))?
-        .trim();
-    if !allowed.contains(&value) {
-        return Err(format!(
-            "{owner}字段 `{field}` 的值 `{value}` 不受支持，可选值为 {}",
-            allowed.join(", ")
-        ));
-    }
-    Ok(Some(value.to_owned()))
-}
-
-fn optional_image_count(input: &Map<String, Value>, owner: &str) -> Result<Option<u64>, String> {
-    let Some(value) = input.get("n") else {
-        return Ok(None);
-    };
-    if value.is_null() {
-        return Ok(None);
-    }
-    value
-        .as_u64()
-        .filter(|count| (1..=10).contains(count))
-        .map(Some)
-        .ok_or_else(|| format!("{owner}字段 `n` 必须是 1 到 10 之间的整数"))
-}
-
-fn optional_non_empty_string_value(
-    input: &Map<String, Value>,
-    field: &str,
-    owner: &str,
-) -> Result<Option<String>, String> {
-    let Some(value) = input.get(field) else {
-        return Ok(None);
-    };
-    if value.is_null() {
-        return Ok(None);
-    }
-    value
-        .as_str()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .map(Some)
-        .ok_or_else(|| format!("{owner}字段 `{field}` 必须是非空字符串或 null"))
-}
-
-fn copy_optional_enum(
-    input: &Map<String, Value>,
-    output: &mut Map<String, Value>,
-    field: &str,
-    allowed: &[&str],
-) -> Result<(), String> {
-    let Some(value) = input.get(field) else {
-        return Ok(());
-    };
-    if value.is_null() {
-        return Ok(());
-    }
-    let value = value
-        .as_str()
-        .ok_or_else(|| format!("图片生成字段 `{field}` 必须是字符串或 null"))?
-        .trim();
-    if !allowed.contains(&value) {
-        return Err(format!(
-            "图片生成字段 `{field}` 的值 `{value}` 不受支持，可选值为 {}",
-            allowed.join(", ")
-        ));
-    }
-    output.insert(field.to_owned(), Value::String(value.to_owned()));
-    Ok(())
-}
-
-fn copy_optional_image_count(
-    input: &Map<String, Value>,
-    output: &mut Map<String, Value>,
-) -> Result<(), String> {
-    let Some(value) = input.get("n") else {
-        return Ok(());
-    };
-    if value.is_null() {
-        return Ok(());
-    }
-    let count = value
-        .as_u64()
-        .filter(|count| (1..=10).contains(count))
-        .ok_or_else(|| "图片生成字段 `n` 必须是 1 到 10 之间的整数".to_owned())?;
-    output.insert("n".to_owned(), Value::from(count));
-    Ok(())
-}
-
-fn copy_optional_non_empty_string(
-    input: &Map<String, Value>,
-    output: &mut Map<String, Value>,
-    field: &str,
-) -> Result<(), String> {
-    let Some(value) = input.get(field) else {
-        return Ok(());
-    };
-    if value.is_null() {
-        return Ok(());
-    }
-    let value = value
-        .as_str()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| format!("图片生成字段 `{field}` 必须是非空字符串或 null"))?;
-    output.insert(field.to_owned(), Value::String(value.to_owned()));
-    Ok(())
 }
 
 /// 从任意 OpenAI/Codex Images 成功响应中提取 token usage。

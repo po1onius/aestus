@@ -33,7 +33,7 @@ use crate::{
 ///
 /// 调用方使用 multipart；Codex OAuth Account 和 OpenAI Official API Key 上游都使用
 /// `images[].image_url` JSON。adapter 在 body override 前完成统一转换，因而混合资源组
-/// 共享相同的模型、参数校验、override、重试、额度和日志语义。
+/// 共享相同的 model/stream 限制、override、重试、额度和日志语义；其他参数交给上游解释。
 pub struct GptImageEditsProxy;
 
 impl ProviderProtocol for GptImageEditsProxy {
