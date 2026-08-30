@@ -78,10 +78,14 @@ export interface DashboardUser {
 export interface AuthResponse {
   token: string;
   user: DashboardUser;
+  service_timezone: string;
+  request_log_retention_days: number;
 }
 
 export interface MeResponse {
   user: DashboardUser;
+  service_timezone: string;
+  request_log_retention_days: number;
 }
 
 export interface ListPageResponse<T> {
@@ -360,6 +364,8 @@ export interface RequestLogCursor {
 }
 
 export interface ListRequestLogsResponse {
+  date: string;
+  timezone: string;
   items: RequestLogRecord[];
   next_cursor: RequestLogCursor | null;
 }

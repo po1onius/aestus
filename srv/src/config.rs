@@ -1,5 +1,6 @@
-use std::{env, net::SocketAddr};
+use std::{env, net::SocketAddr, num::NonZeroU32};
 
+use chrono_tz::Tz;
 use tracing::warn;
 
 use crate::err::{AppError, AppResult};
@@ -46,6 +47,9 @@ const DEFAULT_CLICKHOUSE_URL: &str = "http://localhost:8123";
 const DEFAULT_CLICKHOUSE_DATABASE: &str = "default";
 const DEFAULT_CLICKHOUSE_USER: &str = "default";
 const DEFAULT_REQUEST_LOG_TABLE: &str = "gateway_request_logs";
+const DEFAULT_REQUEST_USAGE_DAILY_TABLE: &str = "gateway_request_usage_daily";
+const DEFAULT_REQUEST_LOG_RETENTION_DAYS: NonZeroU32 = NonZeroU32::new(30).unwrap();
+const DEFAULT_SERVICE_TIMEZONE: Tz = chrono_tz::UTC;
 const DEFAULT_JWT_TTL_SECONDS: u64 = 7 * 24 * 60 * 60;
 const DEFAULT_ADMIN_INITIAL_QUOTA: i64 = 1_000_000;
 const DEFAULT_SMTP_PORT: u16 = 587;
@@ -102,6 +106,12 @@ pub struct AppConfig {
     pub clickhouse_user: String,
     pub clickhouse_password: String,
     pub request_log_table: String,
+    pub request_usage_daily_table: String,
+    /// ClickHouse 请求级明细的滚动保留天数；服务启动时会把该值同步到表 TTL。
+    pub request_log_retention_days: NonZeroU32,
+    /// 请求日志日期、每日用量统计和 Dashboard 日期选择共用的固定 IANA 时区。
+    /// 修改该值会改变业务日边界；已经聚合的数据不能在明细 TTL 到期后自动重算。
+    pub service_timezone: Tz,
     pub web_dist_dir: Option<String>,
     pub jwt_secret: String,
     pub jwt_ttl_seconds: u64,
@@ -268,6 +278,15 @@ impl AppConfig {
                 "AESTUS_REQUEST_LOG_TABLE",
                 DEFAULT_REQUEST_LOG_TABLE,
             )?,
+            request_usage_daily_table: parse_env_string(
+                "AESTUS_REQUEST_USAGE_DAILY_TABLE",
+                DEFAULT_REQUEST_USAGE_DAILY_TABLE,
+            )?,
+            request_log_retention_days: parse_env(
+                "AESTUS_REQUEST_LOG_RETENTION_DAYS",
+                DEFAULT_REQUEST_LOG_RETENTION_DAYS,
+            )?,
+            service_timezone: parse_env("AESTUS_TIMEZONE", DEFAULT_SERVICE_TIMEZONE)?,
             web_dist_dir: optional_env_string("AESTUS_WEB_DIST_DIR")?,
             jwt_secret: required_env("AESTUS_JWT_SECRET")?,
             jwt_ttl_seconds: parse_env("AESTUS_JWT_TTL_SECONDS", DEFAULT_JWT_TTL_SECONDS)?,

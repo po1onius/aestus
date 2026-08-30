@@ -34,6 +34,9 @@ interface RequestLogsPageProps {
   showUsername: boolean;
   loading: boolean;
   date: string;
+  minDate: string;
+  maxDate: string;
+  timezone: string;
   nonSuccessOnly: boolean;
   nextCursor: RequestLogCursor | null;
   cursorStack: Array<RequestLogCursor | null>;
@@ -48,6 +51,9 @@ export function RequestLogsPage({
   showUsername,
   loading,
   date,
+  minDate,
+  maxDate,
+  timezone,
   nonSuccessOnly,
   nextCursor,
   cursorStack,
@@ -67,6 +73,8 @@ export function RequestLogsPage({
             <div className="flex items-center">
               <DatePickerInput
                 value={date}
+                min={minDate}
+                max={maxDate}
                 disabled={loading}
                 ariaLabel="选择请求日志日期"
                 onChange={onDateChange}
@@ -170,7 +178,7 @@ export function RequestLogsPage({
                       )}
                     </td>
                     <td>
-                      <RequestTimeCell log={log} />
+                      <RequestTimeCell log={log} timezone={timezone} />
                     </td>
                     <td>
                       <div className={cellMainClass}>{log.total_tokens}</div>
@@ -204,7 +212,7 @@ function formatFastMode(fastMode: boolean | null) {
   return fastMode ? "开启" : "关闭";
 }
 
-function RequestTimeCell({ log }: { log: RequestLogRecord }) {
+function RequestTimeCell({ log, timezone }: { log: RequestLogRecord; timezone: string }) {
   const firstTokenMs = firstTokenDurationMs(log);
   const tone = firstTokenDurationTone(firstTokenMs);
   const firstTokenClassName = cx(
@@ -223,7 +231,7 @@ function RequestTimeCell({ log }: { log: RequestLogRecord }) {
       <div className={firstTokenClassName}>首字：{formatDuration(firstTokenMs)}</div>
       <p className={cellNoteClass}>总耗时：{formatDuration(log.duration_ms)}</p>
       <p className={cellNoteClass}>
-        开始：{formatDateTimeWithMilliseconds(log.request_started_at)}
+        开始：{formatDateTimeWithMilliseconds(log.request_started_at, timezone)}
       </p>
     </>
   );

@@ -3,6 +3,7 @@
 //! 本模块拥有 Dashboard 只读查询；后台 worker 只负责异步写入。请求日志明细和当前用户
 //! 用量聚合按独立模块维护，后续 provider、错误率等统计继续在同级扩展。
 
+mod calendar;
 mod request_logs;
 mod usage;
 

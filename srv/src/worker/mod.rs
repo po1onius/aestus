@@ -9,6 +9,7 @@ mod request_log;
 use std::time::Duration;
 
 use chrono::Utc;
+use chrono_tz::Tz;
 use clickhouse::Client as ClickHouseClient;
 use tokio::{sync::mpsc, task::JoinHandle, time};
 use tracing::{info, warn};
@@ -47,15 +48,17 @@ pub fn start(
     db_pool: DbPool,
     clickhouse: ClickHouseClient,
     request_log_table: String,
+    service_timezone: Tz,
 ) -> (RequestEventPublisher, WorkerRuntime) {
     let (publisher, event_rx) = RequestEventPublisher::channel(REQUEST_EVENT_QUEUE_CAPACITY);
     let (request_log, request_log_writer_task) =
-        RequestLogWorker::new(clickhouse, request_log_table);
+        RequestLogWorker::new(clickhouse, request_log_table, service_timezone);
     let (quota, quota_task) = QuotaWorker::new(db_pool);
     let event_router_task = spawn_request_event_router(event_rx, request_log, quota);
 
     info!(
         queue_capacity = REQUEST_EVENT_QUEUE_CAPACITY,
+        service_timezone = %service_timezone,
         "非核心 worker 请求事件入口已启动"
     );
     (

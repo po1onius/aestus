@@ -92,6 +92,11 @@ services:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-change-me-clickhouse-password}
       AESTUS_REQUEST_LOG_TABLE: gateway_request_logs
+      AESTUS_REQUEST_USAGE_DAILY_TABLE: gateway_request_usage_daily
+      # 请求级明细滚动保留天数；服务启动时会自动同步 ClickHouse TTL。
+      AESTUS_REQUEST_LOG_RETENTION_DAYS: ${AESTUS_REQUEST_LOG_RETENTION_DAYS:-30}
+      # 请求日志日期、日用量聚合与 Dashboard 共用该 IANA 时区。上线后修改需要重建历史日聚合。
+      AESTUS_TIMEZONE: ${AESTUS_TIMEZONE:-UTC}
       AESTUS_JWT_SECRET: ${AESTUS_JWT_SECRET:-}
       AESTUS_JWT_TTL_SECONDS: ${AESTUS_JWT_TTL_SECONDS:-604800}
       AESTUS_ADMIN_USERNAME: ${AESTUS_ADMIN_USERNAME:-}

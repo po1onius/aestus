@@ -8,27 +8,25 @@ export function formatPercent(value: number) {
   return `${Number.isInteger(normalized) ? normalized.toFixed(0) : normalized.toFixed(1)}%`;
 }
 
-export function todayInputValue() {
-  return dateInputValue(new Date());
+/** 生成指定 IANA 时区下的 YYYY-MM-DD，避免 Dashboard 使用浏览器本地时区推导业务日。 */
+export function todayInputValue(timeZone: string) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
 }
 
-function dateInputValue(value: Date) {
-  const year = value.getFullYear();
-  const month = String(value.getMonth() + 1).padStart(2, "0");
-  const day = String(value.getDate()).padStart(2, "0");
+export function shiftDateInputValue(dateValue: string, days: number) {
+  const value = new Date(`${dateValue}T00:00:00Z`);
+  value.setUTCDate(value.getUTCDate() + days);
+  const year = value.getUTCFullYear();
+  const month = String(value.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(value.getUTCDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
-}
-
-export function localDateRangeIso(dateValue: string) {
-  const selectedDate = dateValue || todayInputValue();
-  const start = new Date(`${selectedDate}T00:00:00`);
-  const end = new Date(start);
-  end.setDate(end.getDate() + 1);
-
-  return {
-    startAt: start.toISOString(),
-    endAt: end.toISOString(),
-  };
 }
 
 /** Token 总量由后端以字符串返回，使用 BigInt 格式化可避免大整数精度丢失。 */
@@ -106,13 +104,14 @@ export function formatDateTime(value: string) {
 }
 
 /** 请求日志的开始时间需要保留秒和毫秒，便于精确定位单次调用。 */
-export function formatDateTimeWithMilliseconds(value: string) {
+export function formatDateTimeWithMilliseconds(value: string, timeZone: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
     return value;
   }
 
   return new Intl.DateTimeFormat("zh-CN", {
+    timeZone,
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",

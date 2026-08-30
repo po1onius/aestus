@@ -1,19 +1,14 @@
 //! Dashboard token 用量聚合接口。
 //!
 //! 普通用户只统计自己的余额与请求日志，admin 统计 PostgreSQL 中全部用户的余额及
-//! ClickHouse 中全部已归属用户的请求日志。额度属于附属能力，允许极端故障下少量统计
-//! 缺失，因此这里不引入账单流水或跨库事务。用量概览固定统计调用方时区下包含今天的
+//! ClickHouse 中全部已归属用户的每日预聚合。额度属于附属能力，允许极端故障下少量统计
+//! 缺失，因此这里不引入账单流水或跨库事务。用量概览固定统计服务时区下包含今天的
 //! 最近 365 个自然日，并一次返回总量、分布与每日明细。
 
 use std::collections::HashMap;
 
-use axum::{
-    Json, Router,
-    extract::{Query, State},
-    routing::get,
-};
-use chrono::{DateTime, Datelike, Days, LocalResult, NaiveDate, TimeZone, Utc};
-use chrono_tz::Tz;
+use axum::{Json, Router, extract::State, routing::get};
+use chrono::{DateTime, Days, NaiveDate, Utc};
 use clickhouse::{Row, sql::Identifier};
 use serde::{Deserialize, Serialize};
 use tracing::{error, info};
@@ -27,14 +22,9 @@ use crate::{
     user,
 };
 
-const MAX_TIMEZONE_BYTES: usize = 64;
-const USAGE_YEAR_DAYS: u64 = 365;
+use super::calendar::{current_service_date, local_day_start_utc};
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct UsageQuery {
-    timezone: Option<String>,
-}
+const USAGE_YEAR_DAYS: u64 = 365;
 
 #[derive(Debug)]
 struct NormalizedUsageRange {
@@ -91,7 +81,8 @@ struct UsageTotalsRow {
 
 #[derive(Debug, Deserialize, Row)]
 struct UsageDailyRow {
-    usage_date: String,
+    #[serde(with = "clickhouse::serde::chrono::date")]
+    usage_date: NaiveDate,
     total_tokens_text: String,
     request_count: u64,
 }
@@ -115,7 +106,6 @@ struct UsageApiKeyRow {
 struct UsageUserRow {
     #[serde(with = "clickhouse::serde::uuid")]
     user_id: Uuid,
-    username: String,
     total_tokens_text: String,
     request_count: u64,
 }
@@ -188,13 +178,12 @@ pub(super) fn router() -> Router<AppState> {
 async fn get_usage(
     State(state): State<AppState>,
     auth::CurrentUser(current_user): auth::CurrentUser,
-    Query(query): Query<UsageQuery>,
 ) -> AppResult<Json<UsageOverviewResponse>> {
-    let query = normalize_usage_range(query.timezone)?;
+    let query = normalize_usage_range(state.config().service_timezone)?;
     let scope = UsageScope::from_user(&current_user);
 
-    // 只有 daily 使用固定年度窗口；总量、模型和消费方分布均查询全历史。各查询彼此独立，
-    // 继续并行执行，避免全历史聚合把 Dashboard 首屏延迟串行叠加。
+    // 只有 daily 使用固定年度窗口；总量、模型和消费方分布均查询长期日聚合。各查询
+    // 彼此独立且数据量已经受控，并行执行可以降低 Dashboard 首屏延迟。
     let (users, totals, daily_rows, model_rows, breakdown_rows) = tokio::try_join!(
         load_usage_user_directory(&state, &current_user, scope),
         query_usage_totals(&state, scope),
@@ -230,15 +219,11 @@ async fn get_usage(
         .into_iter()
         .map(|row| UsageUserPoint {
             percentage: token_percentage(&row.total_tokens_text, lifetime_total),
-            username: if row.username.is_empty() {
-                users
-                    .usernames_by_id
-                    .get(&row.user_id)
-                    .cloned()
-                    .unwrap_or_else(|| format!("未知用户 ({})", row.user_id))
-            } else {
-                row.username
-            },
+            username: users
+                .usernames_by_id
+                .get(&row.user_id)
+                .cloned()
+                .unwrap_or_else(|| format!("未知用户 ({})", row.user_id)),
             user_id: row.user_id,
             total_tokens: row.total_tokens_text,
             request_count: row.request_count.to_string(),
@@ -281,9 +266,8 @@ async fn get_usage(
     }))
 }
 
-fn normalize_usage_range(timezone: Option<String>) -> AppResult<NormalizedUsageRange> {
-    let (timezone_name, timezone) = normalize_timezone(timezone)?;
-    let today = Utc::now().with_timezone(&timezone).date_naive();
+fn normalize_usage_range(timezone: chrono_tz::Tz) -> AppResult<NormalizedUsageRange> {
+    let today = current_service_date(timezone);
     let start_date = today
         .checked_sub_days(Days::new(USAGE_YEAR_DAYS - 1))
         .ok_or_else(|| AppError::BadRequest {
@@ -300,45 +284,7 @@ fn normalize_usage_range(timezone: Option<String>) -> AppResult<NormalizedUsageR
         end_at: local_day_start_utc(timezone, end_date)?,
         start_date,
         end_date,
-        timezone: timezone_name,
-    })
-}
-
-/// 不再只校验字符串外形：解析为 chrono-tz 的真实时区，确保 Rust 计算出的自然日边界与
-/// ClickHouse 按日分组使用完全相同的 IANA 名称。
-fn normalize_timezone(timezone: Option<String>) -> AppResult<(String, Tz)> {
-    let timezone = timezone.unwrap_or_else(|| "UTC".to_owned());
-    let timezone = timezone.trim();
-    if timezone.is_empty() || timezone.len() > MAX_TIMEZONE_BYTES {
-        return Err(AppError::BadRequest {
-            message: "timezone 必须是合法且不超过 64 字节的 IANA 时区名称".to_owned(),
-        });
-    }
-    let parsed = timezone.parse::<Tz>().map_err(|_| AppError::BadRequest {
-        message: format!("timezone 不是有效的 IANA 时区名称: {timezone}"),
-    })?;
-    Ok((timezone.to_owned(), parsed))
-}
-
-fn local_day_start_utc(timezone: Tz, date: NaiveDate) -> AppResult<DateTime<Utc>> {
-    // 少数 IANA 时区会恰好在午夜向前切换，使 00:00 不存在。逐分钟寻找该日期第一次
-    // 出现的本地时间，既能覆盖整点和半小时切换，也不会用固定 24 小时假设破坏自然日。
-    for minute_of_day in 0..(24 * 60) {
-        let hour = minute_of_day / 60;
-        let minute = minute_of_day % 60;
-        let local =
-            timezone.with_ymd_and_hms(date.year(), date.month(), date.day(), hour, minute, 0);
-        match local {
-            LocalResult::Single(value) => return Ok(value.with_timezone(&Utc)),
-            // 午夜回拨产生两个同名本地时刻时，取较早的绝对时间作为自然日开端。
-            LocalResult::Ambiguous(first, second) => {
-                return Ok(first.min(second).with_timezone(&Utc));
-            }
-            LocalResult::None => {}
-        }
-    }
-    Err(AppError::BadRequest {
-        message: format!("时区 {timezone} 中不存在本地日期 {date}"),
+        timezone: timezone.name().to_owned(),
     })
 }
 
@@ -391,14 +337,13 @@ async fn load_usage_user_directory(
 async fn query_usage_totals(state: &AppState, scope: UsageScope) -> AppResult<UsageTotalsRow> {
     let current_user_sql = "SELECT \
         toString(sum(total_tokens)) AS total_tokens, \
-        count() AS request_count \
+        sum(request_count) AS request_count \
         FROM ? \
         WHERE user_id = ?";
     let all_users_sql = "SELECT \
         toString(sum(total_tokens)) AS total_tokens, \
-        count() AS request_count \
-        FROM ? \
-        WHERE user_id IS NOT NULL";
+        sum(request_count) AS request_count \
+        FROM ?";
 
     let request = state
         .clickhouse()
@@ -406,7 +351,9 @@ async fn query_usage_totals(state: &AppState, scope: UsageScope) -> AppResult<Us
             UsageScope::CurrentUser(_) => current_user_sql,
             UsageScope::AllUsers => all_users_sql,
         })
-        .bind(Identifier(state.config().request_log_table.as_str()));
+        .bind(Identifier(
+            state.config().request_usage_daily_table.as_str(),
+        ));
     let request = match scope {
         UsageScope::CurrentUser(user_id) => request.bind(user_id),
         UsageScope::AllUsers => request,
@@ -422,26 +369,25 @@ async fn query_usage_daily(
     scope: UsageScope,
     query: &NormalizedUsageRange,
 ) -> AppResult<Vec<UsageDailyRow>> {
-    // 时间过滤仍使用 UTC 索引友好的原始列边界；分组日期显式转换到用户时区，确保夏令时
-    // 切换日即使只有 23/25 小时也只形成一个正确的本地自然日。
+    // usage_date 已由 writer 按服务固定时区计算并持久化，这里只扫描 365 天的
+    // 预聚合行，不再在查询时重新解释时区或请求级时间戳。
     let current_user_sql = "SELECT \
-            toString(toDate(request_started_at, ?)) AS usage_date, \
+            usage_date, \
             toString(sum(total_tokens)) AS total_tokens_text, \
-            count() AS request_count \
+            sum(request_count) AS request_count \
          FROM ? \
          WHERE user_id = ? \
-           AND request_started_at >= fromUnixTimestamp64Milli(?, 'UTC') \
-           AND request_started_at < fromUnixTimestamp64Milli(?, 'UTC') \
+           AND usage_date >= toDate(?) \
+           AND usage_date < toDate(?) \
          GROUP BY usage_date \
          ORDER BY usage_date";
     let all_users_sql = "SELECT \
-            toString(toDate(request_started_at, ?)) AS usage_date, \
+            usage_date, \
             toString(sum(total_tokens)) AS total_tokens_text, \
-            count() AS request_count \
+            sum(request_count) AS request_count \
          FROM ? \
-         WHERE user_id IS NOT NULL \
-           AND request_started_at >= fromUnixTimestamp64Milli(?, 'UTC') \
-           AND request_started_at < fromUnixTimestamp64Milli(?, 'UTC') \
+         WHERE usage_date >= toDate(?) \
+           AND usage_date < toDate(?) \
          GROUP BY usage_date \
          ORDER BY usage_date";
 
@@ -451,15 +397,16 @@ async fn query_usage_daily(
             UsageScope::CurrentUser(_) => current_user_sql,
             UsageScope::AllUsers => all_users_sql,
         })
-        .bind(query.timezone.as_str())
-        .bind(Identifier(state.config().request_log_table.as_str()));
+        .bind(Identifier(
+            state.config().request_usage_daily_table.as_str(),
+        ));
     let request = match scope {
         UsageScope::CurrentUser(user_id) => request.bind(user_id),
         UsageScope::AllUsers => request,
     };
     request
-        .bind(query.start_at.timestamp_millis())
-        .bind(query.end_at.timestamp_millis())
+        .bind(query.start_date.to_string())
+        .bind(query.end_date.to_string())
         .fetch_all::<UsageDailyRow>()
         .await
         .map_err(|source| usage_daily_query_error(scope, query, source))
@@ -471,9 +418,9 @@ async fn query_usage_models(state: &AppState, scope: UsageScope) -> AppResult<Ve
     // 独立别名，确保聚合表达式始终引用请求日志的 Int64 原始列。
     let current_user_sql = "SELECT \
         provider, \
-        ifNull(model, '未记录') AS model, \
+        model, \
         toString(sum(total_tokens)) AS total_tokens_text, \
-        count() AS request_count \
+        sum(request_count) AS request_count \
         FROM ? \
         WHERE user_id = ? \
         GROUP BY provider, model \
@@ -481,11 +428,10 @@ async fn query_usage_models(state: &AppState, scope: UsageScope) -> AppResult<Ve
         ORDER BY sum(total_tokens) DESC";
     let all_users_sql = "SELECT \
         provider, \
-        ifNull(model, '未记录') AS model, \
+        model, \
         toString(sum(total_tokens)) AS total_tokens_text, \
-        count() AS request_count \
+        sum(request_count) AS request_count \
         FROM ? \
-        WHERE user_id IS NOT NULL \
         GROUP BY provider, model \
         HAVING sum(total_tokens) > 0 \
         ORDER BY sum(total_tokens) DESC";
@@ -496,7 +442,9 @@ async fn query_usage_models(state: &AppState, scope: UsageScope) -> AppResult<Ve
             UsageScope::CurrentUser(_) => current_user_sql,
             UsageScope::AllUsers => all_users_sql,
         })
-        .bind(Identifier(state.config().request_log_table.as_str()));
+        .bind(Identifier(
+            state.config().request_usage_daily_table.as_str(),
+        ));
     let request = match scope {
         UsageScope::CurrentUser(user_id) => request.bind(user_id),
         UsageScope::AllUsers => request,
@@ -526,9 +474,9 @@ async fn query_usage_breakdown(
 async fn query_usage_api_keys(state: &AppState, user_id: Uuid) -> AppResult<Vec<UsageApiKeyRow>> {
     // API Key 名称在单个用户内唯一且不支持改名，普通用户视图可以直接按名称聚合。
     let sql = "SELECT \
-        ifNull(api_key_name, '未记录') AS api_key_name_text, \
+        api_key_name AS api_key_name_text, \
         toString(sum(total_tokens)) AS total_tokens_text, \
-        count() AS request_count \
+        sum(request_count) AS request_count \
         FROM ? \
         WHERE user_id = ? \
         GROUP BY api_key_name_text \
@@ -538,7 +486,9 @@ async fn query_usage_api_keys(state: &AppState, user_id: Uuid) -> AppResult<Vec<
     state
         .clickhouse()
         .query(sql)
-        .bind(Identifier(state.config().request_log_table.as_str()))
+        .bind(Identifier(
+            state.config().request_usage_daily_table.as_str(),
+        ))
         .bind(user_id)
         .fetch_all::<UsageApiKeyRow>()
         .await
@@ -553,12 +503,10 @@ async fn query_usage_api_keys(state: &AppState, user_id: Uuid) -> AppResult<Vec<
 
 async fn query_usage_users(state: &AppState) -> AppResult<Vec<UsageUserRow>> {
     let sql = "SELECT \
-        assumeNotNull(user_id) AS user_id, \
-        ifNull(any(username), '') AS username, \
+        user_id, \
         toString(sum(total_tokens)) AS total_tokens_text, \
-        count() AS request_count \
+        sum(request_count) AS request_count \
         FROM ? \
-        WHERE user_id IS NOT NULL \
         GROUP BY user_id \
         HAVING sum(total_tokens) > 0 \
         ORDER BY sum(total_tokens) DESC";
@@ -566,7 +514,9 @@ async fn query_usage_users(state: &AppState) -> AppResult<Vec<UsageUserRow>> {
     state
         .clickhouse()
         .query(sql)
-        .bind(Identifier(state.config().request_log_table.as_str()))
+        .bind(Identifier(
+            state.config().request_usage_daily_table.as_str(),
+        ))
         .fetch_all::<UsageUserRow>()
         .await
         .map_err(|source| {
@@ -617,17 +567,7 @@ fn build_daily_usage(
 ) -> AppResult<Vec<UsageDailyPoint>> {
     let mut rows_by_date = HashMap::with_capacity(rows.len());
     for row in rows {
-        let date = NaiveDate::parse_from_str(&row.usage_date, "%Y-%m-%d").map_err(|source| {
-            error!(
-                error = %source,
-                usage_date = %row.usage_date,
-                timezone = %query.timezone,
-                "ClickHouse 返回了无法解析的每日用量日期"
-            );
-            AppError::DbQuery {
-                message: format!("ClickHouse 返回无效的每日用量日期 {}", row.usage_date),
-            }
-        })?;
+        let date = row.usage_date;
         if date < query.start_date || date >= query.end_date {
             error!(
                 usage_date = %date,

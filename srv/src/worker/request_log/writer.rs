@@ -1,6 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
+use chrono_tz::Tz;
 use clickhouse::{Client, Row};
 use serde::{Deserialize, Serialize};
 use tokio::{sync::mpsc, task::JoinHandle, time};
@@ -41,6 +42,8 @@ pub(super) struct RequestLogRow {
     pub(super) service_tier: Option<String>,
     pub(super) fast_mode: Option<bool>,
     pub(super) is_compaction: Option<bool>,
+    #[serde(with = "clickhouse::serde::chrono::date")]
+    pub(super) usage_date: NaiveDate,
     #[serde(with = "clickhouse::serde::chrono::datetime64::millis")]
     pub(super) request_started_at: DateTime<Utc>,
     #[serde(with = "clickhouse::serde::chrono::datetime64::millis::option")]
@@ -75,10 +78,11 @@ impl RequestLogRow {
     }
 }
 
-impl TryFrom<FinalizedRequestLogEntry> for RequestLogRow {
-    type Error = serde_json::Error;
-
-    fn try_from(finalized: FinalizedRequestLogEntry) -> Result<Self, Self::Error> {
+impl RequestLogRow {
+    fn try_from_finalized(
+        finalized: FinalizedRequestLogEntry,
+        service_timezone: Tz,
+    ) -> Result<Self, serde_json::Error> {
         let FinalizedRequestLogEntry { entry, status } = finalized;
         let usage = entry.token_usage.unwrap_or_default();
         // success/abnormal/failed 已由 worker lifecycle 在收到原子终态时确定；writer
@@ -123,6 +127,10 @@ impl TryFrom<FinalizedRequestLogEntry> for RequestLogRow {
             service_tier,
             fast_mode,
             is_compaction,
+            usage_date: entry
+                .request_started_at
+                .with_timezone(&service_timezone)
+                .date_naive(),
             request_started_at: entry.request_started_at,
             response_started_at: entry.response_started_at,
             response_finished_at: entry.response_finished_at,
@@ -147,9 +155,13 @@ pub(super) struct RequestLogWriter {
 }
 
 impl RequestLogWriter {
-    pub(super) fn spawn(client: Client, table: Arc<str>) -> (Self, JoinHandle<()>) {
+    pub(super) fn spawn(
+        client: Client,
+        table: Arc<str>,
+        service_timezone: Tz,
+    ) -> (Self, JoinHandle<()>) {
         let (tx, rx) = mpsc::channel(REQUEST_LOG_QUEUE_CAPACITY);
-        let task = spawn_writer_task(client, table, rx);
+        let task = spawn_writer_task(client, table, service_timezone, rx);
         (Self { tx }, task)
     }
 
@@ -169,6 +181,7 @@ impl RequestLogWriter {
 fn spawn_writer_task(
     client: Client,
     table: Arc<str>,
+    service_timezone: Tz,
     mut rx: mpsc::Receiver<FinalizedRequestLogEntry>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -178,6 +191,7 @@ fn spawn_writer_task(
             batch_max_rows = REQUEST_LOG_BATCH_MAX_ROWS,
             batch_max_estimated_bytes = REQUEST_LOG_BATCH_MAX_ESTIMATED_BYTES,
             batch_flush_interval_ms = REQUEST_LOG_BATCH_FLUSH_INTERVAL_MS,
+            service_timezone = %service_timezone,
             "请求日志 ClickHouse writer 已启动"
         );
 
@@ -194,7 +208,7 @@ fn spawn_writer_task(
                     };
 
                     let request_id = finalized.entry.request_id;
-                    match RequestLogRow::try_from(finalized) {
+                    match RequestLogRow::try_from_finalized(finalized, service_timezone) {
                         Ok(row) => {
                             if batch.should_flush_before_push(&row) {
                                 flush_request_log_batch(&client, table.as_ref(), &mut batch).await;

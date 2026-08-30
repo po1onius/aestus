@@ -9,6 +9,7 @@ mod writer;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use chrono_tz::Tz;
 use clickhouse::Client;
 use tokio::task::JoinHandle;
 
@@ -23,9 +24,13 @@ pub(super) struct RequestLogWorker {
 }
 
 impl RequestLogWorker {
-    pub(super) fn new(client: Client, table: String) -> (Self, JoinHandle<()>) {
+    pub(super) fn new(
+        client: Client,
+        table: String,
+        service_timezone: Tz,
+    ) -> (Self, JoinHandle<()>) {
         let table: Arc<str> = Arc::from(table);
-        let (writer, writer_task) = RequestLogWriter::spawn(client, table);
+        let (writer, writer_task) = RequestLogWriter::spawn(client, table, service_timezone);
         (
             Self {
                 lifecycle: RequestLogLifecycle::new(writer),

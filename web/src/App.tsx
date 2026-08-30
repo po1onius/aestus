@@ -60,7 +60,7 @@ import {
   pageFromPath,
   routesForUser,
 } from "./lib/routing";
-import { localDateRangeIso, todayInputValue } from "./lib/format";
+import { shiftDateInputValue, todayInputValue } from "./lib/format";
 import { AccountsPage } from "./pages/AccountsPage";
 import { ApiKeysPage } from "./pages/ApiKeysPage";
 import { PluginsPage } from "./pages/PluginsPage";
@@ -124,6 +124,8 @@ export function App() {
   const [currentPath, setCurrentPath] = useState(() => normalizeDashboardPath(window.location.pathname));
   const [authToken, setAuthToken] = useState(() => localStorage.getItem(authTokenStorageKey));
   const [currentUser, setCurrentUser] = useState<DashboardUser | null>(null);
+  const [serviceTimezone, setServiceTimezone] = useState("UTC");
+  const [requestLogRetentionDays, setRequestLogRetentionDays] = useState(30);
   const [theme, setTheme] = useState<DashboardTheme>(() =>
     localStorage.getItem(themeStorageKey) === "dark" ? "dark" : "light",
   );
@@ -174,7 +176,7 @@ export function App() {
   const [requestOverrideHeaderRows, setRequestOverrideHeaderRows] = useState<OverrideEntry[]>([]);
   const [requestOverrideBodyRows, setRequestOverrideBodyRows] = useState<OverrideEntry[]>([]);
   const [requestLogs, setRequestLogs] = useState<RequestLogRecord[]>([]);
-  const [requestLogDate, setRequestLogDate] = useState(() => todayInputValue());
+  const [requestLogDate, setRequestLogDate] = useState(() => todayInputValue("UTC"));
   const [requestLogNonSuccessOnly, setRequestLogNonSuccessOnly] = useState(false);
   const [requestLogNextCursor, setRequestLogNextCursor] = useState<RequestLogCursor | null>(null);
   const [requestLogCursorStack, setRequestLogCursorStack] = useState<Array<RequestLogCursor | null>>([]);
@@ -318,15 +320,15 @@ export function App() {
       return;
     }
 
-    // 固定年度窗口每天会向前滚动一天；把本地日期纳入缓存键，跨午夜后重新进入页面时
+    // 固定年度窗口每天会向前滚动一天；把服务时区日期纳入缓存键，跨午夜后重新进入页面时
     // 自动请求新的 365 天窗口，而不是继续复用上一自然日的结果。
-    const queryKey = `${currentUser.id}:${todayInputValue()}`;
+    const queryKey = `${currentUser.id}:${todayInputValue(serviceTimezone)}`;
     if (usageAutoLoadedKeyRef.current === queryKey) {
       return;
     }
     usageAutoLoadedKeyRef.current = queryKey;
     void loadUsage();
-  }, [activePage, authToken, currentUser]);
+  }, [activePage, authToken, currentUser, serviceTimezone]);
 
   useEffect(() => {
     if (activePage !== "requestLogs" || !currentUser || !authToken) {
@@ -362,6 +364,9 @@ export function App() {
         return;
       }
       setCurrentUser(data.user);
+      setServiceTimezone(data.service_timezone);
+      setRequestLogRetentionDays(data.request_log_retention_days);
+      setRequestLogDate(todayInputValue(data.service_timezone));
     } catch (error) {
       if (isDashboardAuthError(error)) {
         expireDashboardSession(token, error);
@@ -380,6 +385,9 @@ export function App() {
     localStorage.setItem(authTokenStorageKey, data.token);
     setAuthToken(data.token);
     setCurrentUser(data.user);
+    setServiceTimezone(data.service_timezone);
+    setRequestLogRetentionDays(data.request_log_retention_days);
+    setRequestLogDate(todayInputValue(data.service_timezone));
     setCurrentPath(normalizeDashboardPath(window.location.pathname, routesForUser(data.user)));
   }
 
@@ -474,6 +482,9 @@ export function App() {
     localStorage.removeItem(authTokenStorageKey);
     setAuthToken(null);
     setCurrentUser(null);
+    setServiceTimezone("UTC");
+    setRequestLogRetentionDays(30);
+    setRequestLogDate(todayInputValue("UTC"));
     resetDashboardState();
     resetAuthInputs();
   }
@@ -485,6 +496,9 @@ export function App() {
     localStorage.removeItem(authTokenStorageKey);
     setAuthToken(null);
     setCurrentUser(null);
+    setServiceTimezone("UTC");
+    setRequestLogRetentionDays(30);
+    setRequestLogDate(todayInputValue("UTC"));
     resetDashboardState();
     resetAuthInputs();
     toast.error("登录状态已失效", {
@@ -720,14 +734,10 @@ export function App() {
     }
 
     const requestSequence = ++usageRequestSequenceRef.current;
-    const params = new URLSearchParams({
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
-    });
-
     setUsageLoading(true);
     try {
       const data = await requestJson<UsageResponse>(
-        `${usagePath}?${params.toString()}`,
+        usagePath,
         undefined,
         token,
       );
@@ -901,11 +911,9 @@ export function App() {
   }
 
   function requestLogQueryParams(cursor: RequestLogCursor | null) {
-    const range = localDateRangeIso(requestLogDate);
     const params = new URLSearchParams({
       limit: String(requestLogPageSize),
-      start_at: range.startAt,
-      end_at: range.endAt,
+      date: requestLogDate,
     });
 
     if (requestLogNonSuccessOnly) {
@@ -2800,6 +2808,12 @@ export function App() {
           showUsername={currentUser.role === "admin"}
           loading={requestLogsLoading}
           date={requestLogDate}
+          minDate={shiftDateInputValue(
+            todayInputValue(serviceTimezone),
+            -(requestLogRetentionDays - 1),
+          )}
+          maxDate={todayInputValue(serviceTimezone)}
+          timezone={serviceTimezone}
           nonSuccessOnly={requestLogNonSuccessOnly}
           nextCursor={requestLogNextCursor}
           cursorStack={requestLogCursorStack}

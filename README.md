@@ -90,6 +90,17 @@ token usage。Codex model provider 的 Base URL 指向 Aestus 的 `/v1` 后，�
 
 GPT 搜索上游路径默认是 `/alpha/search`，可通过 `AESTUS_GPT_UPSTREAM_SEARCH_PATH` 覆盖。
 
+## 请求日志与用量
+
+ClickHouse 请求明细默认保留 30 天，可通过 `AESTUS_REQUEST_LOG_RETENTION_DAYS` 配置；服务启动时
+会自动同步表 TTL，调小后超期明细将由 ClickHouse 后台异步删除。管理员全局时间线使用主排序键，普通用户查询使用
+`user_id` 轻量投影。请求写入时会按 `AESTUS_TIMEZONE` 计算固定的业务日，并通过增量物化
+视图写入长期保留的日用量聚合表。Dashboard 的全历史总量、模型、API Key、用户分布和最近
+365 天均只查询该聚合表。
+
+`AESTUS_TIMEZONE` 必须是 IANA 时区，例如 `UTC` 或 `Asia/Shanghai`。它定义全部用户共用的业务日
+边界；产生聚合数据后修改该值需要重建日聚合，不应将它当作普通的运行时开关。
+
 ## 目录结构
 
 ```

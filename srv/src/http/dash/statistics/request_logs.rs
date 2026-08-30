@@ -1,14 +1,16 @@
 //! 请求日志明细查询接口。
 //!
-//! 查询直接使用 ClickHouse 的时间范围裁剪和 keyset 分页能力，不经过后台 worker；后续
-//! 统计聚合可以在同级增加独立模块，并复用 Dashboard 鉴权和 ClickHouse client。
+//! 查询按服务固定时区的单个自然日使用 ClickHouse 时间裁剪和 keyset 分页；明细只保留
+//! 30 天，长期用量由独立日聚合表承担。
+
+use std::num::NonZeroU32;
 
 use axum::{
     Json, Router,
     extract::{Query, State},
     routing::get,
 };
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Days, NaiveDate, Utc};
 use clickhouse::{Row, sql::Identifier};
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
@@ -20,16 +22,16 @@ use crate::{
     state::AppState,
 };
 
+use super::calendar::{current_service_date, local_day_range_utc};
+
 const DEFAULT_LIMIT: usize = 100;
 const MAX_LIMIT: usize = 500;
-const MAX_TIME_RANGE_DAYS: i64 = 31;
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ListRequestLogsQuery {
     limit: Option<usize>,
-    start_at: Option<DateTime<Utc>>,
-    end_at: Option<DateTime<Utc>>,
+    /// 服务固定时区下的自然日；省略时查询当天。
+    date: Option<NaiveDate>,
     before_started_at: Option<DateTime<Utc>>,
     before_request_id: Option<Uuid>,
     non_success_only: Option<bool>,
@@ -37,6 +39,8 @@ struct ListRequestLogsQuery {
 
 #[derive(Debug, Serialize)]
 struct ListRequestLogsResponse {
+    date: NaiveDate,
+    timezone: String,
     items: Vec<RequestLogRecord>,
     next_cursor: Option<RequestLogCursor>,
 }
@@ -153,6 +157,12 @@ struct RequestLogQuery {
     non_success_only: bool,
 }
 
+struct RequestLogDateRange {
+    date: NaiveDate,
+    start_at: DateTime<Utc>,
+    end_at: DateTime<Utc>,
+}
+
 struct RequestLogPage {
     items: Vec<RequestLogRecord>,
     next_cursor: Option<RequestLogCursor>,
@@ -174,9 +184,15 @@ async fn list_request_logs(
     Query(query): Query<ListRequestLogsQuery>,
 ) -> AppResult<Json<ListRequestLogsResponse>> {
     let limit = normalize_limit(query.limit)?;
-    let (start_at, end_at) = normalize_time_range(query.start_at, query.end_at)?;
-    let (before_started_at, before_request_id) =
-        normalize_cursor(query.before_started_at, query.before_request_id)?;
+    let timezone = state.config().service_timezone;
+    let retention_days = state.config().request_log_retention_days;
+    let date_range = normalize_log_date(query.date, timezone, retention_days)?;
+    let (before_started_at, before_request_id) = normalize_cursor(
+        query.before_started_at,
+        query.before_request_id,
+        date_range.start_at,
+        date_range.end_at,
+    )?;
     let log_query = RequestLogQuery {
         limit,
         user_id: if current_user.is_admin() {
@@ -184,8 +200,8 @@ async fn list_request_logs(
         } else {
             Some(current_user.id)
         },
-        start_at,
-        end_at,
+        start_at: date_range.start_at,
+        end_at: date_range.end_at,
         before_started_at,
         before_request_id,
         non_success_only: query.non_success_only.unwrap_or(false),
@@ -193,6 +209,8 @@ async fn list_request_logs(
     let page = query_request_log_page(&state, log_query).await?;
 
     Ok(Json(ListRequestLogsResponse {
+        date: date_range.date,
+        timezone: timezone.name().to_owned(),
         items: page.items,
         next_cursor: page.next_cursor,
     }))
@@ -209,40 +227,50 @@ fn normalize_limit(limit: Option<usize>) -> AppResult<usize> {
     Ok(limit)
 }
 
-fn normalize_time_range(
-    start_at: Option<DateTime<Utc>>,
-    end_at: Option<DateTime<Utc>>,
-) -> AppResult<(DateTime<Utc>, DateTime<Utc>)> {
-    let (start_at, end_at) = match (start_at, end_at) {
-        (Some(start_at), Some(end_at)) => (start_at, end_at),
-        (None, None) => default_utc_day_range(),
-        _ => {
-            return Err(AppError::BadRequest {
-                message: "start_at 和 end_at 必须同时传入".to_owned(),
-            });
-        }
-    };
-
-    if start_at >= end_at {
+fn normalize_log_date(
+    date: Option<NaiveDate>,
+    timezone: chrono_tz::Tz,
+    retention_days: NonZeroU32,
+) -> AppResult<RequestLogDateRange> {
+    let today = current_service_date(timezone);
+    // 今天与前 retention_days - 1 个完整自然日始终落在滚动 TTL 内；更早的日期可能已被
+    // ClickHouse 后台 merge 部分或全部清理，因此直接拒绝而不返回容易误解的空结果。
+    let earliest_date = today
+        .checked_sub_days(Days::new(u64::from(retention_days.get() - 1)))
+        .ok_or_else(|| AppError::BadRequest {
+            message: "计算请求日志最早可查日期时超出支持范围".to_owned(),
+        })?;
+    let date = date.unwrap_or(today);
+    if date < earliest_date || date > today {
         return Err(AppError::BadRequest {
-            message: "start_at 必须早于 end_at".to_owned(),
-        });
-    }
-    if end_at - start_at > Duration::days(MAX_TIME_RANGE_DAYS) {
-        return Err(AppError::BadRequest {
-            message: format!("日志查询时间跨度不能超过 {MAX_TIME_RANGE_DAYS} 天"),
+            message: format!(
+                "请求日志日期必须在 {earliest_date} 到 {today} 之间（保留 {} 天，服务时区 {timezone}）",
+                retention_days.get()
+            ),
         });
     }
 
-    Ok((start_at, end_at))
+    let (start_at, end_at) = local_day_range_utc(timezone, date)?;
+    Ok(RequestLogDateRange {
+        date,
+        start_at,
+        end_at,
+    })
 }
 
 fn normalize_cursor(
     before_started_at: Option<DateTime<Utc>>,
     before_request_id: Option<Uuid>,
+    start_at: DateTime<Utc>,
+    end_at: DateTime<Utc>,
 ) -> AppResult<(Option<DateTime<Utc>>, Option<Uuid>)> {
     match (before_started_at, before_request_id) {
         (Some(before_started_at), Some(before_request_id)) => {
+            if before_started_at < start_at || before_started_at >= end_at {
+                return Err(AppError::BadRequest {
+                    message: "请求日志分页光标不属于当前查询日期".to_owned(),
+                });
+            }
             Ok((Some(before_started_at), Some(before_request_id)))
         }
         (None, None) => Ok((None, None)),
@@ -250,15 +278,6 @@ fn normalize_cursor(
             message: "before_started_at 和 before_request_id 必须同时传入".to_owned(),
         }),
     }
-}
-
-fn default_utc_day_range() -> (DateTime<Utc>, DateTime<Utc>) {
-    let start_at = Utc::now()
-        .date_naive()
-        .and_hms_opt(0, 0, 0)
-        .expect("00:00:00 是合法时间")
-        .and_utc();
-    (start_at, start_at + Duration::days(1))
 }
 
 async fn query_request_log_page(

@@ -43,11 +43,15 @@ struct LoginRequest {
 struct AuthResponse {
     token: String,
     user: PublicUser,
+    service_timezone: String,
+    request_log_retention_days: u32,
 }
 
 #[derive(Debug, Serialize)]
 struct MeResponse {
     user: PublicUser,
+    service_timezone: String,
+    request_log_retention_days: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -113,6 +117,8 @@ async fn register(
     Ok(Json(AuthResponse {
         token,
         user: user.into(),
+        service_timezone: state.config().service_timezone.name().to_owned(),
+        request_log_retention_days: state.config().request_log_retention_days.get(),
     }))
 }
 
@@ -145,11 +151,20 @@ async fn login(
     Ok(Json(AuthResponse {
         token,
         user: user.into(),
+        service_timezone: state.config().service_timezone.name().to_owned(),
+        request_log_retention_days: state.config().request_log_retention_days.get(),
     }))
 }
 
-async fn me(CurrentUser(user): CurrentUser) -> AppResult<Json<MeResponse>> {
-    Ok(Json(MeResponse { user: user.into() }))
+async fn me(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+) -> AppResult<Json<MeResponse>> {
+    Ok(Json(MeResponse {
+        user: user.into(),
+        service_timezone: state.config().service_timezone.name().to_owned(),
+        request_log_retention_days: state.config().request_log_retention_days.get(),
+    }))
 }
 
 impl FromRequestParts<AppState> for CurrentUser {
