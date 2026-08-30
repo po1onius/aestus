@@ -1,5 +1,5 @@
 [package]
-name = "gpt-codex-plugin-common"
+name = "gpt-codex-plugin-utils"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

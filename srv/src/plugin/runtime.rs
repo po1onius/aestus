@@ -37,52 +37,61 @@ const PLUGIN_MEMORY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 const STREAM_PLUGIN_MEMORY_LIMIT_BYTES: usize = 2 * 1024 * 1024 * 1024;
 const MAX_OUTPUT_BODY_BYTES: usize = 64 * 1024 * 1024;
 const _: () = assert!(STREAM_PLUGIN_MEMORY_LIMIT_BYTES > MAX_SSE_ITEM_BYTES);
-/// opaque context 只应保存跨请求/响应阶段必需的最小映射。限制独立于 body，避免插件借此
-/// 绕过响应体上限，或因异常输出让单次 attempt 长时间占用大块宿主内存。
-const MAX_PLUGIN_CONTEXT_BYTES: usize = 64 * 1024;
 const MAX_HEADER_VALUES: usize = 256;
 const MAX_HEADER_BYTES: usize = 128 * 1024;
 const MAX_PLUGIN_TEXT_BYTES: usize = 1024;
 
 mod gpt_request_bindings {
     wasmtime::component::bindgen!({
-        path: "wit/request-transformer.wit",
-        world: "gpt-request-transformer",
+        path: ["wit/plugin-types.wit", "wit/request-transformer.wit"],
+        world: "aestus:request-transformer/gpt-request-transformer@1.0.0",
     });
 }
 
 mod claude_request_bindings {
     wasmtime::component::bindgen!({
-        path: "wit/request-transformer.wit",
-        world: "claude-request-transformer",
+        path: ["wit/plugin-types.wit", "wit/request-transformer.wit"],
+        world: "aestus:request-transformer/claude-request-transformer@1.0.0",
     });
 }
 
 mod gpt_buffered_bindings {
     wasmtime::component::bindgen!({
-        path: "wit/buffered-response-transformer.wit",
-        world: "gpt-buffered-response-transformer",
+        path: [
+            "wit/plugin-types.wit",
+            "wit/buffered-response-transformer.wit",
+        ],
+        world: "aestus:buffered-response-transformer/gpt-buffered-response-transformer@1.0.0",
     });
 }
 
 mod claude_buffered_bindings {
     wasmtime::component::bindgen!({
-        path: "wit/buffered-response-transformer.wit",
-        world: "claude-buffered-response-transformer",
+        path: [
+            "wit/plugin-types.wit",
+            "wit/buffered-response-transformer.wit",
+        ],
+        world: "aestus:buffered-response-transformer/claude-buffered-response-transformer@1.0.0",
     });
 }
 
 mod gpt_stream_bindings {
     wasmtime::component::bindgen!({
-        path: "wit/stream-response-transformer.wit",
-        world: "gpt-stream-response-transformer",
+        path: [
+            "wit/plugin-types.wit",
+            "wit/stream-response-transformer.wit",
+        ],
+        world: "aestus:stream-response-transformer/gpt-stream-response-transformer@1.0.0",
     });
 }
 
 mod claude_stream_bindings {
     wasmtime::component::bindgen!({
-        path: "wit/stream-response-transformer.wit",
-        world: "claude-stream-response-transformer",
+        path: [
+            "wit/plugin-types.wit",
+            "wit/stream-response-transformer.wit",
+        ],
+        world: "aestus:stream-response-transformer/claude-stream-response-transformer@1.0.0",
     });
 }
 
@@ -148,23 +157,22 @@ impl RequestPluginInput {
 pub struct RequestPluginOutput {
     pub headers: HeaderMap,
     pub body: Bytes,
-    /// 请求插件声明的成功响应下游交付模式。它可以与实际上游传输协议不同，并必须和
-    /// response context 一样按 attempt 传递，不能在收到响应后根据 Header 猜测。
-    pub response_mode: PluginResponseMode,
-    pub response_context: Option<Bytes>,
+    /// 请求插件声明的响应阶段上下文，与最终 header/body 一起按 attempt 传递。
+    pub response_context: PluginResponseContext,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PluginResponseMode {
-    Stream,
-    Buffered,
+pub struct PluginResponseContext {
+    /// `true` 表示成功响应使用 stream 插槽，`false` 表示使用 buffered 插槽。
+    pub response_mode: bool,
 }
 
-impl PluginResponseMode {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Stream => "stream",
-            Self::Buffered => "buffered",
+impl PluginResponseContext {
+    pub const fn response_mode_str(self) -> &'static str {
+        if self.response_mode {
+            "stream"
+        } else {
+            "buffered"
         }
     }
 }
@@ -176,11 +184,9 @@ pub struct RawPluginResponse {
     pub body: Bytes,
 }
 
-/// buffered 响应与产生该响应的请求插件 context 必须作为一个 attempt-local 输入传递，
-/// 禁止通过 request_id 全局查找，避免重试或并发请求串用上下文。
 pub struct BufferedPluginInput {
     pub response: RawPluginResponse,
-    pub request_context: Option<Bytes>,
+    pub response_context: Option<PluginResponseContext>,
 }
 
 pub struct PluginEffects {
@@ -257,7 +263,6 @@ impl PluginRuntime {
             plugin_memory_limit_bytes = PLUGIN_MEMORY_LIMIT_BYTES,
             stream_plugin_memory_limit_bytes = STREAM_PLUGIN_MEMORY_LIMIT_BYTES,
             max_sse_item_bytes = MAX_SSE_ITEM_BYTES,
-            max_plugin_context_bytes = MAX_PLUGIN_CONTEXT_BYTES,
             "WASM 插件套件运行时已初始化"
         );
         Ok(Self {
@@ -418,12 +423,12 @@ impl PluginRuntime {
         component: &Component,
         status: StatusCode,
         headers: &HeaderMap,
-        request_context: Option<Bytes>,
+        response_context: Option<PluginResponseContext>,
     ) -> AppResult<StreamPluginStartOutput> {
         match binding.provider.as_str() {
-            PROVIDER_GPT => self.start_gpt_stream(component, status, headers, request_context),
+            PROVIDER_GPT => self.start_gpt_stream(component, status, headers, response_context),
             PROVIDER_CLAUDE => {
-                self.start_claude_stream(component, status, headers, request_context)
+                self.start_claude_stream(component, status, headers, response_context)
             }
             provider => Err(AppError::Plugin {
                 message: format!("stream 响应插件 Provider 不受支持: {provider}"),
@@ -459,18 +464,13 @@ impl PluginRuntime {
             .call_transform(&mut store, &input)
             .map_err(plugin_runtime_error)?
             .map_err(|error| request_declared_error(&error.code, &error.message))?;
-        let response_mode = match output.response_mode {
-            common_types::ResponseMode::Stream => PluginResponseMode::Stream,
-            common_types::ResponseMode::Buffered => PluginResponseMode::Buffered,
-        };
         request_output_from_parts(
             output
                 .headers
                 .into_iter()
                 .map(|header| (header.name, header.value)),
             output.body,
-            response_mode,
-            output.response_context,
+            output.response_context.response_mode,
         )
     }
 
@@ -501,18 +501,13 @@ impl PluginRuntime {
             .call_transform(&mut store, &input)
             .map_err(plugin_runtime_error)?
             .map_err(|error| request_declared_error(&error.code, &error.message))?;
-        let response_mode = match output.response_mode {
-            common_types::ResponseMode::Stream => PluginResponseMode::Stream,
-            common_types::ResponseMode::Buffered => PluginResponseMode::Buffered,
-        };
         request_output_from_parts(
             output
                 .headers
                 .into_iter()
                 .map(|header| (header.name, header.value)),
             output.body,
-            response_mode,
-            output.response_context,
+            output.response_context.response_mode,
         )
     }
 
@@ -528,7 +523,11 @@ impl PluginRuntime {
                 headers: headers_to_wit::<common_types::Header>(&input.response.headers)?,
                 body: input.response.body.to_vec(),
             },
-            request_context: input.request_context.map(|context| context.to_vec()),
+            response_context: input
+                .response_context
+                .map(|context| common_types::ResponseContext {
+                    response_mode: context.response_mode,
+                }),
         };
         let mut store = self.new_store(PLUGIN_MEMORY_LIMIT_BYTES)?;
         let linker = Linker::<StoreData>::new(&self.inner.engine);
@@ -555,7 +554,11 @@ impl PluginRuntime {
                 headers: headers_to_wit::<common_types::Header>(&input.response.headers)?,
                 body: input.response.body.to_vec(),
             },
-            request_context: input.request_context.map(|context| context.to_vec()),
+            response_context: input
+                .response_context
+                .map(|context| common_types::ResponseContext {
+                    response_mode: context.response_mode,
+                }),
         };
         let mut store = self.new_store(PLUGIN_MEMORY_LIMIT_BYTES)?;
         let linker = Linker::<StoreData>::new(&self.inner.engine);
@@ -575,7 +578,7 @@ impl PluginRuntime {
         component: &Component,
         status: StatusCode,
         headers: &HeaderMap,
-        request_context: Option<Bytes>,
+        response_context: Option<PluginResponseContext>,
     ) -> AppResult<StreamPluginStartOutput> {
         use gpt_stream_bindings::aestus::stream_response_transformer::common_types;
         let mut store = self.new_store(STREAM_PLUGIN_MEMORY_LIMIT_BYTES)?;
@@ -589,7 +592,9 @@ impl PluginRuntime {
                 status: status.as_u16(),
                 headers: headers_to_wit::<common_types::Header>(headers)?,
             },
-            request_context: request_context.map(|context| context.to_vec()),
+            response_context: response_context.map(|context| common_types::ResponseContext {
+                response_mode: context.response_mode,
+            }),
         };
         let output = bindings
             .call_start(&mut store, &input)
@@ -614,7 +619,7 @@ impl PluginRuntime {
         component: &Component,
         status: StatusCode,
         headers: &HeaderMap,
-        request_context: Option<Bytes>,
+        response_context: Option<PluginResponseContext>,
     ) -> AppResult<StreamPluginStartOutput> {
         use claude_stream_bindings::aestus::stream_response_transformer::common_types;
         let mut store = self.new_store(STREAM_PLUGIN_MEMORY_LIMIT_BYTES)?;
@@ -628,7 +633,9 @@ impl PluginRuntime {
                 status: status.as_u16(),
                 headers: headers_to_wit::<common_types::Header>(headers)?,
             },
-            request_context: request_context.map(|context| context.to_vec()),
+            response_context: response_context.map(|context| common_types::ResponseContext {
+                response_mode: context.response_mode,
+            }),
         };
         let output = bindings
             .call_start(&mut store, &input)
@@ -781,8 +788,7 @@ fn headers_to_wit<H: WitHeader>(headers: &HeaderMap) -> AppResult<Vec<H>> {
 fn request_output_from_parts(
     headers: impl Iterator<Item = (String, Vec<u8>)>,
     body: Vec<u8>,
-    response_mode: PluginResponseMode,
-    response_context: Option<Vec<u8>>,
+    response_mode: bool,
 ) -> AppResult<RequestPluginOutput> {
     if body.len() > MAX_OUTPUT_BODY_BYTES {
         return Err(AppError::Plugin {
@@ -792,34 +798,11 @@ fn request_output_from_parts(
     let mut headers = parse_headers(headers)?;
     headers.remove(header::HOST);
     headers.remove(header::CONTENT_LENGTH);
-    let response_context = validate_plugin_context(response_context)?;
     Ok(RequestPluginOutput {
         headers,
         body: Bytes::from(body),
-        response_mode,
-        response_context,
+        response_context: PluginResponseContext { response_mode },
     })
-}
-
-fn validate_plugin_context(context: Option<Vec<u8>>) -> AppResult<Option<Bytes>> {
-    let Some(context) = context else {
-        return Ok(None);
-    };
-    if context.is_empty() {
-        return Err(AppError::Plugin {
-            message: "请求插件输出的 response-context 不能为空；无上下文时应返回 none".to_owned(),
-        });
-    }
-    if context.len() > MAX_PLUGIN_CONTEXT_BYTES {
-        return Err(AppError::Plugin {
-            message: format!(
-                "请求插件输出的 response-context 超过限制: {} bytes，最大 {} bytes",
-                context.len(),
-                MAX_PLUGIN_CONTEXT_BYTES
-            ),
-        });
-    }
-    Ok(Some(Bytes::from(context)))
 }
 
 fn response_from_parts(

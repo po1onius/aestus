@@ -21,13 +21,21 @@ build:
 
 check:
 	$(CARGO) fmt --all -- --check
-	$(CARGO) test -p gpt-codex-plugin-common
+	$(CARGO) test \
+		-p gpt-codex-plugin-utils \
+		-p gpt-codex-request-plugin \
+		-p gpt-codex-buffered-response-plugin \
+		-p gpt-codex-stream-response-plugin
 	$(CARGO) check --target wasm32-unknown-unknown \
 		-p gpt-codex-request-plugin \
 		-p gpt-codex-buffered-response-plugin \
 		-p gpt-codex-stream-response-plugin
 	$(CARGO) check -p gpt-plugin-componentize
-	$(CARGO) clippy -p gpt-codex-plugin-common --all-targets -- -D warnings
+	$(CARGO) clippy --all-targets \
+		-p gpt-codex-plugin-utils \
+		-p gpt-codex-request-plugin \
+		-p gpt-codex-buffered-response-plugin \
+		-p gpt-codex-stream-response-plugin -- -D warnings
 	$(CARGO) clippy --target wasm32-unknown-unknown \
 		-p gpt-codex-request-plugin \
 		-p gpt-codex-buffered-response-plugin \

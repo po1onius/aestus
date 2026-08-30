@@ -1,5 +1,6 @@
 use std::{
-    fs,
+    fs::{self, File, OpenOptions},
+    io::{self, BufWriter, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{
@@ -17,15 +18,24 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use base64::{
+    Engine,
+    engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD},
+};
+use chrono::{SecondsFormat, Utc};
 use clap::Parser;
-use gpt_codex_plugin_common::{
-    Effects, Header,
-    functions::{
-        AccountResource, BufferedDisposition, BufferedTransformInput, HttpResponse,
-        RequestTransformInput, ResponseHead, ResponseMode, StreamResponseTransformer,
-        StreamStartInput, transform_buffered_response, transform_request,
-    },
-    sse::{JsonSseItem, split_sse_items},
+use gpt_codex_buffered_response_plugin::{
+    BufferedDisposition, BufferedTransformInput, Effects as BufferedEffects,
+    Header as BufferedHeader, HttpResponse as BufferedHttpResponse,
+    ResponseContext as BufferedResponseContext, transform_buffered_response,
+};
+use gpt_codex_plugin_utils::sse::{JsonSseItem, body_has_sse_framing, split_sse_items};
+use gpt_codex_request_plugin::{
+    AccountResource, Header as RequestHeader, RequestTransformInput, transform_request,
+};
+use gpt_codex_stream_response_plugin::{
+    Effects as StreamEffects, Header as StreamHeader, ResponseContext as StreamResponseContext,
+    ResponseHead, StreamResponseTransformer, StreamStartInput,
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -37,6 +47,18 @@ const DEFAULT_UPSTREAM_URL: &str = "https://chatgpt.com/backend-api/codex/respon
 const DEFAULT_OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const DEFAULT_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const MAX_REQUEST_BYTES: usize = 512 * 1024 * 1024;
+const TRACE_DIRECTORY_NAME: &str = "trace";
+
+struct Header {
+    name: String,
+    value: Vec<u8>,
+}
+
+struct HttpResponse {
+    status: u16,
+    headers: Vec<Header>,
+    body: Vec<u8>,
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -68,6 +90,207 @@ struct AppState {
     chatgpt_account_id: Option<Arc<str>>,
     responses_upstream_url: Arc<str>,
     request_sequence: Arc<AtomicU64>,
+}
+
+/// 单次下游请求对应一个调试记录文件。文件始终使用 append 模式打开；创建文件时同时使用
+/// `create_new`，避免同一秒内的并发请求或服务重启后意外复用已有记录。
+///
+/// 调试记录只包含请求体、响应体和转换错误，不写入请求 header，因此 OAuth access token、
+/// refresh token、下游鉴权信息和账号 header 都不会进入文件。
+struct TraceRecorder {
+    file: BufWriter<File>,
+    path: PathBuf,
+}
+
+impl TraceRecorder {
+    fn create(request_id: u64) -> io::Result<Self> {
+        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(TRACE_DIRECTORY_NAME);
+        fs::create_dir_all(&directory)?;
+
+        // 文件名时间精确到秒且便于人工识别。同一秒有多个请求时添加递增序号，仍保证每个
+        // 请求拥有独立文件；`create_new` 使并发创建过程具备原子性。
+        let timestamp = Utc::now().format("%Y-%m-%d_%H-%M-%S_UTC").to_string();
+        for collision_index in 0_u64.. {
+            let file_name = if collision_index == 0 {
+                format!("{timestamp}.trace.log")
+            } else {
+                format!("{timestamp}_{collision_index:02}.trace.log")
+            };
+            let path = directory.join(file_name);
+            match OpenOptions::new().append(true).create_new(true).open(&path) {
+                Ok(file) => {
+                    // pretty JSON 序列化会产生大量小块写入，使用缓冲写入器避免调试记录对
+                    // 大响应产生不必要的系统调用开销；每个逻辑 section 结束时仍显式 flush。
+                    let mut recorder = Self {
+                        file: BufWriter::new(file),
+                        path,
+                    };
+                    recorder.write_text_section(
+                        "调试记录开始",
+                        &format!(
+                            "request_id: {request_id}\ncreated_at: {}",
+                            trace_timestamp()
+                        ),
+                    )?;
+                    return Ok(recorder);
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        unreachable!("文件名碰撞序号不会耗尽")
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// JSON 合法时以缩进格式写入；不合法时保留原始字节并同时记录反序列化错误，确保请求
+    /// 或响应协议损坏时仍能从同一个文件直接定位问题。
+    fn write_json_section(&mut self, title: &str, body: &[u8]) -> io::Result<()> {
+        self.write_section_header(title)?;
+        match serde_json::from_slice::<Value>(body) {
+            Ok(value) => {
+                serde_json::to_writer_pretty(&mut self.file, &value).map_err(json_io_error)?;
+                self.file.write_all(b"\n\n")?;
+            }
+            Err(error) => {
+                writeln!(self.file, "JSON 反序列化失败: {error}")?;
+                writeln!(self.file, "原始内容（{} bytes）：", body.len())?;
+                self.file.write_all(body)?;
+                self.file.write_all(b"\n\n")?;
+            }
+        }
+        self.file.flush()
+    }
+
+    fn write_text_section(&mut self, title: &str, content: &str) -> io::Result<()> {
+        self.write_section_header(title)?;
+        self.file.write_all(content.as_bytes())?;
+        self.file.write_all(b"\n\n")?;
+        self.file.flush()
+    }
+
+    /// 记录上游响应的协议状态。SSE 按空行切成完整 event，再分别反序列化 event 的全部
+    /// `data:` 行；单个 event 损坏时会把错误和原始 event 一起写入，但不会改变后续插件
+    /// 原本应执行的校验与错误返回。
+    fn write_upstream_response(&mut self, status: u16, body: &[u8]) -> io::Result<()> {
+        self.write_text_section(
+            "Codex 上游响应概要",
+            &format!(
+                "received_at: {}\nstatus: {status}\nbody_bytes: {}\nsse_framing: {}",
+                trace_timestamp(),
+                body.len(),
+                body_has_sse_framing(body)
+            ),
+        )?;
+
+        if !body_has_sse_framing(body) {
+            return self.write_json_section("Codex 上游非 SSE 响应体", body);
+        }
+
+        let items = match split_sse_items(body) {
+            Ok(items) => items,
+            Err(message) => {
+                self.write_text_section(
+                    "Codex 上游 SSE 切分失败",
+                    &format!("error: {message}\n原始响应体（{} bytes）：", body.len()),
+                )?;
+                self.file.write_all(body)?;
+                self.file.write_all(b"\n\n")?;
+                return self.file.flush();
+            }
+        };
+
+        for (index, item) in items.into_iter().enumerate() {
+            let title = format!("Codex 上游完整 SSE event #{}", index + 1);
+            self.write_section_header(&title)?;
+            match JsonSseItem::parse(&item) {
+                Ok(Some(parsed)) => {
+                    serde_json::to_writer_pretty(&mut self.file, parsed.value())
+                        .map_err(json_io_error)?;
+                    self.file.write_all(b"\n\n")?;
+                }
+                Ok(None) => {
+                    writeln!(
+                        self.file,
+                        "该 event 不包含可反序列化的 JSON data（可能是注释、空 data 或 [DONE]）。"
+                    )?;
+                    writeln!(self.file, "原始 SSE event（{} bytes）：", item.len())?;
+                    self.file.write_all(&item)?;
+                    self.file.write_all(b"\n")?;
+                }
+                Err(message) => {
+                    writeln!(self.file, "SSE event JSON 反序列化失败: {message}")?;
+                    writeln!(self.file, "原始 SSE event（{} bytes）：", item.len())?;
+                    self.file.write_all(&item)?;
+                    self.file.write_all(b"\n")?;
+                }
+            }
+        }
+        self.file.flush()
+    }
+
+    fn write_error(&mut self, stage: &str, code: &str, message: &str) -> io::Result<()> {
+        self.write_text_section(
+            &format!("处理错误：{stage}"),
+            &format!(
+                "occurred_at: {}\ncode: {code}\nmessage: {message}",
+                trace_timestamp()
+            ),
+        )
+    }
+
+    fn write_section_header(&mut self, title: &str) -> io::Result<()> {
+        writeln!(
+            self.file,
+            "================================================================================"
+        )?;
+        writeln!(self.file, "[{title}]")?;
+        writeln!(
+            self.file,
+            "--------------------------------------------------------------------------------"
+        )
+    }
+}
+
+fn trace_timestamp() -> String {
+    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn json_io_error(error: serde_json::Error) -> io::Error {
+    io::Error::other(error)
+}
+
+/// `reqwest::Error` 的 Display 通常只包含最外层阶段和 URL。调试服务需要保留完整 source
+/// 链才能区分 DNS、TCP、TLS、代理及 HTTP body 读取错误；错误链不包含请求 header。
+fn format_error_chain(error: &dyn std::error::Error) -> String {
+    let mut messages = vec![error.to_string()];
+    let mut source = error.source();
+    while let Some(error) = source {
+        messages.push(error.to_string());
+        source = error.source();
+    }
+    messages.join(" -> ")
+}
+
+/// 统一处理调试文件的写入错误。记录功能属于测试服务的核心职责，因此一旦文件无法继续
+/// 写入就明确终止当前请求，避免调用方误以为已经生成了一份完整可用的调试记录。
+fn write_trace_record(
+    trace: &mut TraceRecorder,
+    request_id: u64,
+    write: impl FnOnce(&mut TraceRecorder) -> io::Result<()>,
+) -> Result<(), ServiceError> {
+    let trace_path = trace.path().to_path_buf();
+    write(trace).map_err(|error| {
+        error!(
+            request_id,
+            trace_path = %trace_path.display(),
+            error = %error,
+            "写入请求调试记录失败"
+        );
+        ServiceError::internal(format!("写入请求调试记录失败: {error}"))
+    })
 }
 
 #[tokio::main]
@@ -114,15 +337,31 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    // CLI 参数只用于临时覆盖，便于多 workspace 调试；常规启动优先使用刷新后回填或
+    // token.toml 中保留的账号 ID。两处都为空时保持 None，请求插件不会生成账号 header。
+    let argument_account_id = arguments
+        .chatgpt_account_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let configured_account_id = match token_config.chatgpt_account_id.trim() {
+        "" => None,
+        value => Some(value.to_owned()),
+    };
+    let account_id_source = if argument_account_id.is_some() {
+        "command-line"
+    } else if configured_account_id.is_some() {
+        "token-file"
+    } else {
+        "absent"
+    };
+    let chatgpt_account_id = argument_account_id.or(configured_account_id).map(Arc::from);
+    let account_id_present = chatgpt_account_id.is_some();
     let state = AppState {
         client,
         access_token: Arc::from(access_token),
-        chatgpt_account_id: arguments
-            .chatgpt_account_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(Arc::from),
+        chatgpt_account_id,
         responses_upstream_url: Arc::from(arguments.upstream_url.as_str()),
         request_sequence: Arc::new(AtomicU64::new(1)),
     };
@@ -142,7 +381,8 @@ async fn main() {
     info!(
         listen = %arguments.listen,
         responses_upstream = %arguments.upstream_url,
-        account_id_present = arguments.chatgpt_account_id.is_some(),
+        account_id_present,
+        account_id_source,
         authentication_source,
         "Codex 协议测试服务已启动"
     );
@@ -164,18 +404,20 @@ enum TokenResolutionError {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct TokenConfig {
-    /// 按配置文件既定协议保留 `accese_token` 拼写；同时接受常见的 `access_token`
-    /// 作为读取别名，回写时始终归一化为 `accese_token`。
-    #[serde(alias = "access_token")]
-    accese_token: String,
+    access_token: String,
     refresh_token: String,
     client_id: String,
+    /// ChatGPT 多 workspace 路由使用的 Account ID。兼容旧版三字段配置；缺失字段按空值
+    /// 处理，并在下一次 refresh 成功提取到 ID 时自动回填。
+    #[serde(default)]
+    chatgpt_account_id: String,
 }
 
 #[derive(Debug)]
 struct RefreshedTokens {
     access_token: String,
     refresh_token: Option<String>,
+    chatgpt_account_id: Option<String>,
 }
 
 /// 从测试服务目录读取固定的 token.toml。日志只记录字段是否存在，不打印任何凭证值。
@@ -185,9 +427,10 @@ fn load_token_config(path: &Path) -> Result<TokenConfig, String> {
         toml::from_str(&content).map_err(|error| format!("凭证文件不是合法 TOML: {error}"))?;
     info!(
         path = %path.display(),
-        access_token_present = !config.accese_token.trim().is_empty(),
+        access_token_present = !config.access_token.trim().is_empty(),
         refresh_token_present = !config.refresh_token.trim().is_empty(),
         client_id_present = !config.client_id.trim().is_empty(),
+        chatgpt_account_id_present = !config.chatgpt_account_id.trim().is_empty(),
         "已读取 OAuth 凭证文件"
     );
     Ok(config)
@@ -212,7 +455,7 @@ async fn resolve_access_token(
     config: &mut TokenConfig,
     token_file_path: &Path,
 ) -> Result<(String, &'static str), TokenResolutionError> {
-    let access_token = config.accese_token.trim();
+    let access_token = config.access_token.trim();
     if !access_token.is_empty() {
         return Ok((access_token.to_owned(), "token-file-access-token"));
     }
@@ -220,7 +463,7 @@ async fn resolve_access_token(
     let refresh_token = config.refresh_token.trim().to_owned();
     if refresh_token.is_empty() {
         return Err(TokenResolutionError::InvalidConfiguration(
-            "accese_token 和 refresh_token 不能同时为空".to_owned(),
+            "access_token 和 refresh_token 不能同时为空".to_owned(),
         ));
     }
     let client_id = match config.client_id.trim() {
@@ -236,15 +479,24 @@ async fn resolve_access_token(
         .await
         .map_err(TokenResolutionError::RefreshFailed)?;
     let rotated_refresh_token_present = refreshed.refresh_token.is_some();
-    config.accese_token = refreshed.access_token.clone();
+    config.access_token = refreshed.access_token.clone();
     if let Some(refresh_token) = refreshed.refresh_token {
         config.refresh_token = refresh_token;
+    }
+    let refreshed_account_id_present = refreshed.chatgpt_account_id.is_some();
+    if let Some(chatgpt_account_id) = refreshed.chatgpt_account_id {
+        config.chatgpt_account_id = chatgpt_account_id;
     }
     config.client_id = client_id;
     persist_token_config(token_file_path, config).map_err(|message| {
         TokenResolutionError::RefreshFailed(format!("OAuth 刷新成功，但{message}"))
     })?;
-    info!(rotated_refresh_token_present, "OAuth 刷新结果已完整保存");
+    info!(
+        rotated_refresh_token_present,
+        refreshed_account_id_present,
+        effective_account_id_present = !config.chatgpt_account_id.trim().is_empty(),
+        "OAuth 刷新结果已完整保存"
+    );
     Ok((refreshed.access_token, "token-file-refresh-token"))
 }
 
@@ -295,11 +547,60 @@ async fn exchange_refresh_token(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
-    info!("已通过 refresh token 获取 access token");
+    let chatgpt_account_id = extract_refreshed_chatgpt_account_id(&value, access_token);
+    info!(
+        chatgpt_account_id_present = chatgpt_account_id.is_some(),
+        "已通过 refresh token 获取 OAuth 身份"
+    );
     Ok(RefreshedTokens {
         access_token: access_token.to_owned(),
         refresh_token,
+        chatgpt_account_id,
     })
+}
+
+/// 按 OAuth 响应的显式字段、id_token、access_token 顺序提取 ChatGPT Account ID。
+/// JWT payload 只用于取得上游路由提示，不参与本地认证决策；bearer token 的真实性仍由
+/// OpenAI 上游验证，因此这里不重复实现 JWT 签名校验。
+fn extract_refreshed_chatgpt_account_id(value: &Value, access_token: &str) -> Option<String> {
+    value
+        .get("chatgpt_account_id")
+        .and_then(Value::as_str)
+        .and_then(non_empty_owned)
+        .or_else(|| {
+            value
+                .get("id_token")
+                .and_then(Value::as_str)
+                .and_then(extract_chatgpt_account_id_from_jwt)
+        })
+        .or_else(|| extract_chatgpt_account_id_from_jwt(access_token))
+}
+
+fn extract_chatgpt_account_id_from_jwt(token: &str) -> Option<String> {
+    let payload = token.split('.').nth(1)?;
+    let decoded = URL_SAFE_NO_PAD
+        .decode(payload)
+        .or_else(|_| URL_SAFE.decode(payload))
+        .ok()?;
+    let value: Value = serde_json::from_slice(&decoded).ok()?;
+    value
+        .get("chatgpt_account_id")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            value
+                .get("https://api.openai.com/auth")
+                .and_then(Value::as_object)
+                .and_then(|auth| auth.get("chatgpt_account_id"))
+                .and_then(Value::as_str)
+        })
+        .and_then(non_empty_owned)
+}
+
+fn non_empty_owned(value: &str) -> Option<String> {
+    match value.trim() {
+        "" => None,
+        value => Some(value.to_owned()),
+    }
 }
 
 /// 只提取 OAuth 错误码并映射为固定说明，避免服务端错误正文意外回显凭证后进入日志。
@@ -351,6 +652,25 @@ async fn create_response(
     body: Bytes,
 ) -> Result<Response, ServiceError> {
     let request_id = state.request_sequence.fetch_add(1, Ordering::Relaxed);
+    let mut trace = TraceRecorder::create(request_id).map_err(|error| {
+        let trace_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(TRACE_DIRECTORY_NAME);
+        error!(
+            request_id,
+            trace_directory = %trace_directory.display(),
+            error = %error,
+            "创建请求调试记录文件失败"
+        );
+        ServiceError::internal(format!("创建请求调试记录文件失败: {error}"))
+    })?;
+    info!(
+        request_id,
+        trace_path = %trace.path().display(),
+        "已创建请求调试记录文件"
+    );
+    write_trace_record(&mut trace, request_id, |trace| {
+        trace.write_json_section("原始下游 Responses 请求体", &body)
+    })?;
+
     let request_summary = summarize_request(&body);
     let model = request_summary
         .model
@@ -368,32 +688,53 @@ async fn create_response(
         "收到 Responses 测试请求"
     );
 
-    let transformed_request = transform_request(RequestTransformInput {
+    let transformed_request = match transform_request(RequestTransformInput {
         account: AccountResource {
             access_token: state.access_token.to_string(),
             chatgpt_account_id: state.chatgpt_account_id.as_deref().map(str::to_owned),
             chatgpt_account_is_fedramp: false,
         },
-        headers: from_axum_headers(&headers),
+        headers: request_headers_from_axum(&headers),
         body: body.to_vec(),
-    })
-    .map_err(|error| {
-        warn!(request_id, code = %error.code, message = %error.message, "请求插件函数拒绝请求");
-        ServiceError::bad_request(error.code, error.message)
+    }) {
+        Ok(transformed) => transformed,
+        Err(error) => {
+            warn!(request_id, code = %error.code, message = %error.message, "请求插件函数拒绝请求");
+            write_trace_record(&mut trace, request_id, |trace| {
+                trace.write_error("请求插件转换", &error.code, &error.message)
+            })?;
+            return Err(ServiceError::bad_request(error.code, error.message));
+        }
+    };
+    write_trace_record(&mut trace, request_id, |trace| {
+        trace.write_json_section(
+            "请求插件转换后实际发送至 Codex 的请求体",
+            &transformed_request.body,
+        )
     })?;
 
     let started_at = Instant::now();
-    let upstream = send_upstream(
+    let upstream = match send_upstream(
         &state,
         state.responses_upstream_url.as_ref(),
         &transformed_request.headers,
         transformed_request.body,
     )
     .await
-    .map_err(|error| {
-        error!(request_id, error = %error, "请求 Codex 上游失败");
-        ServiceError::bad_gateway("upstream_request_failed", error.to_string())
-    })?;
+    {
+        Ok(response) => response,
+        Err(error) => {
+            let error_detail = format_error_chain(&error);
+            error!(request_id, error = %error_detail, "请求 Codex 上游失败");
+            write_trace_record(&mut trace, request_id, |trace| {
+                trace.write_error("请求 Codex 上游", "upstream_request_failed", &error_detail)
+            })?;
+            return Err(ServiceError::bad_gateway(
+                "upstream_request_failed",
+                error_detail,
+            ));
+        }
+    };
     info!(
         request_id,
         upstream_status = upstream.status,
@@ -401,21 +742,33 @@ async fn create_response(
         elapsed_ms = started_at.elapsed().as_millis(),
         "已收到 Codex 上游响应"
     );
+    write_trace_record(&mut trace, request_id, |trace| {
+        trace.write_upstream_response(upstream.status, &upstream.body)
+    })?;
 
     // 与真实宿主一致：非 2xx 永远走 buffered；成功响应才使用请求插件声明的模式。
-    if !(200..300).contains(&upstream.status)
-        || transformed_request.response_mode == ResponseMode::Buffered
+    if !(200..300).contains(&upstream.status) || !transformed_request.response_context.response_mode
     {
-        handle_buffered_response(request_id, upstream, transformed_request.response_context)
+        handle_buffered_response(
+            request_id,
+            upstream,
+            transformed_request.response_context.response_mode,
+            &mut trace,
+        )
     } else {
-        handle_stream_response(request_id, upstream, transformed_request.response_context)
+        handle_stream_response(
+            request_id,
+            upstream,
+            transformed_request.response_context.response_mode,
+            &mut trace,
+        )
     }
 }
 
 async fn send_upstream(
     state: &AppState,
     upstream_url: &str,
-    headers: &[Header],
+    headers: &[RequestHeader],
     body: Vec<u8>,
 ) -> Result<HttpResponse, reqwest::Error> {
     let response = state
@@ -438,34 +791,96 @@ async fn send_upstream(
 fn handle_buffered_response(
     request_id: u64,
     response: HttpResponse,
-    request_context: Option<Vec<u8>>,
+    response_mode: bool,
+    trace: &mut TraceRecorder,
 ) -> Result<Response, ServiceError> {
-    let transformed = transform_buffered_response(BufferedTransformInput {
-        response,
-        request_context,
-    })
-    .map_err(|error| {
-        error!(request_id, code = %error.code, message = %error.message, "缓冲响应插件函数执行失败");
-        ServiceError::bad_gateway(error.code, error.message)
-    })?;
-    log_effects(request_id, &transformed.effects);
+    let upstream_was_sse = body_has_sse_framing(&response.body);
+    let transformed = match transform_buffered_response(BufferedTransformInput {
+        response: BufferedHttpResponse {
+            status: response.status,
+            headers: response
+                .headers
+                .into_iter()
+                .map(|header| BufferedHeader {
+                    name: header.name,
+                    value: header.value,
+                })
+                .collect(),
+            body: response.body,
+        },
+        response_context: Some(BufferedResponseContext { response_mode }),
+    }) {
+        Ok(transformed) => transformed,
+        Err(error) => {
+            error!(request_id, code = %error.code, message = %error.message, "缓冲响应插件函数执行失败");
+            write_trace_record(trace, request_id, |trace| {
+                trace.write_error("缓冲响应插件转换", &error.code, &error.message)
+            })?;
+            return Err(ServiceError::bad_gateway(error.code, error.message));
+        }
+    };
+    log_buffered_effects(request_id, &transformed.effects);
     let BufferedDisposition::Respond(response) = transformed.disposition;
-    validate_json_response(response.status, &response.body).map_err(|message| {
+    if upstream_was_sse {
+        write_trace_record(trace, request_id, |trace| {
+            trace.write_json_section("流式转非流式后的最终 Responses 响应体", &response.body)
+        })?;
+    }
+    if let Err(message) = validate_json_response(response.status, &response.body) {
         error!(request_id, validation_error = %message, "插件输出不是合法 Responses JSON");
-        ServiceError::bad_gateway("invalid_responses_json", message)
-    })?;
+        write_trace_record(trace, request_id, |trace| {
+            trace.write_error(
+                "最终非流式 Responses 校验",
+                "invalid_responses_json",
+                &message,
+            )
+        })?;
+        return Err(ServiceError::bad_gateway("invalid_responses_json", message));
+    }
     info!(
         request_id,
         status = response.status,
         "Responses JSON 格式校验通过"
     );
-    build_response(response)
+    match build_response(HttpResponse {
+        status: response.status,
+        headers: response
+            .headers
+            .into_iter()
+            .map(|header| Header {
+                name: header.name,
+                value: header.value,
+            })
+            .collect(),
+        body: response.body,
+    }) {
+        Ok(response) => {
+            write_trace_record(trace, request_id, |trace| {
+                trace.write_text_section(
+                    "请求处理完成",
+                    &format!(
+                        "completed_at: {}\nresponse_mode: buffered",
+                        trace_timestamp()
+                    ),
+                )
+            })?;
+            Ok(response)
+        }
+        Err(error) => {
+            error!(request_id, error = %error.message, "构造下游非流式响应失败");
+            write_trace_record(trace, request_id, |trace| {
+                trace.write_error("构造下游非流式 HTTP 响应", &error.code, &error.message)
+            })?;
+            Err(error)
+        }
+    }
 }
 
 fn handle_stream_response(
     request_id: u64,
     response: HttpResponse,
-    request_context: Option<Vec<u8>>,
+    response_mode: bool,
+    trace: &mut TraceRecorder,
 ) -> Result<Response, ServiceError> {
     let HttpResponse {
         status,
@@ -473,47 +888,108 @@ fn handle_stream_response(
         body,
     } = response;
     let mut transformer = StreamResponseTransformer::default();
-    let head = transformer
-        .start(StreamStartInput {
-            head: ResponseHead { status, headers },
-            request_context,
-        })
-        .map_err(|error| ServiceError::bad_gateway(error.code, error.message))?;
-    let items = split_sse_items(&body)
-        .map_err(|message| ServiceError::bad_gateway("invalid_upstream_sse", message))?;
+    let head = match transformer.start(StreamStartInput {
+        head: ResponseHead {
+            status,
+            headers: headers
+                .into_iter()
+                .map(|header| StreamHeader {
+                    name: header.name,
+                    value: header.value,
+                })
+                .collect(),
+        },
+        response_context: Some(StreamResponseContext { response_mode }),
+    }) {
+        Ok(head) => head,
+        Err(error) => {
+            write_trace_record(trace, request_id, |trace| {
+                trace.write_error("流式响应插件启动", &error.code, &error.message)
+            })?;
+            return Err(ServiceError::bad_gateway(error.code, error.message));
+        }
+    };
+    let items = match split_sse_items(&body) {
+        Ok(items) => items,
+        Err(message) => {
+            write_trace_record(trace, request_id, |trace| {
+                trace.write_error("切分 Codex SSE 响应", "invalid_upstream_sse", &message)
+            })?;
+            return Err(ServiceError::bad_gateway("invalid_upstream_sse", message));
+        }
+    };
     let mut transformed_body = Vec::with_capacity(body.len());
     for item in items {
-        let transformed = transformer.transform_item(item).map_err(|error| {
-            error!(request_id, code = %error.code, message = %error.message, "流式响应插件函数执行失败");
-            ServiceError::bad_gateway(error.code, error.message)
-        })?;
-        log_effects(request_id, &transformed.effects);
+        let transformed = match transformer.transform_item(item) {
+            Ok(transformed) => transformed,
+            Err(error) => {
+                error!(request_id, code = %error.code, message = %error.message, "流式响应插件函数执行失败");
+                write_trace_record(trace, request_id, |trace| {
+                    trace.write_error("流式响应插件 event 转换", &error.code, &error.message)
+                })?;
+                return Err(ServiceError::bad_gateway(error.code, error.message));
+            }
+        };
+        log_stream_effects(request_id, &transformed.effects);
         if let Some(item) = transformed.item {
             transformed_body.extend_from_slice(&item);
         }
     }
-    let finished = transformer
-        .finish()
-        .map_err(|error| ServiceError::bad_gateway(error.code, error.message))?;
-    log_effects(request_id, &finished.effects);
+    let finished = match transformer.finish() {
+        Ok(finished) => finished,
+        Err(error) => {
+            write_trace_record(trace, request_id, |trace| {
+                trace.write_error("流式响应插件结束", &error.code, &error.message)
+            })?;
+            return Err(ServiceError::bad_gateway(error.code, error.message));
+        }
+    };
+    log_stream_effects(request_id, &finished.effects);
     for item in finished.items {
         transformed_body.extend_from_slice(&item);
     }
 
-    validate_sse_response(&transformed_body).map_err(|message| {
+    if let Err(message) = validate_sse_response(&transformed_body) {
         error!(request_id, validation_error = %message, "插件输出不是合法 Responses SSE");
-        ServiceError::bad_gateway("invalid_responses_sse", message)
-    })?;
+        write_trace_record(trace, request_id, |trace| {
+            trace.write_error("最终流式 Responses 校验", "invalid_responses_sse", &message)
+        })?;
+        return Err(ServiceError::bad_gateway("invalid_responses_sse", message));
+    }
     info!(
         request_id,
         event_stream_bytes = transformed_body.len(),
         "Responses SSE 格式校验通过"
     );
-    build_response(HttpResponse {
+    match build_response(HttpResponse {
         status: head.status,
-        headers: head.headers,
+        headers: head
+            .headers
+            .into_iter()
+            .map(|header| Header {
+                name: header.name,
+                value: header.value,
+            })
+            .collect(),
         body: transformed_body,
-    })
+    }) {
+        Ok(response) => {
+            write_trace_record(trace, request_id, |trace| {
+                trace.write_text_section(
+                    "请求处理完成",
+                    &format!("completed_at: {}\nresponse_mode: stream", trace_timestamp()),
+                )
+            })?;
+            Ok(response)
+        }
+        Err(error) => {
+            error!(request_id, error = %error.message, "构造下游流式响应失败");
+            write_trace_record(trace, request_id, |trace| {
+                trace.write_error("构造下游流式 HTTP 响应", &error.code, &error.message)
+            })?;
+            Err(error)
+        }
+    }
 }
 
 fn validate_json_response(status: u16, body: &[u8]) -> Result<(), String> {
@@ -673,17 +1149,17 @@ fn build_response(response: HttpResponse) -> Result<Response, ServiceError> {
         .map_err(|error| ServiceError::internal(error.to_string()))
 }
 
-fn from_axum_headers(headers: &HeaderMap) -> Vec<Header> {
+fn request_headers_from_axum(headers: &HeaderMap) -> Vec<RequestHeader> {
     headers
         .iter()
-        .map(|(name, value)| Header {
+        .map(|(name, value)| RequestHeader {
             name: name.as_str().to_owned(),
             value: value.as_bytes().to_vec(),
         })
         .collect()
 }
 
-fn to_reqwest_headers(headers: &[Header]) -> reqwest::header::HeaderMap {
+fn to_reqwest_headers(headers: &[RequestHeader]) -> reqwest::header::HeaderMap {
     let mut output = reqwest::header::HeaderMap::new();
     for header in headers {
         let Ok(name) = reqwest::header::HeaderName::from_bytes(header.name.as_bytes()) else {
@@ -730,7 +1206,24 @@ fn summarize_request(body: &[u8]) -> RequestSummary {
     }
 }
 
-fn log_effects(request_id: u64, effects: &Effects) {
+fn log_buffered_effects(request_id: u64, effects: &BufferedEffects) {
+    if let Some(usage) = effects.usage {
+        info!(
+            request_id,
+            input_tokens = usage.input_tokens,
+            cached_input_tokens = usage.cached_input_tokens,
+            output_tokens = usage.output_tokens,
+            reasoning_output_tokens = usage.reasoning_output_tokens,
+            total_tokens = usage.total_tokens,
+            "插件提取到累计 usage"
+        );
+    }
+    if let Some(feedback) = effects.feedback.as_ref() {
+        warn!(request_id, feedback = ?feedback, "插件产生上游 maintenance feedback");
+    }
+}
+
+fn log_stream_effects(request_id: u64, effects: &StreamEffects) {
     if let Some(usage) = effects.usage {
         info!(
             request_id,

@@ -9,5 +9,6 @@ web/vite.config.d.ts
 web/dev-server*.log
 deploy/.env
 codex-proto-test-server/token.toml
+codex-proto-test-server/trace/
 .secrets/
 *.tar

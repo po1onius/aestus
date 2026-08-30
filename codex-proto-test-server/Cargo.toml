@@ -6,8 +6,13 @@ publish = false
 
 [dependencies]
 axum = "0.8.9"
+base64 = "0.22.1"
+chrono = "0.4.45"
 clap = { version = "4.6.6", features = ["derive"] }
-gpt-codex-plugin-common = { path = "../plugin/crates/common" }
+gpt-codex-buffered-response-plugin = { path = "../plugin/crates/buffered-response" }
+gpt-codex-plugin-utils = { path = "../plugin/crates/utils" }
+gpt-codex-request-plugin = { path = "../plugin/crates/request" }
+gpt-codex-stream-response-plugin = { path = "../plugin/crates/stream-response" }
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

@@ -1,27 +1,18 @@
 package aestus:request-transformer@1.0.0;
 
 interface common-types {
+    use aestus:plugin-types/response-types@1.0.0.{response-context};
+
     record header {
         name: string,
         value: list<u8>,
     }
 
-    /// 请求插件声明的成功响应下游交付模式。它可以不同于实际上游传输协议：例如插件可
-    /// 向上游固定请求 SSE，同时声明 buffered，由响应插件在完整收集后转换为 JSON。
-    /// 非成功 HTTP 响应仍固定走 buffered。
-    enum response-mode {
-        %stream,
-        buffered,
-    }
-
     record transform-output {
         headers: list<header>,
         body: list<u8>,
-        /// 与最终 header/body 同属一次 attempt 的权威响应交付模式。
-        response-mode: response-mode,
-        /// 请求插件写入、宿主按本次上游 attempt 原样转交给同套件响应插件的透明上下文。
-        /// `some` 的内容必须非空且不超过宿主限制；宿主不会解析、记录或持久化它。
-        response-context: option<list<u8>>,
+        /// 与最终 header/body 同属一次 attempt 的权威响应阶段上下文。
+        response-context: response-context,
     }
 
     record transform-error {

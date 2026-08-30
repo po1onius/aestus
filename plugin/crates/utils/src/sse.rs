@@ -5,8 +5,59 @@ use serde_json::Value;
 pub fn body_has_sse_framing(body: &[u8]) -> bool {
     body.split(|byte| *byte == b'\n').any(|line| {
         let line = line.strip_suffix(b"\r").unwrap_or(line);
-        line.starts_with(b"data:") || line.starts_with(b"event:")
+        line == b"data"
+            || line == b"event"
+            || line.starts_with(b"data:")
+            || line.starts_with(b"event:")
     })
+}
+
+/// 严格遍历完整 SSE body 中的 JSON data payload。
+///
+/// buffered 转非流式响应必须知道是否丢失了任何事件，因此非空且不是 `[DONE]` 的 data
+/// 一旦无法解析就立即报错。多行 data 严格按照 SSE 规范用换行拼接，不兼容缺少事件空行
+/// 的畸形传输；这种上游协议错误不能被悄悄解释成多条独立事件。每个 JSON value 在回调
+/// 返回后立即释放，避免把不会参与最终响应构造的 delta 事件全部保存在内存中。
+pub fn try_for_each_json_data_value(
+    body: &[u8],
+    mut visit: impl FnMut(Value) -> Result<(), String>,
+) -> Result<bool, String> {
+    if !body_has_sse_framing(body) {
+        return Ok(false);
+    }
+    let text =
+        std::str::from_utf8(body).map_err(|error| format!("SSE 响应体不是合法 UTF-8: {error}"))?;
+    let mut data_lines = Vec::<&str>::new();
+    for raw_line in text.split('\n') {
+        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        if let Some(data) = data_field_value_ref(line) {
+            data_lines.push(data);
+            continue;
+        }
+        if line.is_empty() {
+            visit_json_event_data(&data_lines, &mut visit)?;
+            data_lines.clear();
+        }
+    }
+    visit_json_event_data(&data_lines, &mut visit)?;
+    Ok(true)
+}
+
+fn visit_json_event_data(
+    lines: &[&str],
+    visit: &mut impl FnMut(Value) -> Result<(), String>,
+) -> Result<(), String> {
+    if lines.is_empty() {
+        return Ok(());
+    }
+    let data = lines.join("\n");
+    let data = data.trim();
+    if data.is_empty() || data == "[DONE]" {
+        return Ok(());
+    }
+    let value = serde_json::from_str::<Value>(data)
+        .map_err(|error| format!("SSE data 不是合法 JSON: {error}"))?;
+    visit(value)
 }
 
 /// 遍历完整 SSE body 中的 JSON data payload。

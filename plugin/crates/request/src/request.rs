@@ -1,9 +1,8 @@
 use serde_json::{Map, Value, json};
 
-const CODEX_INSTRUCTIONS: &str = include_str!("instructions/codex.txt");
-const GPT_5_1_INSTRUCTIONS: &str = include_str!("instructions/gpt5_1.txt");
-const GPT_5_2_INSTRUCTIONS: &str = include_str!("instructions/gpt5_2.txt");
-const GPT_5_5_INSTRUCTIONS: &str = include_str!("instructions/gpt5_5.txt");
+/// 调用方没有提供 instructions 时使用固定的基础提示词。model 是不透明的上游路由标识，
+/// 不能再参与提示词选择，否则新增模型或自定义模型 ID 会被插件隐式赋予额外语义。
+const DEFAULT_CODEX_INSTRUCTIONS: &str = include_str!("instructions/gpt5_5.txt");
 const UNSUPPORTED_OAUTH_FIELDS: &[&str] = &[
     "max_output_tokens",
     "temperature",
@@ -34,14 +33,11 @@ pub fn transform_oauth_body(body: &[u8]) -> Result<OAuthTransformOutput, String>
         .ok_or_else(|| "GPT Responses 请求体必须是 JSON object".to_owned())?;
     let downstream_streaming = object.get("stream").and_then(Value::as_bool) == Some(true);
 
-    let original_model = require_model(object)?.to_owned();
+    // model 仅校验结构，不做 trim、alias 归一化、后缀解析或任何信息推导；JSON 中的原始值
+    // 将被逐字保留并发送给上游。
+    require_model(object)?;
     reject_previous_response_id(object)?;
     normalize_prompt(object)?;
-    let inferred_effort = effort_suffix(&original_model);
-    object.insert(
-        "model".to_owned(),
-        Value::String(normalize_codex_model(&original_model)),
-    );
 
     // ChatGPT internal Responses 固定使用不落库的流式协议。即使下游显式给出相反值，
     // OAuth 插件也拥有最终上游请求语义，因此这里直接覆盖。
@@ -51,12 +47,11 @@ pub fn transform_oauth_body(body: &[u8]) -> Result<OAuthTransformOutput, String>
         object.remove(*field);
     }
 
-    normalize_reasoning(object, inferred_effort);
     normalize_service_tier(object);
 
     // 顶层 instructions 只承载调用方显式指令或 Codex base prompt；system 输入消息单独
     // 转成 developer，不能再复制到 instructions，否则同一条高优先级指令会进入上下文两次。
-    ensure_instructions(object, &original_model);
+    ensure_instructions(object);
     normalize_system_messages(object);
     normalize_input(object);
 
@@ -129,126 +124,6 @@ fn looks_like_message_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
-/// 对齐 sub2api 当前 Codex alias：只归一化已知模型，未知模型保留调用方值，避免插件
-/// 在新增模型发布时擅自降级。
-pub fn normalize_codex_model(model: &str) -> String {
-    let trimmed = model.trim();
-    let model_id = trimmed.rsplit('/').next().unwrap_or(trimmed);
-    let key = model_id
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join("-")
-        .to_ascii_lowercase();
-
-    let exact = match key.as_str() {
-        "gpt-5.6-sol" => Some("gpt-5.6-sol"),
-        "gpt-5.6-terra" => Some("gpt-5.6-terra"),
-        "gpt-5.6-luna" => Some("gpt-5.6-luna"),
-        "gpt-5.5" => Some("gpt-5.5"),
-        "gpt-5.5-pro" => Some("gpt-5.5-pro"),
-        "codex-auto-review" => Some("codex-auto-review"),
-        "gpt-5.4" => Some("gpt-5.4"),
-        "gpt-5.4-mini" => Some("gpt-5.4-mini"),
-        "gpt-5.4-none"
-        | "gpt-5.4-low"
-        | "gpt-5.4-medium"
-        | "gpt-5.4-high"
-        | "gpt-5.4-xhigh"
-        | "gpt-5.4-chat-latest" => Some("gpt-5.4"),
-        "gpt-5.3"
-        | "gpt-5.3-none"
-        | "gpt-5.3-low"
-        | "gpt-5.3-medium"
-        | "gpt-5.3-high"
-        | "gpt-5.3-xhigh"
-        | "gpt-5.3-codex"
-        | "gpt-5.3-codex-low"
-        | "gpt-5.3-codex-medium"
-        | "gpt-5.3-codex-high"
-        | "gpt-5.3-codex-xhigh" => Some("gpt-5.3-codex"),
-        "gpt-5.2" | "gpt-5.2-none" | "gpt-5.2-low" | "gpt-5.2-medium" | "gpt-5.2-high"
-        | "gpt-5.2-xhigh" | "gpt-5.2-codex" => Some("gpt-5.2"),
-        "gpt-5" | "gpt-5-mini" | "gpt-5-nano" | "gpt-5.1" => Some("gpt-5.4"),
-        "gpt-5.1-codex" | "gpt-5.1-codex-max" | "gpt-5.1-codex-mini" | "codex-mini-latest"
-        | "gpt-5-codex" => Some("gpt-5.3-codex"),
-        _ => None,
-    };
-    if let Some(exact) = exact {
-        return exact.to_owned();
-    }
-
-    for (prefix, target) in [
-        ("gpt-5.6-sol", "gpt-5.6-sol"),
-        ("gpt-5.6-terra", "gpt-5.6-terra"),
-        ("gpt-5.6-luna", "gpt-5.6-luna"),
-        ("gpt-5.3-codex", "gpt-5.3-codex"),
-        ("gpt-5.4-mini", "gpt-5.4-mini"),
-        ("gpt-5.4-nano", "gpt-5.4-nano"),
-        ("gpt-5.5-pro", "gpt-5.5-pro"),
-        ("gpt-5.5", "gpt-5.5"),
-        ("gpt-5.4", "gpt-5.4"),
-        ("gpt-5.2", "gpt-5.2"),
-    ] {
-        if key == prefix
-            || key
-                .strip_prefix(prefix)
-                .and_then(|suffix| suffix.strip_prefix('-'))
-                .is_some_and(is_known_model_suffix)
-        {
-            return target.to_owned();
-        }
-    }
-    trimmed.to_owned()
-}
-
-fn is_known_model_suffix(suffix: &str) -> bool {
-    matches!(
-        suffix,
-        "none" | "minimal" | "low" | "medium" | "high" | "xhigh"
-    ) || is_date_suffix(suffix)
-}
-
-fn is_date_suffix(suffix: &str) -> bool {
-    let parts = suffix.split('-').collect::<Vec<_>>();
-    parts.len() == 3
-        && parts[0].len() == 4
-        && parts[1].len() == 2
-        && parts[2].len() == 2
-        && parts
-            .iter()
-            .all(|part| part.bytes().all(|byte| byte.is_ascii_digit()))
-}
-
-fn effort_suffix(model: &str) -> Option<&'static str> {
-    let suffix = model.trim().rsplit('-').next()?;
-    match suffix.to_ascii_lowercase().as_str() {
-        "minimal" | "none" => Some("none"),
-        "low" => Some("low"),
-        "medium" => Some("medium"),
-        "high" => Some("high"),
-        "xhigh" => Some("xhigh"),
-        _ => None,
-    }
-}
-
-fn normalize_reasoning(object: &mut Map<String, Value>, inferred_effort: Option<&str>) {
-    if !object.contains_key("reasoning")
-        && let Some(effort) = inferred_effort
-    {
-        object.insert("reasoning".to_owned(), json!({"effort": effort}));
-    }
-    let Some(Value::Object(reasoning)) = object.get_mut("reasoning") else {
-        return;
-    };
-    if reasoning
-        .get("effort")
-        .and_then(Value::as_str)
-        .is_some_and(|effort| effort.eq_ignore_ascii_case("minimal"))
-    {
-        reasoning.insert("effort".to_owned(), Value::String("none".to_owned()));
-    }
-}
-
 /// 官方 Responses 将 `fast` 定义为 `priority` 的请求别名，响应也统一回显
 /// `priority`。这里只转换这一组等价标准值；其他值保持原样，由上游按自身能力校验。
 fn normalize_service_tier(object: &mut Map<String, Value>) {
@@ -297,7 +172,7 @@ fn normalize_system_messages(object: &mut Map<String, Value>) {
     }
 }
 
-fn ensure_instructions(object: &mut Map<String, Value>, model: &str) {
+fn ensure_instructions(object: &mut Map<String, Value>) {
     let missing = object
         .get("instructions")
         .and_then(Value::as_str)
@@ -305,25 +180,8 @@ fn ensure_instructions(object: &mut Map<String, Value>, model: &str) {
     if missing {
         object.insert(
             "instructions".to_owned(),
-            Value::String(codex_instructions_for_model(model).to_owned()),
+            Value::String(DEFAULT_CODEX_INSTRUCTIONS.to_owned()),
         );
-    }
-}
-
-/// 与 sub2api 的 `CodexBaseInstructionsForModel` 使用同一组内嵌 prompt 和选择规则。
-/// 这里刻意按下游原始 model 选择，避免模型 alias 归一化改变 base prompt。
-fn codex_instructions_for_model(model: &str) -> &'static str {
-    let model = model.trim().to_ascii_lowercase();
-    if model.contains("codex") {
-        CODEX_INSTRUCTIONS
-    } else if model.starts_with("gpt-5.5") {
-        GPT_5_5_INSTRUCTIONS
-    } else if model.starts_with("gpt-5.2") {
-        GPT_5_2_INSTRUCTIONS
-    } else if model.starts_with("gpt-5.1") {
-        GPT_5_1_INSTRUCTIONS
-    } else {
-        GPT_5_5_INSTRUCTIONS
     }
 }
 
@@ -357,13 +215,13 @@ mod tests {
         }"#;
         let output = transform_oauth_body(body).unwrap();
         let value: Value = serde_json::from_slice(&output.body).unwrap();
-        assert_eq!(value["model"], "gpt-5.4");
+        assert_eq!(value["model"], "gpt-5.4-high");
         assert_eq!(value["stream"], true);
         assert!(!output.downstream_streaming);
         assert_eq!(value["store"], false);
         assert!(value.get("temperature").is_none());
         assert!(value.get("user").is_none());
-        assert_eq!(value["reasoning"]["effort"], "high");
+        assert!(value.get("reasoning").is_none());
         assert_eq!(value["tools"][0]["name"], "lookup");
         assert!(value["tools"][0].get("function").is_none());
         assert_eq!(value["tool_choice"]["name"], "lookup");
@@ -383,7 +241,7 @@ mod tests {
         )
         .unwrap();
         let value: Value = serde_json::from_slice(&output.body).unwrap();
-        assert_eq!(value["model"], "gpt-5.3-codex");
+        assert_eq!(value["model"], "gpt-5.3");
         assert_eq!(value["input"][0]["role"], "user");
         assert_eq!(value["tools"][0]["output_format"], "png");
         assert_eq!(value["tools"][0]["output_compression"], 80);
@@ -432,16 +290,13 @@ mod tests {
     }
 
     #[test]
-    fn unknown_model_is_not_silently_replaced() {
-        assert_eq!(
-            normalize_codex_model("vendor/future-model"),
-            "vendor/future-model"
-        );
-        assert_eq!(
-            normalize_codex_model("openai/gpt-5.6-sol-xhigh"),
-            "gpt-5.6-sol"
-        );
-        assert_eq!(normalize_codex_model("gpt-5.5-2026-07-01"), "gpt-5.5");
+    fn model_is_preserved_without_deriving_reasoning() {
+        let output =
+            transform_oauth_body(br#"{"model":"openai/gpt-5.6-sol-xhigh","input":"hello"}"#)
+                .unwrap();
+        let value: Value = serde_json::from_slice(&output.body).unwrap();
+        assert_eq!(value["model"], "openai/gpt-5.6-sol-xhigh");
+        assert!(value.get("reasoning").is_none());
     }
 
     #[test]
@@ -488,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn model_specific_fields_are_normalized() {
+    fn model_independent_fields_are_normalized() {
         let output = transform_oauth_body(
             br#"{
                 "model":"gpt-5.2",
@@ -506,7 +361,7 @@ mod tests {
             value["instructions"]
                 .as_str()
                 .unwrap()
-                .starts_with("You are GPT-5.2 running in the Codex CLI")
+                .starts_with("You are Codex")
         );
     }
 }

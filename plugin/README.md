@@ -17,39 +17,44 @@ Codex OAuth 上游固定使用 SSE。下游传入 `stream=false` 时，套件会
 
 ## 函数调用接口
 
-实际转换能力集中在 `gpt-codex-plugin-common::functions`，不依赖 WASM 或 WIT 类型，可由
-普通 Rust 程序直接调用：
+三个插件分别拥有自己的完整转换实现，不依赖其他插件的业务类型或业务函数。每个 crate
+公开不依赖 WASM/WIT 的 Rust 入口，可由普通 Rust 程序直接调用：
 
-- `transform_request`：改造 OAuth 请求 header/body，并返回下游响应模式；
-- `transform_buffered_response`：处理非流式 JSON、错误响应以及完整 SSE 到 JSON 的转换；
-- `StreamResponseTransformer::{start, transform_item, finish}`：处理一条流式响应的完整生命周期。
+- `gpt-codex-request-plugin::transform_request`：改造 OAuth 请求 header/body，并返回下游响应模式；
+- `gpt-codex-buffered-response-plugin::transform_buffered_response`：处理非流式 JSON、错误响应
+  以及完整 SSE 到 JSON 的转换；
+- `gpt-codex-stream-response-plugin::StreamResponseTransformer`：处理一条流式响应的完整生命周期。
 
-三个 WASM Component 只负责 WIT 类型映射，内部调用同一组函数，因此函数调用和上传到
-Dashboard 的组件不会形成两套业务实现。
+`gpt-codex-plugin-utils` 只提供通用 SSE framing 解析、切分和重渲染工具，不包含请求字段、
+响应字段、header、usage、maintenance、重试或聚合规则。buffered 与 stream 即使当前存在
+相同响应规则，也各自在自己的 crate 内实现，后续修改不会隐式改变另一个插件。三个 WASM
+Component 只负责各自 WIT 类型映射，因此 Rust 函数入口和上传到 Dashboard 的组件仍使用
+同一份插件内业务实现。
 
 ## 请求转换
 
 请求插件会执行以下操作：
 
 - 请求体必须是 JSON object，并且包含非空字符串 `model`；
-- 保存调用方原始 `stream`。只有原始值为布尔 `true` 时输出 `response-mode=stream`，
-  其他情况输出 `buffered`；
+- 保存调用方原始 `stream`。请求输出统一使用 `response-context` record，其中
+  `response-mode=true` 表示 stream，`false` 表示 buffered；只有原始值为布尔 `true`
+  时才输出 `true`；
 - 发给 Codex 上游的 body 无论下游模式如何，都固定为 `store=false`、`stream=true`；
 - 拒绝非空 `previous_response_id`。HTTP `/v1/responses` 不支持 Responses WebSocket v2 的
   连接态续链语义；
 - 删除 `prompt=null`，并拒绝非空的顶层 `prompt`。非空值用于引用标准 Responses API 的
   可复用 Prompt 模板，但 ChatGPT Codex OAuth 上游不支持；请改用 `instructions` 和
   `input`；
-- 归一化已知 Codex model alias，并从 `-minimal/-none/-low/-medium/-high/-xhigh` 后缀
-  推导 reasoning effort；未知 model 保持调用方原值；
+- `model` 作为不透明的上游路由标识原样透传；插件不解析 alias、版本或 effort 后缀，也不
+  使用 model 推导任何其他请求字段；
 - 删除 Codex OAuth 上游不支持的字段：`max_output_tokens`、`temperature`、`top_p`、
   `frequency_penalty`、`presence_penalty`、`user`、`metadata`、
   `prompt_cache_retention`、`safety_identifier` 和 `stream_options`；
-- 将 `reasoning.effort=minimal` 改为 `none`；`include` 完全保持调用方原值，插件不会因
+- `reasoning` 和 `include` 完全保持调用方原值；插件不归一化 `reasoning.effort`，也不会因
   `reasoning` 非空而自动添加 `reasoning.encrypted_content`；
 - 将 `service_tier=fast` 归一化为 `priority`；`text` 完全保持调用方原值，插件不再针对
   `text.verbosity` 做模型判断或删除；
-- `instructions` 缺失或为空时，按照调用方的原始 model 注入对应的内置 Codex base prompt；
+- `instructions` 缺失或为空时，注入固定的内置 Codex base prompt，不根据 model 选择；
 - 将 input 中的 `role=system` 原位改为 `developer`，不会重复复制到顶层 `instructions`；
 - 将字符串 `input` 转为 user message 数组；空字符串转为空数组；
 - 所有 input item 的 `id` 以及 `item_reference` 完全保持调用方原值，不再判断续链输入或
@@ -73,8 +78,10 @@ Dashboard 的组件不会形成两套业务实现。
 - 将 `role=tool` 转成 `function_call_output`；
 - 对 Spark 模型注入图片能力说明。
 
-请求插件当前始终返回空的 `response_context`，响应插件也不执行工具名称恢复或原始 model
-回写。
+请求 ABI 不再提供独立的 `response-mode` enum 或透明字节 `response-context`。模式被收敛到
+必填的 `response-context.response-mode: bool`。宿主会把同一 record 按 attempt 传给被选中的
+buffered 或 stream 响应插件；未执行请求插件时，响应插件输入中的 `response-context` 为
+`none`。当前响应转换不使用该模式补齐 Response，避免把请求配置误当成上游响应事实。
 
 请求插件主动返回的 `transform-error` 表示调用方请求不受支持或结构非法。宿主不会发送
 上游 HTTP 请求，也不会调用 buffered/stream 响应插件，而是使用插件公开的 `code/message`
@@ -105,19 +112,19 @@ Dashboard 的组件不会形成两套业务实现。
 
 缓冲响应插件用于下游 `stream=false` 的成功响应，以及所有非 2xx HTTP 响应。
 
-如果上游 2xx body 已经是 JSON，插件会先校验它是标准的 Response object，再提取 effects
-并执行通用响应字段修正；非 2xx JSON 或非 JSON 错误响应仍保持上游状态和 body。如果成功
-响应具有 SSE framing，则按以下顺序转换为一个 Responses JSON：
+如果上游 body 已经是 JSON，插件只提取 effects 并执行通用响应字段转换，不校验它是否为
+标准 Response object；非 2xx JSON 或非 JSON 错误响应仍保持上游状态和 body。如果成功响应
+具有 SSE framing，则按以下顺序转换为一个 JSON：
 
-1. 提取首个 completed、done、incomplete、failed 或 cancelled 终止事件中的完整
-   `response` object，并保持它的原始状态和 HTTP 状态；
-2. 终止对象的 `output` 为空时，优先按到达顺序保留去重后的
-   `response.output_item.done.item` 原始对象；
-3. 不使用文本或工具 delta 臆造缺失协议字段的 output item；没有完整 done item 时保持
-   终止 Response 的空 output；
-4. 转换结果必须具有合法的 `id/object/status/output` 核心结构；
-5. 缺少终止事件、终止事件缺少 Response object 或结构非法时返回插件错误，绝不会把 SSE
-   body 作为 `stream=false` 的成功响应透传给客户端。
+1. 仅采用唯一的 completed、done、incomplete、failed 或 cancelled 终止对象作为最终
+   Response 外壳，不从请求上下文或 `response.created/in_progress` 快照补齐字段；
+2. 终止对象的 `output` 缺失或为空时，使用原始 `response.output_item.done.item`；全部事件
+   提供 `output_index` 时按索引排序并要求从零连续，Codex 全部省略索引时才按到达顺序保留；
+3. 不使用文本或工具 delta 臆造 output，不生成 item id/status/annotations，也不补充
+   object、status、时间、error、incomplete_details、usage 或 usage 明细；
+4. 插件不校验最终 Response 外壳、output item、usage 或状态是否符合 OpenAI Schema；这些
+   校验由下游负责。非法 SSE JSON、缺少终止事件、多个终止事件、终止后的 done item 或索引
+   冲突等导致转换本身无法确定的情况仍会返回插件错误。
 
 当前 buffered disposition 只有 `respond`，插件自身不会要求宿主重试。
 
@@ -130,21 +137,28 @@ Dashboard 的组件不会形成两套业务实现。
 - 没有 JSON data 的合法 SSE item 原样透传；
 - data 是 JSON 时先从原始事件提取 effects，再执行通用响应字段修正；
 - 非终止事件不会上报 usage；同一条流中的 maintenance feedback 最多上报一次；
+- `response.failed` 的 `error.code` 为 `usage_not_included` 或 `insufficient_quota` 时，先按
+  原始事件上报 effects，再把整个下游 item 替换为固定的 `rate_limit_exceeded` client retry
+  事件，与网关 GPT 原生 SSE observer 的行为一致；
 - JSON 没有变化时保留原始 item 字节；发生变化时仅重新序列化 data，保留
   `event/id/retry/comment` 以及 CRLF/LF 风格；
 - `finish` 不追加事件，只重置该实例的生命周期状态。
 
 ## 通用响应字段和 Header
 
-非流式 JSON 与每个 SSE data JSON 共用以下字段修正：
+非流式插件与流式插件分别实现并遵循以下字段修正规则：
 
-- `response.failed` 发给下游前删除 `instructions`、`output`、`usage`、`metadata`、
+- 除上述会替换为 client retry event 的两种账号额度失败外，`response.failed` 发给下游前
+  删除 `instructions`、`output`、`usage`、`metadata`、
   `reasoning`、`tools`、`tool_choice`、`parallel_tool_calls`、`text`、`truncation`、
   `max_output_tokens` 和 `incomplete_details`，保留错误身份和消息；
-- 原生 message、function/custom tool call 和 `image_generation_call` 的所有字段保持不变。
+- 流式原生 message、function/custom tool call 和 `image_generation_call` 字段保持不变；
+  buffered 聚合也原样保留 done item，不改写 id、status、annotations、文本、工具参数、
+  图片结果或其他模型输出语义字段。
 
 响应 header 会删除 hop-by-hop、`Connection` 声明的动态连接级 header、失效的
-`content-length`、上游 cookie 和鉴权信息。SSE 转 JSON 成功时输出
+`content-length`、上游 cookie、鉴权信息和所有 `x-codex` / `x-codex-*` 私有 header。
+SSE 转 JSON 成功时输出
 `application/json; charset=utf-8`；流式响应输出 `text/event-stream; charset=utf-8`、
 `cache-control: no-cache` 和 `connection: keep-alive`。
 
@@ -152,13 +166,18 @@ Dashboard 的组件不会形成两套业务实现。
 
 响应插件在改造原始 JSON/SSE item 之前提取 `effects`：
 
-- `401` 或明确的鉴权错误：`authentication-rejected`；
-- `usage_not_included/entitlement`：`entitlement-missing`；
-- `insufficient_quota/quota_exhausted`：`quota-exhausted`；
-- `429/rate_limit`：`rate-limited`；
-- `5xx/overloaded`：`temporarily-unavailable`；
+- HTTP `401`：`authentication-rejected`；
+- HTTP `429` 且 `error.type=usage_limit_reached`：`quota-exhausted`；
+- HTTP `429` 且 `error.type=usage_not_included`：`entitlement-missing`；
+- SSE `response.failed` 且 `response.error.code=insufficient_quota`：`quota-exhausted`；
+- SSE `response.failed` 且 `response.error.code=usage_not_included`：`entitlement-missing`；
+- 其他 HTTP 状态、错误 type/code 或错误消息不产生 maintenance feedback；
 - 流式 `response.failed`：额外返回 `stream-failure`；policy/safety 等业务拒绝不会误报
   maintenance feedback。
+
+buffered 插件完成上述 HTTP `429` feedback 提取后，会把 `usage_limit_reached` 和
+`usage_not_included` 的下游错误统一改写为 `error.type=rate_limit_exceeded`、
+`error.message=Rate limit reached`；HTTP 状态仍为 `429`，其他错误字段保持不变。
 
 usage 从最终 response 或终止 SSE event 的 `usage` 读取。`cached_tokens` 和
 `reasoning_tokens` 分别映射到 ABI 明细字段，`total_tokens` 按 input + output 重新计算。
@@ -174,10 +193,10 @@ WASM 组件不访问数据库、缓存、文件系统或网络，也没有日志
 buffered 响应和 stream 响应三个插槽，执行 Provider 原生代理流程；混合资源分组会在每次
 调度后按实际资源类型决定。
 
-成功响应优先使用请求插件声明的 `response-mode` 选择响应插槽，不依赖上游
-`Content-Type`。401、429、5xx 等非成功响应固定交给 buffered 插件，以便完整解析错误正文
-和产生 maintenance 回执。如果被选择的响应插槽没有上传组件，宿主会回到 Provider 原生
-响应处理流程。
+成功响应优先使用请求插件声明的 `response-context.response-mode` 选择响应插槽，不依赖
+上游 `Content-Type`。值为 `true` 时选择 stream，值为 `false` 时选择 buffered。401、429、
+5xx 等非成功响应固定交给 buffered 插件，以便完整解析错误正文和产生 maintenance 回执。
+如果被选择的响应插槽没有上传组件，宿主会回到 Provider 原生响应处理流程。
 
 宿主允许单个完整 SSE item 最大 500 MiB。stream Component 使用独立的 2 GiB 线性内存
 边界，为 canonical ABI、JSON DOM 及必要重写产生的瞬时副本预留空间；请求和 buffered
@@ -199,13 +218,16 @@ make build
 套件版本发布。创建网关 API Key 时选择该套件版本即可。调用方原始请求的 inspection、
 模型白名单授权、请求日志和 sticky 调度仍在插件之前由宿主完成。
 
-三个 ABI 的唯一真源分别是：
+共享响应上下文和三个 ABI 的唯一真源分别是：
 
+- [`../srv/wit/plugin-types.wit`](../srv/wit/plugin-types.wit)：共享的
+  `response-context` record；
 - [`../srv/wit/request-transformer.wit`](../srv/wit/request-transformer.wit)
 - [`../srv/wit/buffered-response-transformer.wit`](../srv/wit/buffered-response-transformer.wit)
 - [`../srv/wit/stream-response-transformer.wit`](../srv/wit/stream-response-transformer.wit)
 
-构建会直接引用这些 WIT；宿主 ABI 改动后，插件会在编译阶段发现不兼容。
+三个 ABI 都通过 `use` 引用同一个 `aestus:plugin-types/response-types`，构建会直接加载这些
+WIT；共享类型或宿主 ABI 改动后，插件会在编译阶段发现不兼容。
 
 用于真实调用 Codex 账号端点的验证服务已经独立到仓库根目录的
 [`../codex-proto-test-server`](../codex-proto-test-server)，不属于本插件 workspace 或构建产物。
