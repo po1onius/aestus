@@ -1,10 +1,20 @@
-import { FormEvent, useEffect, useState } from "react";
+import { AnimatePresence } from "motion/react";
+import { type FormEvent, useEffect, useState } from "react";
 import { Loader2, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { requestJson } from "../api/client";
 import { tenantsPath } from "../config";
+import { TenantCreateDialog } from "../features/tenants/TenantCreateDialog";
 import { showErrorToast } from "../lib/errors";
-import { buttonDangerSolid, buttonPrimary, buttonSecondary, inputClass, spinnerClass } from "../lib/ui";
+import {
+  buttonDangerSolid,
+  buttonPrimary,
+  buttonSecondary,
+  panelDescriptionClass,
+  panelHeaderClass,
+  panelTitleClass,
+  spinnerClass,
+} from "../lib/ui";
 import type { TenantSummary } from "../types";
 
 interface TenantsPageProps {
@@ -15,7 +25,8 @@ interface TenantsPageProps {
 export function TenantsPage({ token, refreshSignal }: TenantsPageProps) {
   const [tenants, setTenants] = useState<TenantSummary[]>([]);
   const [name, setName] = useState("");
-  const [code, setCode] = useState("");
+  const [password, setPassword] = useState("");
+  const [createOpen, setCreateOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
@@ -41,17 +52,31 @@ export function TenantsPage({ token, refreshSignal }: TenantsPageProps) {
     try {
       await requestJson<TenantSummary>(tenantsPath, {
         method: "POST",
-        body: JSON.stringify({ name: name.trim(), code: code.trim() }),
+        body: JSON.stringify({ name: name.trim(), password: password || null }),
       }, token);
       setName("");
-      setCode("");
-      toast.success("租户已创建");
+      setPassword("");
+      setCreateOpen(false);
+      toast.success(password ? "租户和 owner 已创建" : "租户已创建");
       await loadTenants();
     } catch (error) {
       showErrorToast("租户创建失败", error);
     } finally {
       setSaving(false);
     }
+  }
+
+  function openCreateDialog() {
+    setName("");
+    setPassword("");
+    setCreateOpen(true);
+  }
+
+  function closeCreateDialog() {
+    if (saving) return;
+    setName("");
+    setPassword("");
+    setCreateOpen(false);
   }
 
   async function toggleTenant(tenant: TenantSummary) {
@@ -104,16 +129,17 @@ export function TenantsPage({ token, refreshSignal }: TenantsPageProps) {
 
   return (
     <div className="grid gap-5">
-      <form className="grid gap-3 rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]" onSubmit={createTenant}>
-        <input className={inputClass} value={name} onChange={(event) => setName(event.target.value)} placeholder="租户名称" maxLength={128} required />
-        <input className={inputClass} value={code} onChange={(event) => setCode(event.target.value)} placeholder="租户码" maxLength={128} required />
-        <button className={buttonPrimary} disabled={saving}>
-          {saving ? <Loader2 className={spinnerClass} size={17} /> : <Plus size={17} />}
-          创建租户
-        </button>
-      </form>
-
       <section className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+        <div className={panelHeaderClass}>
+          <div>
+            <h2 className={panelTitleClass}>租户列表</h2>
+            <p className={panelDescriptionClass}>管理平台租户、注册码和启停状态。</p>
+          </div>
+          <button className={buttonPrimary} type="button" onClick={openCreateDialog}>
+            <Plus size={17} />
+            添加租户
+          </button>
+        </div>
         {loading ? (
           <div className="flex items-center justify-center gap-2 p-10 text-sm text-slate-500"><Loader2 className={spinnerClass} size={18} />正在加载租户</div>
         ) : tenants.length === 0 ? (
@@ -145,6 +171,19 @@ export function TenantsPage({ token, refreshSignal }: TenantsPageProps) {
           </div>
         )}
       </section>
+      <AnimatePresence>
+        {createOpen && (
+          <TenantCreateDialog
+            name={name}
+            password={password}
+            saving={saving}
+            onNameChange={setName}
+            onPasswordChange={setPassword}
+            onSubmit={createTenant}
+            onClose={closeCreateDialog}
+          />
+        )}
+      </AnimatePresence>
     </div>
   );
 }

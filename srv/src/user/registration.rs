@@ -28,6 +28,13 @@ const USERNAME_MAX_CHARS: usize = 32;
 const USERNAME_MAX_BYTES: usize = 128;
 const EMAIL_CODE_MAX_ATTEMPTS: i64 = 5;
 
+/// 租户创建事务使用的 owner 字段；密码哈希在开启数据库事务前完成。
+pub(crate) struct PreparedTenantOwner {
+    username: String,
+    email: String,
+    password_hash: String,
+}
+
 const VERIFY_EMAIL_CODE_LUA: &str = r#"
 local saved_hash = redis.call('GET', KEYS[1])
 if not saved_hash then
@@ -178,6 +185,43 @@ pub async fn create_owner_managed_user(
         email,
         hash_password(password).await?,
         USER_ROLE_TENANT_USER.to_owned(),
+        0,
+        true,
+    )
+    .await
+}
+
+pub(crate) async fn prepare_tenant_owner(
+    tenant_name: &str,
+    password: String,
+) -> AppResult<PreparedTenantOwner> {
+    let username = normalize_username(tenant_name)?;
+    let email = normalize_email(&format!("{username}@aes.tus"))?;
+    let password_hash = hash_password(password).await?;
+
+    info!(
+        username,
+        email, "平台管理员创建租户时的 owner 字段已完成校验和归一化"
+    );
+    Ok(PreparedTenantOwner {
+        username,
+        email,
+        password_hash,
+    })
+}
+
+pub(crate) async fn create_prepared_tenant_owner(
+    conn: &mut AsyncPgConnection,
+    tenant_id: Uuid,
+    owner: PreparedTenantOwner,
+) -> AppResult<User> {
+    create_user(
+        conn,
+        Some(tenant_id),
+        owner.username,
+        owner.email,
+        owner.password_hash,
+        USER_ROLE_TENANT_OWNER.to_owned(),
         0,
         true,
     )

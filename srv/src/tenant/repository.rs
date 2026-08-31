@@ -5,11 +5,17 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use super::model::{Tenant, TenantSummary, schema};
-use crate::err::{AppError, AppResult};
+use crate::{
+    err::{AppError, AppResult},
+    user,
+};
 
 const MAX_TENANT_NAME_BYTES: usize = 512;
 const MAX_TENANT_NAME_CHARS: usize = 128;
 const MAX_TENANT_CODE_BYTES: usize = 128;
+const GENERATED_CODE_SUFFIX_LENGTH: usize = 6;
+const MAX_GENERATED_CODE_NAME_BYTES: usize =
+    MAX_TENANT_CODE_BYTES - GENERATED_CODE_SUFFIX_LENGTH - 1;
 
 #[derive(Insertable)]
 #[diesel(table_name = schema::tenants)]
@@ -57,13 +63,17 @@ pub fn normalize_code(code: String) -> AppResult<String> {
 pub async fn create(
     conn: &mut AsyncPgConnection,
     name: String,
-    code: String,
+    password: Option<String>,
     actor_id: Uuid,
 ) -> AppResult<TenantSummary> {
     let name = normalize_name(name)?;
-    let code = normalize_code(code)?;
-    let summary = conn
-        .transaction::<TenantSummary, AppError, _>(async |conn| {
+    let code = generate_code(&name)?;
+    let prepared_owner = match password.filter(|password| !password.is_empty()) {
+        Some(password) => Some(user::prepare_tenant_owner(&name, password).await?),
+        None => None,
+    };
+    let (summary, owner) = conn
+        .transaction::<(TenantSummary, Option<user::User>), AppError, _>(async |conn| {
             let tenant = diesel::insert_into(schema::tenants::table)
                 .values(NewTenant {
                     name,
@@ -82,14 +92,46 @@ pub async fn create(
                 .execute(&mut *conn)
                 .await
                 .map_err(map_create_error)?;
-            Ok(TenantSummary {
-                tenant,
-                code: Some(code),
-            })
+            let owner = match prepared_owner {
+                Some(owner) => {
+                    let tenant_id = tenant.id;
+                    Some(user::create_prepared_tenant_owner(&mut *conn, tenant_id, owner).await?)
+                }
+                None => None,
+            };
+            Ok((
+                TenantSummary {
+                    tenant,
+                    code: Some(code),
+                },
+                owner,
+            ))
         })
         .await?;
-    info!(platform_admin_id = %actor_id, tenant_id = %summary.tenant.id, tenant_name = %summary.tenant.name, "平台管理员已创建租户并分发租户码");
+    info!(
+        platform_admin_id = %actor_id,
+        tenant_id = %summary.tenant.id,
+        tenant_name = %summary.tenant.name,
+        owner_created = owner.is_some(),
+        owner_id = ?owner.as_ref().map(|owner| owner.id),
+        owner_username = ?owner.as_ref().map(|owner| owner.username.as_str()),
+        "平台管理员已创建租户并分发租户码"
+    );
     Ok(summary)
+}
+
+fn generate_code(name: &str) -> AppResult<String> {
+    use rand::distr::{Alphanumeric, SampleString};
+
+    if name.len() > MAX_GENERATED_CODE_NAME_BYTES {
+        return Err(AppError::BadRequest {
+            message: format!(
+                "自动生成租户码时，租户名称的 UTF-8 编码不能超过 {MAX_GENERATED_CODE_NAME_BYTES} 字节"
+            ),
+        });
+    }
+    let suffix = Alphanumeric.sample_string(&mut rand::rng(), GENERATED_CODE_SUFFIX_LENGTH);
+    Ok(format!("{name}-{suffix}"))
 }
 
 pub async fn list(conn: &mut AsyncPgConnection) -> AppResult<Vec<TenantSummary>> {

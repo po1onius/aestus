@@ -12,6 +12,7 @@ pub use registration::{
     bootstrap_admin, create_owner_managed_user, normalize_email, normalize_username,
     register_with_tenant_code, send_register_email_code, verify_register_email_code,
 };
+pub(crate) use registration::{create_prepared_tenant_owner, prepare_tenant_owner};
 pub use repository::{
     find_by_email, find_by_id, find_by_login_identifier, list_by_tenant, list_usage_snapshots,
     update_quota_for_tenant, update_status,

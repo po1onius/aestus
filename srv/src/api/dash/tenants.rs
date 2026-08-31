@@ -18,7 +18,8 @@ use crate::{
 #[serde(deny_unknown_fields)]
 struct CreateTenantRequest {
     name: String,
-    code: String,
+    /// 缺失、null 或空字符串时只创建租户；非空时同时创建租户 owner。
+    password: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -57,7 +58,7 @@ async fn create_tenant(
 ) -> AdminResult<PrivateJson<TenantSummary>> {
     let mut conn = state.db_conn().await?;
     Ok(private_json(
-        tenant::create(&mut conn, payload.name, payload.code, admin.id).await?,
+        tenant::create(&mut conn, payload.name, payload.password, admin.id).await?,
     ))
 }
 
