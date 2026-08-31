@@ -28,12 +28,6 @@ struct UpdateTenantStatusRequest {
     enabled: bool,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ReplaceTenantCodeRequest {
-    code: String,
-}
-
 #[derive(Debug, Serialize)]
 struct RevokeTenantCodeResponse {
     tenant_id: Uuid,
@@ -47,7 +41,7 @@ pub fn router() -> Router<AppState> {
         .route("/{id}/status", put(update_tenant_status))
         .route(
             "/{id}/code",
-            post(replace_tenant_code).delete(revoke_tenant_code),
+            post(regenerate_tenant_code).delete(revoke_tenant_code),
         )
 }
 
@@ -82,15 +76,14 @@ async fn update_tenant_status(
     ))
 }
 
-async fn replace_tenant_code(
+async fn regenerate_tenant_code(
     State(state): State<AppState>,
     auth::PlatformAdminUser(admin): auth::PlatformAdminUser,
     Path(id): Path<Uuid>,
-    Json(payload): Json<ReplaceTenantCodeRequest>,
 ) -> AdminResult<PrivateJson<TenantSummary>> {
     let mut conn = state.db_conn().await?;
     Ok(private_json(
-        tenant::replace_code(&mut conn, id, payload.code, admin.id).await?,
+        tenant::regenerate_code(&mut conn, id, admin.id).await?,
     ))
 }
 

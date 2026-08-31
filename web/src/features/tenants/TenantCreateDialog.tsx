@@ -63,15 +63,6 @@ export function TenantCreateDialog(props: TenantCreateDialogProps) {
             onChange={(event) => props.onNameChange(event.target.value)}
             placeholder="例如 Acme"
           />
-          <span
-            className={
-              nameTooLong
-                ? "text-xs leading-5 text-red-600 dark:text-red-400"
-                : fieldHelp
-            }
-          >
-            租户码格式为“租户名称-6 位随机字母或数字”；名称占用 {nameBytes}/121 字节。
-          </span>
         </label>
 
         <label className={fieldStack}>

@@ -258,13 +258,11 @@ pub async fn set_enabled(
     Ok(tenant)
 }
 
-pub async fn replace_code(
+pub async fn regenerate_code(
     conn: &mut AsyncPgConnection,
     tenant_id: Uuid,
-    code: String,
     actor_id: Uuid,
 ) -> AppResult<TenantSummary> {
-    let code = normalize_code(code)?;
     let summary = conn
         .transaction::<TenantSummary, AppError, _>(async |conn| {
             let tenant = schema::tenants::table
@@ -279,6 +277,7 @@ pub async fn replace_code(
                     },
                     source => db_error(source),
                 })?;
+            let code = generate_code(&tenant.name)?;
             diesel::delete(
                 schema::tenant_codes::table.filter(schema::tenant_codes::tenant_id.eq(tenant_id)),
             )
@@ -300,7 +299,12 @@ pub async fn replace_code(
             })
         })
         .await?;
-    info!(platform_admin_id = %actor_id, tenant_id = %tenant_id, "平台管理员已替换租户码");
+    info!(
+        platform_admin_id = %actor_id,
+        tenant_id = %tenant_id,
+        tenant_name = %summary.tenant.name,
+        "平台管理员已自动生成并替换租户码"
+    );
     Ok(summary)
 }
 

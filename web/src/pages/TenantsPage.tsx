@@ -4,13 +4,16 @@ import { Loader2, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { requestJson } from "../api/client";
 import { tenantsPath } from "../config";
+import {
+  TenantCodeDialog,
+  type TenantCodeAction,
+} from "../features/tenants/TenantCodeDialog";
 import { TenantCreateDialog } from "../features/tenants/TenantCreateDialog";
 import { showErrorToast } from "../lib/errors";
 import {
   buttonDangerSolid,
   buttonPrimary,
   buttonSecondary,
-  panelDescriptionClass,
   panelHeaderClass,
   panelTitleClass,
   spinnerClass,
@@ -22,6 +25,11 @@ interface TenantsPageProps {
   refreshSignal: number;
 }
 
+interface TenantCodeDialogState {
+  tenant: TenantSummary;
+  action: TenantCodeAction;
+}
+
 export function TenantsPage({ token, refreshSignal }: TenantsPageProps) {
   const [tenants, setTenants] = useState<TenantSummary[]>([]);
   const [name, setName] = useState("");
@@ -30,6 +38,7 @@ export function TenantsPage({ token, refreshSignal }: TenantsPageProps) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
+  const [codeDialog, setCodeDialog] = useState<TenantCodeDialogState | null>(null);
 
   useEffect(() => {
     void loadTenants();
@@ -95,31 +104,42 @@ export function TenantsPage({ token, refreshSignal }: TenantsPageProps) {
     }
   }
 
-  async function replaceCode(tenant: TenantSummary) {
-    const nextCode = window.prompt("输入新的租户码", tenant.code ?? "")?.trim();
-    if (!nextCode || nextCode === tenant.code) return;
+  function openCodeDialog(tenant: TenantSummary, action: TenantCodeAction) {
+    setCodeDialog({ tenant, action });
+  }
+
+  function closeCodeDialog() {
+    if (updatingId === codeDialog?.tenant.id) return;
+    setCodeDialog(null);
+  }
+
+  async function regenerateCode() {
+    if (!codeDialog || codeDialog.action !== "regenerate") return;
+    const { tenant } = codeDialog;
     setUpdatingId(tenant.id);
     try {
       await requestJson<TenantSummary>(`${tenantsPath}/${tenant.id}/code`, {
         method: "POST",
-        body: JSON.stringify({ code: nextCode }),
       }, token);
-      toast.success("租户码已更新");
+      toast.success(tenant.code ? "新租户码已生成" : "租户码已生成");
       await loadTenants();
+      setCodeDialog(null);
     } catch (error) {
-      showErrorToast("租户码更新失败", error);
+      showErrorToast("租户码生成失败", error);
     } finally {
       setUpdatingId(null);
     }
   }
 
-  async function revokeCode(tenant: TenantSummary) {
-    if (!window.confirm(`确认撤销租户“${tenant.name}”的租户码？撤销后将不能继续公开注册。`)) return;
+  async function revokeCode() {
+    if (!codeDialog || codeDialog.action !== "revoke") return;
+    const { tenant } = codeDialog;
     setUpdatingId(tenant.id);
     try {
       await requestJson(`${tenantsPath}/${tenant.id}/code`, { method: "DELETE" }, token);
       toast.success("租户码已撤销");
       await loadTenants();
+      setCodeDialog(null);
     } catch (error) {
       showErrorToast("租户码撤销失败", error);
     } finally {
@@ -133,7 +153,6 @@ export function TenantsPage({ token, refreshSignal }: TenantsPageProps) {
         <div className={panelHeaderClass}>
           <div>
             <h2 className={panelTitleClass}>租户列表</h2>
-            <p className={panelDescriptionClass}>管理平台租户、注册码和启停状态。</p>
           </div>
           <button className={buttonPrimary} type="button" onClick={openCreateDialog}>
             <Plus size={17} />
@@ -159,8 +178,8 @@ export function TenantsPage({ token, refreshSignal }: TenantsPageProps) {
                       <td className="px-4 py-3 font-mono">{tenant.code ?? <span className="font-sans text-slate-400">已撤销</span>}</td>
                       <td className="px-4 py-3"><span className={tenant.enabled ? "text-emerald-600" : "text-slate-400"}>{tenant.enabled ? "启用" : "停用"}</span></td>
                       <td className="px-4 py-3"><div className="flex justify-end gap-2">
-                        <button className={buttonSecondary} type="button" disabled={updating} onClick={() => void replaceCode(tenant)}><RefreshCw size={15} />{tenant.code ? "修改租户码" : "设置租户码"}</button>
-                        {tenant.code && <button className={buttonDangerSolid} type="button" disabled={updating} onClick={() => void revokeCode(tenant)}><Trash2 size={15} />撤销租户码</button>}
+                        <button className={buttonSecondary} type="button" disabled={updating} onClick={() => openCodeDialog(tenant, "regenerate")}><RefreshCw size={15} />{tenant.code ? "修改租户码" : "设置租户码"}</button>
+                        {tenant.code && <button className={buttonDangerSolid} type="button" disabled={updating} onClick={() => openCodeDialog(tenant, "revoke")}><Trash2 size={15} />撤销租户码</button>}
                         <button className={buttonSecondary} type="button" disabled={updating} onClick={() => void toggleTenant(tenant)}>{updating ? <Loader2 className={spinnerClass} size={15} /> : null}{tenant.enabled ? "停用" : "启用"}</button>
                       </div></td>
                     </tr>
@@ -181,6 +200,16 @@ export function TenantsPage({ token, refreshSignal }: TenantsPageProps) {
             onPasswordChange={setPassword}
             onSubmit={createTenant}
             onClose={closeCreateDialog}
+          />
+        )}
+        {codeDialog && (
+          <TenantCodeDialog
+            key={`${codeDialog.tenant.id}-${codeDialog.action}`}
+            tenant={codeDialog.tenant}
+            action={codeDialog.action}
+            pending={updatingId === codeDialog.tenant.id}
+            onConfirm={codeDialog.action === "revoke" ? revokeCode : regenerateCode}
+            onClose={closeCodeDialog}
           />
         )}
       </AnimatePresence>
