@@ -75,9 +75,12 @@ import type {
   ConsumeRateLimitResetCreditResponse,
   DashboardUser,
   DashboardTheme,
+  DeleteApiKeyResponse,
   DeleteClaudeAccountResponse,
   DeleteGptAccountResponse,
+  DeletePluginResponse,
   DeleteProviderUpstreamApiKeyResponse,
+  DeleteProviderGroupResponse,
   GptAccount,
   GptAccountQuotaResponse,
   ProviderCredentialTab,
@@ -1326,6 +1329,42 @@ export function App() {
     }
   }
 
+  function requestDeleteProviderGroup(group: ProviderGroupSummary) {
+    setConfirmationRequest({
+      title: `删除 ${providerLabel(group.provider)} 分组`,
+      description: `将删除分组“${group.name}”。受影响资源：${group.counts.account_count} 个 OAuth 账号和 ${group.counts.upstream_api_key_count} 个上游官方 Key 将解除分组、退出调度但保留凭证；${group.counts.gateway_api_key_count} 个调用方网关 Key 将永久删除。历史请求日志不受影响。`,
+      confirmLabel: "删除分组",
+      pendingLabel: "正在删除",
+      onConfirm: () => deleteProviderGroup(group),
+    });
+  }
+
+  async function deleteProviderGroup(group: ProviderGroupSummary) {
+    const token = authToken;
+    if (!token || currentUser?.role !== "admin") {
+      return;
+    }
+
+    setProviderGroupSavingId(group.id);
+    try {
+      await requestJson<DeleteProviderGroupResponse>(`${providerGroupsPath}/${group.id}`, {
+        method: "DELETE",
+      }, token);
+      if (!isActiveAuthToken(token)) return;
+      await Promise.all([loadProviderGroups(), loadAccounts(), loadApiKeys(apiKeysPage.offset)]);
+      toast.success("Provider 分组已删除");
+    } catch (error) {
+      if (isActiveAuthToken(token)) {
+        showErrorToast("Provider 分组删除失败", error);
+        if (isProviderStateSyncError(error)) {
+          await Promise.all([loadProviderGroups(), loadAccounts(), loadApiKeys(apiKeysPage.offset)]);
+        }
+      }
+    } finally {
+      if (isActiveAuthToken(token)) setProviderGroupSavingId(null);
+    }
+  }
+
   async function updateProviderGroupModels(
     group: ProviderGroupSummary,
     models: string[],
@@ -1810,6 +1849,45 @@ export function App() {
     }
   }
 
+  function requestDeletePlugin(plugin: PluginReleaseSummary) {
+    setConfirmationRequest({
+      title: "删除插件套件",
+      description: `将永久删除插件“${plugin.suite_name}”的全部历史版本和 WASM Artifact。所有关联的网关 API Key都会保留，但会解除插件绑定，后续请求回落到 ${providerLabel(plugin.provider)} Provider 原生流程；历史请求日志不受影响。`,
+      confirmLabel: "删除插件",
+      pendingLabel: "正在删除",
+      onConfirm: () => deletePlugin(plugin),
+    });
+  }
+
+  async function deletePlugin(plugin: PluginReleaseSummary) {
+    const token = authToken;
+    if (!token || currentUser?.role !== "admin") {
+      return;
+    }
+
+    setPluginSavingId(plugin.suite_id);
+    try {
+      const deleted = await requestJson<DeletePluginResponse>(
+        `${pluginsPath}/${plugin.suite_id}`,
+        { method: "DELETE" },
+        token,
+      );
+      if (!isActiveAuthToken(token)) return;
+      await Promise.all([
+        loadPlugins(),
+        loadPluginOptions(),
+        loadApiKeys(apiKeysPage.offset),
+      ]);
+      toast.success("插件已删除", {
+        description: `已删除 ${deleted.deleted_release_count} 个版本和 ${deleted.deleted_artifact_count} 个 Artifact，${deleted.unbound_gateway_api_key_count} 个网关 API Key已解除插件绑定。`,
+      });
+    } catch (error) {
+      if (isActiveAuthToken(token)) showErrorToast("插件删除失败", error);
+    } finally {
+      if (isActiveAuthToken(token)) setPluginSavingId(null);
+    }
+  }
+
   async function toggleApiKeyEnabled(apiKey: ApiKey) {
     const token = authToken;
     if (!token) {
@@ -1838,6 +1916,45 @@ export function App() {
       if (isActiveAuthToken(token)) {
         setApiKeyUpdatingId(null);
       }
+    }
+  }
+
+  function requestDeleteApiKey(apiKey: ApiKey) {
+    setConfirmationRequest({
+      title: "删除网关 API Key",
+      description: `将永久删除网关 API Key“${apiKey.name}”，后续请求将立即无法再使用该凭证。所属 Provider 分组“${apiKey.group.name}”、上游资源和历史请求日志不受影响。`,
+      confirmLabel: "删除 API Key",
+      pendingLabel: "正在删除",
+      onConfirm: () => deleteApiKey(apiKey),
+    });
+  }
+
+  async function deleteApiKey(apiKey: ApiKey) {
+    const token = authToken;
+    if (!token) {
+      return;
+    }
+
+    setApiKeyUpdatingId(apiKey.id);
+    try {
+      const deleted = await requestJson<DeleteApiKeyResponse>(`${apiKeysPath}/${apiKey.id}`, {
+        method: "DELETE",
+      }, token);
+      if (!isActiveAuthToken(token)) return;
+      setApiKeys((items) => items.filter((item) => item.id !== deleted.id));
+      const nextOffset =
+        apiKeys.length === 1 && apiKeysPage.offset > 0
+          ? Math.max(0, apiKeysPage.offset - dashboardListPageSize)
+          : apiKeysPage.offset;
+      await Promise.all([
+        loadApiKeys(nextOffset),
+        currentUser?.role === "admin" ? loadProviderGroups() : Promise.resolve(),
+      ]);
+      toast.success("API Key 已删除");
+    } catch (error) {
+      if (isActiveAuthToken(token)) showErrorToast("API Key 删除失败", error);
+    } finally {
+      if (isActiveAuthToken(token)) setApiKeyUpdatingId(null);
     }
   }
 
@@ -2750,6 +2867,7 @@ export function App() {
           onRenameProviderGroup={renameProviderGroup}
           onEditProviderGroupModels={setProviderGroupModelsTarget}
           onToggleProviderGroupEnabled={toggleProviderGroupEnabled}
+          onDeleteProviderGroup={requestDeleteProviderGroup}
           onUpdateClaudeGroup={updateClaudeAccountGroup}
           onUpdateGptGroup={updateGptAccountGroup}
           onUpdateUpstreamApiKeyGroup={updateUpstreamApiKeyGroup}
@@ -2772,6 +2890,7 @@ export function App() {
           onAdd={() => setPluginCreateOpen(true)}
           onOpenPublish={setPluginReleaseTarget}
           onToggleEnabled={togglePluginEnabled}
+          onDelete={requestDeletePlugin}
         />
       ) : activePage === "users" ? (
         <UsersPage
@@ -2799,6 +2918,7 @@ export function App() {
           onEditModels={setApiKeyModelsTarget}
           onEditPlugin={openApiKeyPluginDialog}
           onToggleEnabled={toggleApiKeyEnabled}
+          onDelete={requestDeleteApiKey}
           onCopy={copyApiKey}
           onPageChange={loadApiKeys}
         />

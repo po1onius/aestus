@@ -39,11 +39,21 @@ export interface ProviderGroup extends ProviderGroupReference {
 export interface ProviderGroupCounts {
   account_count: number;
   upstream_api_key_count: number;
+  gateway_api_key_count: number;
   enabled_gateway_api_key_count: number;
 }
 
 export interface ProviderGroupSummary extends ProviderGroup {
   counts: ProviderGroupCounts;
+}
+
+export interface DeleteProviderGroupResponse {
+  id: string;
+  provider: UpstreamApiKeyProvider;
+  name: string;
+  released_account_count: number;
+  released_upstream_api_key_count: number;
+  deleted_gateway_api_key_count: number;
 }
 
 /** 创建分组时可选择的未分组上游资源；不包含任何长期凭证。 */
@@ -299,6 +309,10 @@ export interface ApiKey {
   disabled_at: string | null;
 }
 
+export interface DeleteApiKeyResponse {
+  id: string;
+}
+
 export interface PluginReleaseSummary {
   id: string;
   suite_id: string;
@@ -310,6 +324,15 @@ export interface PluginReleaseSummary {
   manifest_sha256: string;
   artifacts: PluginArtifactSummary[];
   published_at: string;
+}
+
+export interface DeletePluginResponse {
+  id: string;
+  name: string;
+  provider: UpstreamApiKeyProvider;
+  deleted_release_count: number;
+  deleted_artifact_count: number;
+  unbound_gateway_api_key_count: number;
 }
 
 export type PluginSlot = "request" | "buffered_response" | "stream_response";

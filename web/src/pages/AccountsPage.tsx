@@ -67,6 +67,7 @@ interface AccountsPageProps {
   onRenameProviderGroup: (group: ProviderGroupSummary, name: string) => Promise<boolean>;
   onEditProviderGroupModels: (group: ProviderGroupSummary) => void;
   onToggleProviderGroupEnabled: (group: ProviderGroupSummary) => Promise<boolean>;
+  onDeleteProviderGroup: (group: ProviderGroupSummary) => void;
   onUpdateClaudeGroup: (account: ClaudeAccount, groupId: string) => void;
   onUpdateGptGroup: (account: GptAccount, groupId: string) => void;
   onUpdateUpstreamApiKeyGroup: (
@@ -136,6 +137,7 @@ export function AccountsPage({
   onRenameProviderGroup,
   onEditProviderGroupModels,
   onToggleProviderGroupEnabled,
+  onDeleteProviderGroup,
   onUpdateClaudeGroup,
   onUpdateGptGroup,
   onUpdateUpstreamApiKeyGroup,
@@ -314,6 +316,7 @@ export function AccountsPage({
               onRename={onRenameProviderGroup}
               onEditModels={onEditProviderGroupModels}
               onToggleEnabled={onToggleProviderGroupEnabled}
+              onDelete={onDeleteProviderGroup}
             />
           )
         ) : loading ? (

@@ -1,10 +1,11 @@
 import { useMemo } from "react";
-import { FileUp, Loader2, PlugZap, Plus, Power } from "lucide-react";
+import { FileUp, Loader2, PlugZap, Plus, Power, Trash2 } from "lucide-react";
 import { StatusBadge } from "../components/StatusBadge";
 import { formatDateTime } from "../lib/format";
 import {
   buttonPrimary,
   buttonSmall,
+  buttonSmallDanger,
   cellMainClass,
   cellNoteClass,
   disabledRowClass,
@@ -30,6 +31,7 @@ interface PluginsPageProps {
   onAdd: () => void;
   onOpenPublish: (plugin: PluginReleaseSummary) => void;
   onToggleEnabled: (plugin: PluginReleaseSummary) => Promise<void>;
+  onDelete: (plugin: PluginReleaseSummary) => void;
 }
 
 const slotLabels: Record<PluginSlot, string> = {
@@ -49,6 +51,7 @@ export function PluginsPage({
   onAdd,
   onOpenPublish,
   onToggleEnabled,
+  onDelete,
 }: PluginsPageProps) {
   const latestReleaseIds = useMemo(() => {
     const latest = new Map<string, PluginReleaseSummary>();
@@ -154,6 +157,19 @@ export function PluginsPage({
                                 <Power size={14} />
                               )}
                               {plugin.suite_enabled ? "停用插件" : "启用插件"}
+                            </button>
+                            <button
+                              className={buttonSmallDanger}
+                              disabled={savingId !== null}
+                              onClick={() => onDelete(plugin)}
+                              title="删除插件套件"
+                            >
+                              {savingId === plugin.suite_id ? (
+                                <Loader2 className={spinnerClass} size={14} />
+                              ) : (
+                                <Trash2 size={14} />
+                              )}
+                              删除插件
                             </button>
                           </div>
                         ) : (

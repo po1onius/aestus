@@ -1,11 +1,12 @@
 import { useState } from "react";
-import { Ban, Copy, Eye, EyeOff, KeyRound, ListChecks, Loader2, Pencil, Plus, Power } from "lucide-react";
+import { Ban, Copy, Eye, EyeOff, KeyRound, ListChecks, Loader2, Pencil, Plus, Power, Trash2 } from "lucide-react";
 import { ListPager } from "../components/ListPager";
 import { StatusBadge } from "../components/StatusBadge";
 import { formatDateTime } from "../lib/format";
 import {
   buttonPrimary,
   buttonSmall,
+  buttonSmallDanger,
   cellMainClass,
   cellNoteClass,
   disabledRowClass,
@@ -32,6 +33,7 @@ interface ApiKeysPageProps {
   onEditModels: (apiKey: ApiKey) => void;
   onEditPlugin: (apiKey: ApiKey) => void;
   onToggleEnabled: (apiKey: ApiKey) => void;
+  onDelete: (apiKey: ApiKey) => void;
   onCopy: (apiKey: ApiKey) => void;
   onPageChange: (offset: number) => void;
 }
@@ -47,6 +49,7 @@ export function ApiKeysPage({
   onEditModels,
   onEditPlugin,
   onToggleEnabled,
+  onDelete,
   onCopy,
   onPageChange,
 }: ApiKeysPageProps) {
@@ -232,6 +235,19 @@ export function ApiKeysPage({
                             <Power size={14} />
                           )}
                           {apiKey.enabled ? "禁用" : "启用"}
+                        </button>
+                        <button
+                          className={buttonSmallDanger}
+                          disabled={updatingId === apiKey.id}
+                          onClick={() => onDelete(apiKey)}
+                          title="删除 API Key"
+                        >
+                          {updatingId === apiKey.id ? (
+                            <Loader2 className={spinnerClass} size={14} />
+                          ) : (
+                            <Trash2 size={14} />
+                          )}
+                          删除
                         </button>
                       </div>
                     </td>

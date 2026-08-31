@@ -1,4 +1,4 @@
-import { Archive, FolderTree, ListChecks, Loader2, Pencil, RotateCcw, Save, X } from "lucide-react";
+import { Archive, FolderTree, ListChecks, Loader2, Pencil, RotateCcw, Save, Trash2, X } from "lucide-react";
 import { useState } from "react";
 import type { FormEvent } from "react";
 import { StatusBadge } from "../../components/StatusBadge";
@@ -23,6 +23,7 @@ interface ProviderGroupsTableProps {
   onRename: (group: ProviderGroupSummary, name: string) => Promise<boolean>;
   onEditModels: (group: ProviderGroupSummary) => void;
   onToggleEnabled: (group: ProviderGroupSummary) => Promise<boolean>;
+  onDelete: (group: ProviderGroupSummary) => void;
 }
 
 /**
@@ -37,6 +38,7 @@ export function ProviderGroupsTable({
   onRename,
   onEditModels,
   onToggleEnabled,
+  onDelete,
 }: ProviderGroupsTableProps) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState("");
@@ -142,7 +144,8 @@ export function ProviderGroupsTable({
                   <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
                     <span>账号 {group.counts.account_count}</span>
                     <span>官方 Key {group.counts.upstream_api_key_count}</span>
-                    <span>启用网关 Key {group.counts.enabled_gateway_api_key_count}</span>
+                    <span>网关 Key {group.counts.gateway_api_key_count}</span>
+                    <span>其中启用 {group.counts.enabled_gateway_api_key_count}</span>
                   </div>
                 </td>
                 <td>
@@ -184,6 +187,15 @@ export function ProviderGroupsTable({
                           <RotateCcw size={14} />
                         )}
                         {group.enabled ? "停用" : "恢复"}
+                      </button>
+                      <button
+                        className={buttonSmallDanger}
+                        disabled={Boolean(savingId)}
+                        onClick={() => onDelete(group)}
+                        title="删除分组"
+                      >
+                        {saving ? <Loader2 className={spinnerClass} size={14} /> : <Trash2 size={14} />}
+                        删除
                       </button>
                     </div>
                   )}

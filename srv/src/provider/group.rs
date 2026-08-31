@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::{
     err::{AppError, AppResult},
-    model::schema::api_keys,
+    model::schema::{api_key_models, api_keys},
     provider::{
         credential::{
             ProviderAccount, ProviderApiKey,
@@ -104,6 +104,7 @@ pub struct ProviderGroupWithModels {
 pub struct ProviderGroupCounts {
     pub account_count: i64,
     pub upstream_api_key_count: i64,
+    pub gateway_api_key_count: i64,
     pub enabled_gateway_api_key_count: i64,
 }
 
@@ -131,6 +132,18 @@ pub struct CreatedProviderGroup {
     pub group: ProviderGroupWithModels,
     pub accounts: Vec<ProviderAccount>,
     pub api_keys: Vec<ProviderApiKey>,
+}
+
+/// 删除分组事务提交后的完整影响快照。
+///
+/// 上游账号和官方 API Key 只解除分组归属，凭证记录继续保留；调用方网关 Key 无法脱离
+/// 分组独立存在，因此与其模型映射一起永久删除。HTTP 层使用资源快照把 PostgreSQL 的
+/// 最新事实同步到 Redis runtime，并向管理员返回精确的删除统计。
+pub struct DeletedProviderGroup {
+    pub group: ProviderGroup,
+    pub accounts: Vec<ProviderAccount>,
+    pub upstream_api_keys: Vec<ProviderApiKey>,
+    pub deleted_gateway_api_key_count: usize,
 }
 
 pub fn normalize_name(name: String) -> AppResult<String> {
@@ -741,6 +754,125 @@ pub async fn update_enabled(
     })
 }
 
+/// 原子删除 Provider 分组及所有不能脱离分组存在的调用方配置。
+///
+/// 删除不要求先停用分组。事务首先锁定分组，使并发创建网关 Key、修改分组模型和删除
+/// 串行化；随后把上游账号和官方 API Key 释放为未分组状态，删除调用方网关 Key及两层
+/// 模型映射，最后删除分组主记录。项目不使用数据库外键，因此每一种关联都必须在这里
+/// 显式处理并校验受影响行数。
+pub async fn delete(conn: &mut AsyncPgConnection, id: Uuid) -> AppResult<DeletedProviderGroup> {
+    let deleted = conn
+        .transaction::<DeletedProviderGroup, AppError, _>(async |conn| {
+            use schema::{provider_group_models, provider_groups};
+
+            let group = require_for_update(&mut *conn, id).await?;
+
+            let accounts = diesel::update(
+                provider_accounts::table.filter(provider_accounts::group_id.eq(group.id)),
+            )
+            .set((
+                provider_accounts::group_id.eq(None::<Uuid>),
+                provider_accounts::updated_at.eq(greatest_group_projection(
+                    db_now,
+                    provider_accounts::updated_at + 1.microseconds(),
+                )),
+            ))
+            .returning(ProviderAccount::as_returning())
+            .load::<ProviderAccount>(&mut *conn)
+            .await
+            .map_err(db_error)?;
+
+            let upstream_api_keys = diesel::update(
+                provider_api_keys::table.filter(provider_api_keys::group_id.eq(group.id)),
+            )
+            .set((
+                provider_api_keys::group_id.eq(None::<Uuid>),
+                provider_api_keys::updated_at.eq(greatest_group_projection(
+                    db_now,
+                    provider_api_keys::updated_at + 1.microseconds(),
+                )),
+            ))
+            .returning(ProviderApiKey::as_returning())
+            .load::<ProviderApiKey>(&mut *conn)
+            .await
+            .map_err(db_error)?;
+
+            // 网关 Key 模型映射没有数据库外键，必须先取得并锁定主记录 ID，再显式删除
+            // 映射。所有会同时锁定分组和网关 Key 的写路径统一使用“分组 -> Key”顺序，
+            // 避免删除与模型白名单更新形成反向锁序。
+            let gateway_api_key_ids = api_keys::table
+                .filter(api_keys::group_id.eq(group.id))
+                .order(api_keys::id.asc())
+                .for_update()
+                .select(api_keys::id)
+                .load::<Uuid>(&mut *conn)
+                .await
+                .map_err(db_error)?;
+            if !gateway_api_key_ids.is_empty() {
+                diesel::delete(
+                    api_key_models::table
+                        .filter(api_key_models::api_key_id.eq_any(&gateway_api_key_ids)),
+                )
+                .execute(&mut *conn)
+                .await
+                .map_err(db_error)?;
+            }
+            let deleted_gateway_api_key_count =
+                diesel::delete(api_keys::table.filter(api_keys::group_id.eq(group.id)))
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(db_error)?;
+            if deleted_gateway_api_key_count != gateway_api_key_ids.len() {
+                return Err(AppError::DbQuery {
+                    message: format!(
+                        "删除 Provider 分组时网关 Key 数量发生并发变化: group_id={}, expected={}, actual={deleted_gateway_api_key_count}",
+                        group.id,
+                        gateway_api_key_ids.len(),
+                    ),
+                });
+            }
+
+            diesel::delete(
+                provider_group_models::table
+                    .filter(provider_group_models::group_id.eq(group.id)),
+            )
+            .execute(&mut *conn)
+            .await
+            .map_err(db_error)?;
+            let deleted_group_count = diesel::delete(
+                provider_groups::table.filter(provider_groups::id.eq(group.id)),
+            )
+            .execute(&mut *conn)
+            .await
+            .map_err(db_error)?;
+            if deleted_group_count != 1 {
+                return Err(AppError::DbQuery {
+                    message: format!("删除 Provider 分组主记录失败: {}", group.id),
+                });
+            }
+
+            Ok(DeletedProviderGroup {
+                group,
+                accounts,
+                upstream_api_keys,
+                deleted_gateway_api_key_count,
+            })
+        })
+        .await?;
+
+    info!(
+        provider = %deleted.group.provider,
+        provider_group_id = %deleted.group.id,
+        provider_group_name = %deleted.group.name,
+        provider_group_was_enabled = deleted.group.enabled,
+        released_account_count = deleted.accounts.len(),
+        released_upstream_api_key_count = deleted.upstream_api_keys.len(),
+        deleted_gateway_api_key_count = deleted.deleted_gateway_api_key_count,
+        "Provider 分组及关联调用方配置已删除，上游资源已释放为未分组状态"
+    );
+    Ok(deleted)
+}
+
 async fn load_counts(
     conn: &mut AsyncPgConnection,
     group_id: Uuid,
@@ -757,6 +889,12 @@ async fn load_counts(
         .get_result(conn)
         .await
         .map_err(db_error)?;
+    let gateway_api_key_count = api_keys::table
+        .filter(api_keys::group_id.eq(group_id))
+        .count()
+        .get_result(conn)
+        .await
+        .map_err(db_error)?;
     let enabled_gateway_api_key_count = api_keys::table
         .filter(api_keys::group_id.eq(group_id))
         .filter(api_keys::enabled.eq(true))
@@ -767,6 +905,7 @@ async fn load_counts(
     Ok(ProviderGroupCounts {
         account_count,
         upstream_api_key_count,
+        gateway_api_key_count,
         enabled_gateway_api_key_count,
     })
 }

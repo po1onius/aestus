@@ -7,7 +7,7 @@ use axum::{
     extract::{Path, Query, State},
     http::header::CACHE_CONTROL,
     response::IntoResponse,
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
 };
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -69,9 +69,15 @@ struct ApiKeyResponse {
     disabled_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+#[derive(Debug, Serialize)]
+struct DeleteApiKeyResponse {
+    id: Uuid,
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_api_keys).post(create_api_key))
+        .route("/{id}", delete(delete_api_key))
         .route("/{id}/plugin", put(update_api_key_plugin))
         .route("/{id}/models", put(update_api_key_models))
         .route("/{id}/enabled", post(update_api_key_enabled))
@@ -172,6 +178,22 @@ async fn list_api_keys(
         .collect::<AppResult<Vec<_>>>()?;
 
     Ok(no_store_json(page.finish(items)))
+}
+
+async fn delete_api_key(
+    State(state): State<AppState>,
+    auth::CurrentUser(current_user): auth::CurrentUser,
+    Path(id): Path<Uuid>,
+) -> AppResult<impl IntoResponse> {
+    let mut conn = state.db_conn().await?;
+    let deleted = api_key::delete_for_user(&mut conn, current_user.id, id).await?;
+    info!(
+        api_key_id = %deleted.id,
+        user_id = %current_user.id,
+        provider_group_id = %deleted.group_id,
+        "管理端已删除当前用户的 API Key"
+    );
+    Ok(no_store_json(DeleteApiKeyResponse { id: deleted.id }))
 }
 
 async fn update_api_key_enabled(

@@ -237,15 +237,18 @@ impl<'a, P: MaintenanceProvider> ProviderResourceService<'a, P> {
         self.sync_api_key(api_key).await
     }
 
-    /// 分组创建事务已经提交后，把本次从“未分组”状态占用的资源统一投射到 Redis。
+    /// 分组归属事务已经提交后，把受影响资源的最新持久快照统一投射到 Redis。
     ///
-    /// 这里刻意只做 runtime reconcile，不再读取 Dashboard 展示快照；即便单个资源同步
-    /// 失败，也继续尝试其余资源，尽量缩小 PostgreSQL 已提交但 Redis 尚未同步的范围。
-    pub async fn sync_group_resources(
+    /// 创建分组会把资源发布到 ready index，删除分组则会凭借 `group_id=None` 快照移除
+    /// runtime。这里刻意不再查询数据库；即便单个资源同步失败，也继续尝试其余资源，
+    /// 尽量缩小 PostgreSQL 已提交但 Redis 尚未同步的范围。
+    pub async fn sync_resource_snapshots(
         &self,
         accounts: Vec<ProviderAccount>,
         api_keys: Vec<ProviderApiKey>,
     ) -> AppResult<()> {
+        let account_count = accounts.len();
+        let upstream_api_key_count = api_keys.len();
         let mut first_error = None;
 
         for account in accounts {
@@ -274,7 +277,9 @@ impl<'a, P: MaintenanceProvider> ProviderResourceService<'a, P> {
             None => {
                 info!(
                     provider = P::NAME,
-                    "Provider 分组新绑定资源已全部同步到 Redis runtime"
+                    account_count,
+                    upstream_api_key_count,
+                    "Provider 分组归属变化涉及的资源已全部同步到 Redis runtime"
                 );
                 Ok(())
             }

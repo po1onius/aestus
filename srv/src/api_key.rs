@@ -40,7 +40,7 @@ pub async fn create(
         .transaction::<ApiKeyWithModels, AppError, _>(async |conn| {
             let provider_group = group::require_enabled_for_write(&mut *conn, group_id).await?;
             if let Some(plugin_release_id) = plugin_release_id {
-                crate::plugin::sql::require_enabled_release_for_provider(
+                crate::plugin::sql::require_enabled_release_for_provider_write(
                     &mut *conn,
                     plugin_release_id,
                     &provider_group.provider,
@@ -134,6 +134,72 @@ pub async fn list_by_user(
     attach_models(conn, api_keys).await
 }
 
+/// 永久删除指定用户自己的调用方网关 API Key。
+///
+/// 项目不使用数据库外键，因此必须在同一事务中先锁定并确认 Key 的用户归属，再显式
+/// 删除模型映射和主记录。该操作不触碰 Provider 分组、上游资源或历史请求日志；已经
+/// 进入处理流水线的请求继续按其既有生命周期收尾，后续鉴权会立即无法再找到该 Key。
+pub async fn delete_for_user(
+    conn: &mut AsyncPgConnection,
+    user_id: Uuid,
+    id: Uuid,
+) -> AppResult<ApiKey> {
+    use self::api_keys::dsl;
+
+    let deleted = conn
+        .transaction::<ApiKey, AppError, _>(async |conn| {
+            let current = dsl::api_keys
+                .filter(dsl::id.eq(id))
+                .filter(dsl::user_id.eq(user_id))
+                .for_update()
+                .select(ApiKey::as_select())
+                .first::<ApiKey>(&mut *conn)
+                .await
+                .map_err(|source| match source {
+                    diesel::result::Error::NotFound => AppError::BadRequest {
+                        message: format!("API Key 不存在: {id}"),
+                    },
+                    source => AppError::DbQuery {
+                        message: source.to_string(),
+                    },
+                })?;
+
+            diesel::delete(api_key_models::table.filter(api_key_models::api_key_id.eq(current.id)))
+                .execute(&mut *conn)
+                .await
+                .map_err(|source| AppError::DbQuery {
+                    message: source.to_string(),
+                })?;
+            let deleted_count = diesel::delete(
+                dsl::api_keys
+                    .filter(dsl::id.eq(current.id))
+                    .filter(dsl::user_id.eq(user_id)),
+            )
+            .execute(&mut *conn)
+            .await
+            .map_err(|source| AppError::DbQuery {
+                message: source.to_string(),
+            })?;
+            if deleted_count != 1 {
+                return Err(AppError::DbQuery {
+                    message: format!("删除 API Key 主记录失败: {}", current.id),
+                });
+            }
+            Ok(current)
+        })
+        .await?;
+
+    info!(
+        api_key_id = %deleted.id,
+        user_id = %deleted.user_id,
+        provider_group_id = %deleted.group_id,
+        api_key_name = %deleted.name,
+        was_enabled = deleted.enabled,
+        "API Key 及其模型白名单已永久删除；Provider 分组、上游资源和历史日志保持不变"
+    );
+    Ok(deleted)
+}
+
 /// 修改指定用户自己的 API Key 启用状态。
 ///
 /// 网关 Key 的状态只参与请求鉴权，不触碰所属 Provider 分组、上游资源或 maintenance。
@@ -195,6 +261,24 @@ pub async fn update_models_for_user(
     let allowed_models = group::normalize_models(allowed_models)?;
     let api_key = conn
         .transaction::<ApiKey, AppError, _>(async |conn| {
+            // 先读取不可变的分组归属，再统一按“分组 -> API Key”顺序加锁。分组删除会
+            // 级联删除调用方 Key；固定锁序避免它与白名单更新形成死锁。
+            let group_id = dsl::api_keys
+                .filter(dsl::id.eq(id))
+                .filter(dsl::user_id.eq(user_id))
+                .select(dsl::group_id)
+                .first::<Uuid>(&mut *conn)
+                .await
+                .map_err(|source| match source {
+                    diesel::result::Error::NotFound => AppError::BadRequest {
+                        message: format!("API Key 不存在: {id}"),
+                    },
+                    source => AppError::DbQuery {
+                        message: source.to_string(),
+                    },
+                })?;
+            group::require_for_update(&mut *conn, group_id).await?;
+
             let current = dsl::api_keys
                 .filter(dsl::id.eq(id))
                 .filter(dsl::user_id.eq(user_id))
@@ -211,10 +295,13 @@ pub async fn update_models_for_user(
                     },
                 })?;
 
-            // 分组即使被停用也允许编辑 Key；这里只读取它的模型授权边界。分组模型替换
-            // 也会先锁定同一主记录，因此两类修改会串行提交，子集校验不会落在集合切换
-            // 的中间状态。
-            group::require_for_update(&mut *conn, current.group_id).await?;
+            // 分组即使被停用也允许编辑 Key；这里只读取它的模型授权边界。分组归属当前
+            // 不可修改，仍显式核对锁前投影，防止未来扩展迁移能力时破坏锁序假设。
+            if current.group_id != group_id {
+                return Err(AppError::BadRequest {
+                    message: format!("API Key 所属 Provider 分组已变化，请刷新后重试: {id}"),
+                });
+            }
             let group_models = group::load_model_names(&mut *conn, current.group_id).await?;
             ensure_models_within_group(&allowed_models, &group_models, current.group_id)?;
 
@@ -336,7 +423,7 @@ pub async fn update_plugin_for_user(
                             current.group_id
                         ),
                     })?;
-                crate::plugin::sql::require_enabled_release_for_provider(
+                crate::plugin::sql::require_enabled_release_for_provider_write(
                     &mut *conn,
                     release_id,
                     &provider_group.provider,

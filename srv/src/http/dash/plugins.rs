@@ -9,9 +9,9 @@ use std::{collections::HashMap, sync::Arc};
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Multipart, Path, State},
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -41,11 +41,22 @@ pub fn router() -> Router<AppState> {
                 .layer(DefaultBodyLimit::max(MAX_PLUGIN_UPLOAD_BODY_BYTES)),
         )
         .route("/options", get(list_plugin_options))
+        .route("/{id}", delete(delete_plugin))
         .route(
             "/{id}/releases",
             post(publish_release).layer(DefaultBodyLimit::max(MAX_PLUGIN_UPLOAD_BODY_BYTES)),
         )
         .route("/{id}/enabled", put(update_plugin_enabled))
+}
+
+#[derive(Debug, Serialize)]
+struct DeletePluginResponse {
+    id: Uuid,
+    name: String,
+    provider: String,
+    deleted_release_count: usize,
+    deleted_artifact_count: usize,
+    unbound_gateway_api_key_count: usize,
 }
 
 async fn list_plugins(
@@ -62,6 +73,62 @@ async fn list_plugin_options(
 ) -> AppResult<Json<Vec<PluginReleaseSummary>>> {
     let mut conn = state.db_conn().await?;
     Ok(Json(plugin::sql::list_enabled_options(&mut conn).await?))
+}
+
+async fn delete_plugin(
+    State(state): State<AppState>,
+    auth::AdminUser(admin): auth::AdminUser,
+    Path(suite_id): Path<Uuid>,
+) -> AdminResult<Json<DeletePluginResponse>> {
+    let mut conn = state.db_conn().await?;
+    let deleted = plugin::sql::delete_suite(&mut conn, suite_id).await?;
+    drop(conn);
+
+    let deleted_artifact_count = deleted.artifact_ids.len();
+    match state
+        .plugin_runtime()
+        .evict_components(&deleted.artifact_ids)
+    {
+        Ok(evicted_component_count) => {
+            info!(
+                admin_user_id = %admin.id,
+                plugin_suite_id = %deleted.suite.id,
+                deleted_artifact_count,
+                evicted_component_count,
+                "Admin 删除插件套件后已清理当前进程的 WASM 编译缓存"
+            );
+        }
+        Err(error) => {
+            // 数据库事实已经提交，全部网关 Key也已解除绑定；缓存中的不可达 Component
+            // 只占用内存，不得把成功删除误报为可重试失败并诱导管理员重复操作。
+            warn!(
+                admin_user_id = %admin.id,
+                plugin_suite_id = %deleted.suite.id,
+                deleted_artifact_count,
+                error = %error,
+                "插件套件已删除，但当前进程清理不可达 WASM 编译缓存失败"
+            );
+        }
+    }
+
+    info!(
+        admin_user_id = %admin.id,
+        plugin_suite_id = %deleted.suite.id,
+        plugin_suite_name = %deleted.suite.name,
+        provider = %deleted.suite.provider,
+        deleted_release_count = deleted.release_count,
+        deleted_artifact_count,
+        unbound_gateway_api_key_count = deleted.unbound_gateway_api_key_count,
+        "Admin 已删除 WASM 插件套件；关联网关 Key保留并回落到 Provider 原生流程"
+    );
+    Ok(Json(DeletePluginResponse {
+        id: deleted.suite.id,
+        name: deleted.suite.name,
+        provider: deleted.suite.provider,
+        deleted_release_count: deleted.release_count,
+        deleted_artifact_count,
+        unbound_gateway_api_key_count: deleted.unbound_gateway_api_key_count,
+    }))
 }
 
 async fn create_plugin(

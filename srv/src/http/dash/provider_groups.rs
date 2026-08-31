@@ -3,7 +3,7 @@ use axum::{
     extract::{Path, Query, State},
     routing::{get, post, put},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
@@ -52,12 +52,22 @@ struct UpdateGroupModelsRequest {
     models: Vec<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct DeleteGroupResponse {
+    id: Uuid,
+    provider: String,
+    name: String,
+    released_account_count: usize,
+    released_upstream_api_key_count: usize,
+    deleted_gateway_api_key_count: usize,
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/options", get(list_group_options))
         .route("/unassigned-resources", get(list_unassigned_resources))
         .route("/", get(list_groups).post(create_group))
-        .route("/{id}", put(rename_group))
+        .route("/{id}", put(rename_group).delete(delete_group))
         .route("/{id}/models", put(update_group_models))
         .route("/{id}/enabled", post(update_group_enabled))
 }
@@ -126,12 +136,12 @@ async fn create_group(
     match provider {
         gpt_model::PROVIDER => {
             ProviderResourceService::<GptMaintenance>::new(&state)
-                .sync_group_resources(created.accounts, created.api_keys)
+                .sync_resource_snapshots(created.accounts, created.api_keys)
                 .await?;
         }
         crate::provider::claude::model::PROVIDER => {
             ProviderResourceService::<ClaudeMaintenance>::new(&state)
-                .sync_group_resources(created.accounts, created.api_keys)
+                .sync_resource_snapshots(created.accounts, created.api_keys)
                 .await?;
         }
         _ => unreachable!("group::create 已验证 provider"),
@@ -172,4 +182,38 @@ async fn update_group_models(
     Ok(Json(
         group::update_models(&mut conn, id, payload.models).await?,
     ))
+}
+
+async fn delete_group(
+    State(state): State<AppState>,
+    _admin: auth::AdminUser,
+    Path(id): Path<Uuid>,
+) -> AdminResult<Json<DeleteGroupResponse>> {
+    let mut conn = state.db_conn().await?;
+    let deleted = group::delete(&mut conn, id).await?;
+    drop(conn);
+
+    let response = DeleteGroupResponse {
+        id: deleted.group.id,
+        provider: deleted.group.provider.clone(),
+        name: deleted.group.name.clone(),
+        released_account_count: deleted.accounts.len(),
+        released_upstream_api_key_count: deleted.upstream_api_keys.len(),
+        deleted_gateway_api_key_count: deleted.deleted_gateway_api_key_count,
+    };
+    match deleted.group.provider.as_str() {
+        gpt_model::PROVIDER => {
+            ProviderResourceService::<GptMaintenance>::new(&state)
+                .sync_resource_snapshots(deleted.accounts, deleted.upstream_api_keys)
+                .await?;
+        }
+        crate::provider::claude::model::PROVIDER => {
+            ProviderResourceService::<ClaudeMaintenance>::new(&state)
+                .sync_resource_snapshots(deleted.accounts, deleted.upstream_api_keys)
+                .await?;
+        }
+        _ => unreachable!("持久化 Provider 分组只允许已支持的 provider"),
+    }
+
+    Ok(Json(response))
 }
