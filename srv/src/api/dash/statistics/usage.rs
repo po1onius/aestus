@@ -15,11 +15,10 @@ use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::{
+    api::dash::auth,
     err::{AppError, AppResult},
-    http::dash::auth,
-    model::User,
     state::AppState,
-    user,
+    user::{self, User},
 };
 
 use super::calendar::{current_service_date, local_day_start_utc};

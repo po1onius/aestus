@@ -6,11 +6,12 @@ use uuid::Uuid;
 
 use crate::{
     err::{AppError, AppResult},
-    model::schema::{api_key_models, api_keys, users},
+    gateway_key::schema::{api_key_models, api_keys},
     plugin::{self, model::PluginBinding},
     provider::group::{self, schema::provider_groups},
     state::AppState,
     tenant,
+    user::schema::users,
 };
 
 // 四张表分别定义在不同领域模块中。项目不使用数据库外键，因此这里显式声明鉴权查询
@@ -18,6 +19,8 @@ use crate::{
 diesel::allow_tables_to_appear_in_same_query!(api_keys, provider_groups);
 diesel::allow_tables_to_appear_in_same_query!(api_key_models, provider_groups);
 diesel::allow_tables_to_appear_in_same_query!(users, provider_groups);
+diesel::allow_tables_to_appear_in_same_query!(api_keys, users);
+diesel::allow_tables_to_appear_in_same_query!(api_key_models, users);
 
 const BEARER_PREFIX: &str = "Bearer ";
 

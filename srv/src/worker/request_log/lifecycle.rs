@@ -6,7 +6,7 @@ use serde::Serialize;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::request_event::{
+use crate::request::events::{
     GatewayAuthDetails as GatewayAuthDetailsEvent, RequestEndResult, RequestEvent,
     RequestInspectionDetails as RequestInspectionDetailsEvent, StreamEndReason, StreamErrorRecord,
     TokenUsage,

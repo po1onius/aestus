@@ -40,7 +40,7 @@ use crate::{
         response_logging::response_body_for_tracing,
         scheduler::{self, UpstreamAllocation, UpstreamLease},
     },
-    request_event::{RequestEndResult, RequestEvent, StreamEndReason, UsageAttribution},
+    request::events::{RequestEndResult, RequestEvent, StreamEndReason, UsageAttribution},
     state::AppState,
 };
 

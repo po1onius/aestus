@@ -19,7 +19,7 @@ use crate::{
         gpt::model::GptAccountRequestContext,
         protocol::{MAX_SSE_ITEM_BYTES, UpstreamFeedback},
     },
-    request_event::TokenUsage,
+    request::events::TokenUsage,
 };
 
 use super::{

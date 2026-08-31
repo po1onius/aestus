@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::{
     err::{AppError, AppResult},
-    model::schema::{api_key_models, api_keys},
+    gateway_key::schema::{api_key_models, api_keys},
     provider::{
         credential::{
             ProviderAccount, ProviderApiKey,

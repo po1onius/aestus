@@ -15,10 +15,10 @@ use crate::{
         maintenance::MaintenanceProvider,
         resource::{UpstreamResource, UpstreamResourceKind},
     },
-    request_body::CachedBody,
+    request::body_cache::CachedBody,
 };
 
-pub use crate::request_event::{RequestLogFields, StreamErrorRecord, TokenUsage};
+pub use crate::request::events::{RequestLogFields, StreamErrorRecord, TokenUsage};
 
 /// 单个完整 SSE item（包含字段、数据和结尾空行）的统一大小上限。
 ///

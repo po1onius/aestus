@@ -3,10 +3,7 @@ use diesel::prelude::*;
 use serde::Serialize;
 use uuid::Uuid;
 
-/// 网关用户与调用方 API Key 的 PostgreSQL schema。
-///
-/// 该模块位于 HTTP 层之外，只描述领域持久模型；供应商凭证继续由 provider 的统一
-/// credential 模型维护，避免 API handler 承担数据库模型职责。
+/// 网关用户的 PostgreSQL schema。
 pub mod schema {
     diesel::table! {
         users (id) {
@@ -25,78 +22,11 @@ pub mod schema {
             disabled_at -> Nullable<Timestamptz>,
         }
     }
-
-    diesel::table! {
-        api_keys (id) {
-            id -> Uuid,
-            tenant_id -> Uuid,
-            user_id -> Uuid,
-            group_id -> Uuid,
-            name -> Text,
-            api_key -> Text,
-            plugin_release_id -> Nullable<Uuid>,
-            enabled -> Bool,
-            created_at -> Timestamptz,
-            updated_at -> Timestamptz,
-            disabled_at -> Nullable<Timestamptz>,
-        }
-    }
-
-    diesel::table! {
-        api_key_models (api_key_id, model_name) {
-            api_key_id -> Uuid,
-            model_name -> Text,
-            created_at -> Timestamptz,
-        }
-    }
-
-    diesel::allow_tables_to_appear_in_same_query!(users, api_keys, api_key_models,);
 }
 
 pub const USER_ROLE_PLATFORM_ADMIN: &str = "platform_admin";
 pub const USER_ROLE_TENANT_OWNER: &str = "tenant_owner";
 pub const USER_ROLE_TENANT_USER: &str = "tenant_user";
-
-/// API Key 的数据库行。
-///
-/// 调用方需要在 Dashboard 中随时查看和复制 Key，因此这里保存原始值。HTTP 层使用
-/// 专用响应 DTO 明确控制 Key 的返回范围，业务日志则只记录 ID 和名称，禁止记录此字段。
-#[derive(Clone, Queryable, Selectable, Serialize)]
-#[diesel(table_name = schema::api_keys)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct ApiKey {
-    pub id: Uuid,
-    pub tenant_id: Uuid,
-    pub user_id: Uuid,
-    pub group_id: Uuid,
-    pub name: String,
-    #[serde(skip_serializing)]
-    pub api_key: String,
-    pub plugin_release_id: Option<Uuid>,
-    pub enabled: bool,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    pub disabled_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Insertable)]
-#[diesel(table_name = schema::api_keys)]
-pub(super) struct NewApiKey {
-    pub tenant_id: Uuid,
-    pub user_id: Uuid,
-    pub group_id: Uuid,
-    pub name: String,
-    pub api_key: String,
-    pub plugin_release_id: Option<Uuid>,
-}
-
-/// API Key 模型白名单写入行；复合主键在没有外键的前提下负责模型去重。
-#[derive(Debug, Insertable)]
-#[diesel(table_name = schema::api_key_models)]
-pub(super) struct NewApiKeyModel {
-    pub api_key_id: Uuid,
-    pub model_name: String,
-}
 
 /// Dashboard 用户数据库行。
 ///
@@ -121,6 +51,39 @@ pub struct User {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub disabled_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PublicUser {
+    pub id: Uuid,
+    pub tenant_id: Option<Uuid>,
+    pub username: String,
+    pub email: String,
+    pub role: String,
+    pub quota: i64,
+    pub email_verified: bool,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub disabled_at: Option<DateTime<Utc>>,
+}
+
+impl From<User> for PublicUser {
+    fn from(user: User) -> Self {
+        Self {
+            id: user.id,
+            tenant_id: user.tenant_id,
+            username: user.username,
+            email: user.email,
+            role: user.role,
+            quota: user.quota,
+            email_verified: user.email_verified,
+            enabled: user.enabled,
+            created_at: user.created_at,
+            updated_at: user.updated_at,
+            disabled_at: user.disabled_at,
+        }
+    }
 }
 
 #[derive(Debug, Insertable)]
@@ -155,7 +118,7 @@ impl User {
     }
 }
 
-pub fn is_valid_user_role(role: &str) -> bool {
+pub(super) fn is_valid_user_role(role: &str) -> bool {
     matches!(
         role,
         USER_ROLE_PLATFORM_ADMIN | USER_ROLE_TENANT_OWNER | USER_ROLE_TENANT_USER

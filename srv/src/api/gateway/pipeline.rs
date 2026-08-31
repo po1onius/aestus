@@ -1,203 +1,27 @@
 use axum::{
-    Router,
     body::Body,
-    extract::{OriginalUri, Request, State},
-    http::{Method, Response, Uri},
-    response::IntoResponse,
-    routing::post,
+    extract::Request,
+    http::{Response, Uri},
 };
-use tracing::{error, info, instrument};
+use tracing::{error, info};
 
 use crate::{
     err::{AppError, AppResult, CLIENT_CLOSED_REQUEST},
-    gateway_auth,
     provider::{
-        claude::messages::ClaudeMessagesProxy,
-        gpt::image_edits::GptImageEditsProxy,
-        gpt::image_generations::GptImageGenerationsProxy,
-        gpt::responses::GptResponsesProxy,
-        gpt::search::GptSearchProxy,
         protocol::{ProviderProtocol, ProviderVisibleError, ReplayableRequest},
         proxy,
     },
-    request_event::{
-        GatewayAuthDetails, RequestEndResult, RequestEvent, RequestInspectionDetails,
-        UsageAttribution,
+    request::{
+        body_cache,
+        events::{
+            GatewayAuthDetails, RequestEndResult, RequestEvent, RequestInspectionDetails,
+            UsageAttribution,
+        },
     },
     state::AppState,
 };
 
-const RESPONSES_ROUTE: &str = "/v1/responses";
-const SEARCH_ROUTE: &str = "/v1/alpha/search";
-const IMAGE_GENERATIONS_ROUTE: &str = "/v1/images/generations";
-const IMAGE_EDITS_ROUTE: &str = "/v1/images/edits";
-const MESSAGES_ROUTE: &str = "/v1/messages";
-const MESSAGES_COUNT_TOKENS_ROUTE: &str = "/v1/messages/count_tokens";
-
-/// 通用请求流程识别出的 provider 操作。
-///
-/// 路由层仍显式注册已知 HTTP 接口，以保留 Axum 的正常 404/405 行为；所有接口随后都
-/// 进入同一个 handler，并在这里按 method/path 解析 operation，而不是直接绑定 provider
-/// 业务 handler。新增 provider 或同一 provider 的新操作时只需增加 descriptor 和 adapter。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OperationId {
-    Responses,
-    Search,
-    ImageGenerations,
-    ImageEdits,
-    Messages,
-    MessagesCountTokens,
-}
-
-impl OperationId {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Responses => "responses",
-            Self::Search => "search",
-            Self::ImageGenerations => "image_generations",
-            Self::ImageEdits => "image_edits",
-            Self::Messages => "messages",
-            Self::MessagesCountTokens => "messages_count_tokens",
-        }
-    }
-}
-
-/// endpoint 对账号插件套件的使用策略。
-///
-/// 当前 Dashboard 三个插件插槽只定义了 Responses/Messages 风格的通用 ABI；Search
-/// 要求原始 JSON 直接透传，Images 的普通 Rust 转换函数也尚未包装成 Component。由 endpoint
-/// 显式声明策略，可以避免继续用 URI 白名单暗示插件能力，也能防止绑定了 Responses 插件的
-/// API Key 误处理搜索或图片请求。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PluginPolicy {
-    Disabled,
-    AccountAttempts,
-}
-
-impl PluginPolicy {
-    const fn enabled(self) -> bool {
-        matches!(self, Self::AccountAttempts)
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct EndpointDescriptor {
-    provider: &'static str,
-    operation: OperationId,
-    route: &'static str,
-    plugin_policy: PluginPolicy,
-}
-
-impl EndpointDescriptor {
-    fn identify(method: &Method, uri: &Uri) -> AppResult<Self> {
-        let operation = match (method, uri.path()) {
-            (&Method::POST, RESPONSES_ROUTE) => OperationId::Responses,
-            (&Method::POST, SEARCH_ROUTE) => OperationId::Search,
-            (&Method::POST, IMAGE_GENERATIONS_ROUTE) => OperationId::ImageGenerations,
-            (&Method::POST, IMAGE_EDITS_ROUTE) => OperationId::ImageEdits,
-            (&Method::POST, MESSAGES_ROUTE) => OperationId::Messages,
-            (&Method::POST, MESSAGES_COUNT_TOKENS_ROUTE) => OperationId::MessagesCountTokens,
-            _ => {
-                return Err(AppError::BadRequest {
-                    message: format!("通用 gateway 无法识别 endpoint: {method} {}", uri.path()),
-                });
-            }
-        };
-
-        Ok(Self {
-            provider: match operation {
-                OperationId::Messages | OperationId::MessagesCountTokens => {
-                    crate::provider::claude::model::PROVIDER
-                }
-                OperationId::Responses
-                | OperationId::Search
-                | OperationId::ImageGenerations
-                | OperationId::ImageEdits => crate::provider::gpt::model::PROVIDER,
-            },
-            operation,
-            route: match operation {
-                OperationId::Responses => RESPONSES_ROUTE,
-                OperationId::Search => SEARCH_ROUTE,
-                OperationId::ImageGenerations => IMAGE_GENERATIONS_ROUTE,
-                OperationId::ImageEdits => IMAGE_EDITS_ROUTE,
-                OperationId::Messages => MESSAGES_ROUTE,
-                OperationId::MessagesCountTokens => MESSAGES_COUNT_TOKENS_ROUTE,
-            },
-            plugin_policy: match operation {
-                OperationId::Responses | OperationId::Messages => PluginPolicy::AccountAttempts,
-                OperationId::Search
-                | OperationId::ImageGenerations
-                | OperationId::ImageEdits
-                | OperationId::MessagesCountTokens => PluginPolicy::Disabled,
-            },
-        })
-    }
-}
-
-/// Provider 模型网关路由。
-///
-/// 每条已知路由只声明 HTTP method/path，实际 provider 与 operation 在公共 handler 内
-/// 识别。这样路由不再直接进入 GPT Responses handler，后续 provider 共用完整生命周期。
-pub fn router() -> Router<AppState> {
-    Router::new()
-        .route(RESPONSES_ROUTE, post(handle_provider_request))
-        .route(SEARCH_ROUTE, post(handle_provider_request))
-        .route(IMAGE_GENERATIONS_ROUTE, post(handle_provider_request))
-        .route(IMAGE_EDITS_ROUTE, post(handle_provider_request))
-        .route(MESSAGES_ROUTE, post(handle_provider_request))
-        .route(MESSAGES_COUNT_TOKENS_ROUTE, post(handle_provider_request))
-}
-
-#[instrument(skip_all, fields(component = "provider_gateway"))]
-async fn handle_provider_request(
-    State(state): State<AppState>,
-    OriginalUri(uri): OriginalUri,
-    request: Request<Body>,
-) -> Response<Body> {
-    let endpoint = match EndpointDescriptor::identify(request.method(), &uri) {
-        Ok(endpoint) => endpoint,
-        Err(error) => return error.into_response(),
-    };
-    // 该 ID 是模型请求在网关内部的唯一关联标识。一次请求即使发生多次上游重试，
-    // lifecycle、scheduler、maintenance 与请求日志也始终复用同一个 ID。
-    let request_id = uuid::Uuid::now_v7();
-    state.request_events().emit(RequestEvent::Started {
-        request_id,
-        provider: endpoint.provider,
-        route: endpoint.route,
-        occurred_at: chrono::Utc::now(),
-    });
-
-    info!(
-        request_id = %request_id,
-        provider = endpoint.provider,
-        operation = endpoint.operation.as_str(),
-        route = endpoint.route,
-        method = %request.method(),
-        uri = %uri,
-        "模型请求已进入通用 provider gateway"
-    );
-
-    match endpoint.operation {
-        OperationId::Responses => {
-            execute_pipeline::<GptResponsesProxy>(&state, endpoint, uri, request, request_id).await
-        }
-        OperationId::Search => {
-            execute_pipeline::<GptSearchProxy>(&state, endpoint, uri, request, request_id).await
-        }
-        OperationId::ImageGenerations => {
-            execute_pipeline::<GptImageGenerationsProxy>(&state, endpoint, uri, request, request_id)
-                .await
-        }
-        OperationId::ImageEdits => {
-            execute_pipeline::<GptImageEditsProxy>(&state, endpoint, uri, request, request_id).await
-        }
-        OperationId::Messages | OperationId::MessagesCountTokens => {
-            execute_pipeline::<ClaudeMessagesProxy>(&state, endpoint, uri, request, request_id)
-                .await
-        }
-    }
-}
+use super::{auth, endpoint::EndpointDescriptor};
 
 /// 执行 provider 共用的请求生命周期。
 ///
@@ -205,7 +29,7 @@ async fn handle_provider_request(
 /// 发布协议字段、model 授权、通用调度和重试、provider 响应处理、日志收尾。资源请求
 /// override 与认证注入位于 provider 的单次 attempt 内，且每次重试都从此处保存的原始
 /// 请求重新构造。
-async fn execute_pipeline<P>(
+pub(super) async fn execute_pipeline<P>(
     state: &AppState,
     endpoint: EndpointDescriptor,
     uri: Uri,
@@ -230,7 +54,7 @@ where
     P: ProviderProtocol,
 {
     let headers = request.headers().clone();
-    let auth = gateway_auth::authenticate_gateway_key(
+    let auth = auth::authenticate_gateway_key(
         state,
         &headers,
         P::provider_name(),
@@ -254,12 +78,9 @@ where
                 provider_group_name: auth.group_name().to_owned(),
             },
         });
-    let (body, inspection_bytes) = crate::request_body::cache_request_body(
-        request,
-        request_id,
-        state.config().body_memory_limit_bytes,
-    )
-    .await?;
+    let (body, inspection_bytes) =
+        body_cache::cache_request_body(request, request_id, state.config().body_memory_limit_bytes)
+            .await?;
 
     // 无论是否绑定插件，inspection 始终描述调用方提交的原始 provider 请求，并在资源
     // 调度之前完成。插件是 admin 控制的上游请求改造能力，可以在后续 attempt 中静默
@@ -277,7 +98,7 @@ where
             log_fields: log_fields.clone(),
         },
     });
-    gateway_auth::authorize_gateway_payload(&auth, Some(&model))?;
+    auth::authorize_gateway_payload(&auth, Some(&model))?;
 
     // 只有插件 attempt 需要完整原始字节作为 Component 输入；原生路径在 inspection 完成
     // 后立即释放这份额外 Bytes 句柄，后续继续通过 CachedBody 进行零污染重放。

@@ -18,8 +18,8 @@ use uuid::Uuid;
 use wasmtime::component::Component;
 
 use crate::{
+    api::dash::auth,
     err::{AdminResult, AppError, AppResult},
-    http::dash::auth,
     plugin::{
         self,
         model::{PluginArtifactUpload, PluginReleaseSummary, PluginSlot},

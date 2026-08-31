@@ -10,7 +10,7 @@ use tokio::{
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-use crate::{err::AppResult, infra::db::DbPool, request_event::TokenUsage};
+use crate::{err::AppResult, infra::db::DbPool, request::events::TokenUsage};
 
 const QUOTA_QUEUE_CAPACITY: usize = 4096;
 const QUOTA_MAX_IN_FLIGHT_TASKS: usize = 8;

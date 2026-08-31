@@ -8,11 +8,11 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::{
-    err::{AdminResult, AppError},
-    http::dash::{
+    api::dash::{
         auth,
         pagination::{ListPage, ListPageQuery},
     },
+    err::{AdminResult, AppError},
     state::AppState,
     user::{self, PublicUser},
 };

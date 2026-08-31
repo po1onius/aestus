@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
+    api::dash::auth,
     err::AdminResult,
-    http::dash::auth,
     state::AppState,
     tenant::{self, Tenant, TenantSummary},
 };

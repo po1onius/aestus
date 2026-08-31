@@ -7,16 +7,17 @@ use uuid::Uuid;
 
 use crate::{
     err::{AppError, AppResult},
-    model::{
-        ApiKey, NewApiKey, NewApiKeyModel,
-        schema::{api_key_models, api_keys},
-    },
     provider::group,
 };
 
+use super::model::{
+    GatewayApiKey, NewGatewayApiKey, NewGatewayApiKeyModel,
+    schema::{api_key_models, api_keys},
+};
+
 /// API Key 主记录与其逐行模型白名单的领域快照。
-pub struct ApiKeyWithModels {
-    pub api_key: ApiKey,
+pub struct GatewayApiKeyWithModels {
+    pub api_key: GatewayApiKey,
     pub allowed_models: Vec<String>,
 }
 
@@ -32,13 +33,13 @@ pub async fn create(
     name: String,
     allowed_models: Vec<String>,
     plugin_release_id: Option<Uuid>,
-) -> AppResult<ApiKeyWithModels> {
+) -> AppResult<GatewayApiKeyWithModels> {
     use self::api_keys::dsl;
 
     let allowed_models = group::normalize_models(allowed_models)?;
 
     let result = conn
-        .transaction::<ApiKeyWithModels, AppError, _>(async |conn| {
+        .transaction::<GatewayApiKeyWithModels, AppError, _>(async |conn| {
             let provider_group =
                 group::require_enabled_for_write(&mut *conn, tenant_id, group_id).await?;
             if let Some(plugin_release_id) = plugin_release_id {
@@ -53,7 +54,7 @@ pub async fn create(
             let group_models = group::load_model_names(&mut *conn, group_id).await?;
             ensure_models_within_group(&allowed_models, &group_models, provider_group.id)?;
 
-            let new_api_key = NewApiKey {
+            let new_api_key = NewGatewayApiKey {
                 tenant_id,
                 user_id,
                 group_id,
@@ -63,8 +64,8 @@ pub async fn create(
             };
             let api_key = diesel::insert_into(dsl::api_keys)
                 .values(&new_api_key)
-                .returning(ApiKey::as_returning())
-                .get_result::<ApiKey>(&mut *conn)
+                .returning(GatewayApiKey::as_returning())
+                .get_result::<GatewayApiKey>(&mut *conn)
                 .await
                 .map_err(|source| match source {
                     diesel::result::Error::DatabaseError(
@@ -86,7 +87,7 @@ pub async fn create(
                 })?;
             let mappings = allowed_models
                 .iter()
-                .map(|model_name| NewApiKeyModel {
+                .map(|model_name| NewGatewayApiKeyModel {
                     api_key_id: api_key.id,
                     model_name: model_name.clone(),
                 })
@@ -98,7 +99,7 @@ pub async fn create(
                 .map_err(|source| AppError::DbQuery {
                     message: source.to_string(),
                 })?;
-            Ok(ApiKeyWithModels {
+            Ok(GatewayApiKeyWithModels {
                 api_key,
                 allowed_models: allowed_models.clone(),
             })
@@ -121,7 +122,7 @@ pub async fn list_by_user(
     user_id: Uuid,
     limit: i64,
     offset: i64,
-) -> AppResult<Vec<ApiKeyWithModels>> {
+) -> AppResult<Vec<GatewayApiKeyWithModels>> {
     use self::api_keys::dsl;
 
     let api_keys = dsl::api_keys
@@ -129,8 +130,8 @@ pub async fn list_by_user(
         .order((dsl::created_at.desc(), dsl::id.desc()))
         .limit(limit)
         .offset(offset)
-        .select(ApiKey::as_select())
-        .load::<ApiKey>(conn)
+        .select(GatewayApiKey::as_select())
+        .load::<GatewayApiKey>(conn)
         .await
         .map_err(|source| AppError::DbQuery {
             message: source.to_string(),
@@ -147,17 +148,17 @@ pub async fn delete_for_user(
     conn: &mut AsyncPgConnection,
     user_id: Uuid,
     id: Uuid,
-) -> AppResult<ApiKey> {
+) -> AppResult<GatewayApiKey> {
     use self::api_keys::dsl;
 
     let deleted = conn
-        .transaction::<ApiKey, AppError, _>(async |conn| {
+        .transaction::<GatewayApiKey, AppError, _>(async |conn| {
             let current = dsl::api_keys
                 .filter(dsl::id.eq(id))
                 .filter(dsl::user_id.eq(user_id))
                 .for_update()
-                .select(ApiKey::as_select())
-                .first::<ApiKey>(&mut *conn)
+                .select(GatewayApiKey::as_select())
+                .first::<GatewayApiKey>(&mut *conn)
                 .await
                 .map_err(|source| match source {
                     diesel::result::Error::NotFound => AppError::BadRequest {
@@ -213,7 +214,7 @@ pub async fn update_enabled_for_user(
     user_id: Uuid,
     id: Uuid,
     enabled: bool,
-) -> AppResult<ApiKeyWithModels> {
+) -> AppResult<GatewayApiKeyWithModels> {
     use self::api_keys::dsl;
 
     let now = chrono::Utc::now();
@@ -227,15 +228,15 @@ pub async fn update_enabled_for_user(
         dsl::disabled_at.eq((!enabled).then_some(now)),
         dsl::updated_at.eq(now),
     ))
-    .returning(ApiKey::as_returning())
-    .get_result::<ApiKey>(conn)
+    .returning(GatewayApiKey::as_returning())
+    .get_result::<GatewayApiKey>(conn)
     .await;
 
     match api_key {
         Ok(api_key) => {
             info!(api_key_id = %api_key.id, user_id = %api_key.user_id, provider_group_id = %api_key.group_id, api_key_name = %api_key.name, enabled = api_key.enabled, "API Key 启用状态已更新；Provider 分组和 maintenance 保持不变");
             let allowed_models = load_model_names(conn, api_key.id).await?;
-            Ok(ApiKeyWithModels {
+            Ok(GatewayApiKeyWithModels {
                 api_key,
                 allowed_models,
             })
@@ -259,12 +260,12 @@ pub async fn update_models_for_user(
     user_id: Uuid,
     id: Uuid,
     allowed_models: Vec<String>,
-) -> AppResult<ApiKeyWithModels> {
+) -> AppResult<GatewayApiKeyWithModels> {
     use self::api_keys::dsl;
 
     let allowed_models = group::normalize_models(allowed_models)?;
     let api_key = conn
-        .transaction::<ApiKey, AppError, _>(async |conn| {
+        .transaction::<GatewayApiKey, AppError, _>(async |conn| {
             // 先读取不可变的分组归属，再统一按“分组 -> API Key”顺序加锁。分组删除会
             // 级联删除调用方 Key；固定锁序避免它与白名单更新形成死锁。
             let (tenant_id, group_id) = dsl::api_keys
@@ -287,8 +288,8 @@ pub async fn update_models_for_user(
                 .filter(dsl::id.eq(id))
                 .filter(dsl::user_id.eq(user_id))
                 .for_update()
-                .select(ApiKey::as_select())
-                .first::<ApiKey>(&mut *conn)
+                .select(GatewayApiKey::as_select())
+                .first::<GatewayApiKey>(&mut *conn)
                 .await
                 .map_err(|source| match source {
                     diesel::result::Error::NotFound => AppError::BadRequest {
@@ -317,7 +318,7 @@ pub async fn update_models_for_user(
                 })?;
             let mappings = allowed_models
                 .iter()
-                .map(|model_name| NewApiKeyModel {
+                .map(|model_name| NewGatewayApiKeyModel {
                     api_key_id: id,
                     model_name: model_name.clone(),
                 })
@@ -336,8 +337,8 @@ pub async fn update_models_for_user(
                     .filter(dsl::user_id.eq(user_id)),
             )
             .set(dsl::updated_at.eq(chrono::Utc::now()))
-            .returning(ApiKey::as_returning())
-            .get_result::<ApiKey>(&mut *conn)
+            .returning(GatewayApiKey::as_returning())
+            .get_result::<GatewayApiKey>(&mut *conn)
             .await
             .map_err(|source| AppError::DbQuery {
                 message: source.to_string(),
@@ -354,7 +355,7 @@ pub async fn update_models_for_user(
         allowed_models = ?allowed_models,
         "API Key 模型白名单已更新；Provider 分组白名单和 maintenance 保持不变"
     );
-    Ok(ApiKeyWithModels {
+    Ok(GatewayApiKeyWithModels {
         api_key,
         allowed_models,
     })
@@ -399,16 +400,16 @@ pub async fn update_plugin_for_user(
     user_id: Uuid,
     id: Uuid,
     plugin_release_id: Option<Uuid>,
-) -> AppResult<ApiKeyWithModels> {
+) -> AppResult<GatewayApiKeyWithModels> {
     use self::api_keys::dsl;
 
     let api_key = conn
-        .transaction::<ApiKey, AppError, _>(async |conn| {
+        .transaction::<GatewayApiKey, AppError, _>(async |conn| {
             let current = dsl::api_keys
                 .filter(dsl::id.eq(id))
                 .filter(dsl::user_id.eq(user_id))
-                .select(ApiKey::as_select())
-                .first::<ApiKey>(&mut *conn)
+                .select(GatewayApiKey::as_select())
+                .first::<GatewayApiKey>(&mut *conn)
                 .await
                 .optional()
                 .map_err(|source| AppError::DbQuery {
@@ -445,8 +446,8 @@ pub async fn update_plugin_for_user(
                 dsl::plugin_release_id.eq(plugin_release_id),
                 dsl::updated_at.eq(chrono::Utc::now()),
             ))
-            .returning(ApiKey::as_returning())
-            .get_result::<ApiKey>(&mut *conn)
+            .returning(GatewayApiKey::as_returning())
+            .get_result::<GatewayApiKey>(&mut *conn)
             .await
             .map_err(|source| AppError::DbQuery {
                 message: source.to_string(),
@@ -463,7 +464,7 @@ pub async fn update_plugin_for_user(
         plugin_release_id = ?api_key.plugin_release_id,
         "API Key 插件绑定已更新"
     );
-    Ok(ApiKeyWithModels {
+    Ok(GatewayApiKeyWithModels {
         api_key,
         allowed_models,
     })
@@ -512,8 +513,8 @@ async fn load_model_names(
 
 async fn attach_models(
     conn: &mut AsyncPgConnection,
-    api_keys: Vec<ApiKey>,
-) -> AppResult<Vec<ApiKeyWithModels>> {
+    api_keys: Vec<GatewayApiKey>,
+) -> AppResult<Vec<GatewayApiKeyWithModels>> {
     let api_key_ids = api_keys
         .iter()
         .map(|api_key| api_key.id)
@@ -528,7 +529,7 @@ async fn attach_models(
                     .ok_or_else(|| AppError::DbQuery {
                         message: format!("API Key 缺少模型白名单映射: {}", api_key.id),
                     })?;
-            Ok(ApiKeyWithModels {
+            Ok(GatewayApiKeyWithModels {
                 api_key,
                 allowed_models,
             })

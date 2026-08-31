@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::{
     err::{AppError, AppResult},
-    model::schema::api_keys,
+    gateway_key::schema::api_keys,
 };
 
 use super::{

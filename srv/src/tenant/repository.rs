@@ -1,60 +1,15 @@
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use diesel::prelude::*;
 use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
-use serde::Serialize;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use super::model::{Tenant, TenantSummary, schema};
 use crate::err::{AppError, AppResult};
-
-pub mod schema {
-    diesel::table! {
-        tenants (id) {
-            id -> Uuid,
-            name -> Text,
-            enabled -> Bool,
-            created_by -> Uuid,
-            created_at -> Timestamptz,
-            updated_at -> Timestamptz,
-            disabled_at -> Nullable<Timestamptz>,
-        }
-    }
-
-    diesel::table! {
-        tenant_codes (code) {
-            code -> Text,
-            tenant_id -> Uuid,
-            created_by -> Uuid,
-            created_at -> Timestamptz,
-        }
-    }
-
-    diesel::allow_tables_to_appear_in_same_query!(tenants, tenant_codes);
-}
 
 const MAX_TENANT_NAME_BYTES: usize = 512;
 const MAX_TENANT_NAME_CHARS: usize = 128;
 const MAX_TENANT_CODE_BYTES: usize = 128;
-
-#[derive(Debug, Clone, Queryable, Selectable, Serialize)]
-#[diesel(table_name = schema::tenants)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct Tenant {
-    pub id: Uuid,
-    pub name: String,
-    pub enabled: bool,
-    pub created_by: Uuid,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    pub disabled_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct TenantSummary {
-    #[serde(flatten)]
-    pub tenant: Tenant,
-    pub code: Option<String>,
-}
 
 #[derive(Insertable)]
 #[diesel(table_name = schema::tenants)]

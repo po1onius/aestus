@@ -13,7 +13,7 @@ use chrono_tz::Tz;
 use clickhouse::Client;
 use tokio::task::JoinHandle;
 
-use crate::request_event::RequestEvent;
+use crate::request::events::RequestEvent;
 
 use lifecycle::RequestLogLifecycle;
 use writer::RequestLogWriter;

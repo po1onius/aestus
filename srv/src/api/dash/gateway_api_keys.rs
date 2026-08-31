@@ -14,9 +14,9 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::{
-    api_key::{self, ApiKeyWithModels},
+    api::dash::{auth, pagination::ListPageQuery},
     err::{AppError, AppResult},
-    http::dash::{auth, pagination::ListPageQuery},
+    gateway_key::{self, GatewayApiKeyWithModels},
     plugin::{self, model::PluginReleaseSummary},
     provider::group::{self, ProviderGroup, ProviderGroupWithModels},
     state::AppState,
@@ -91,7 +91,7 @@ async fn create_api_key(
     let name = normalize_name(payload.name)?;
     let mut conn = state.db_conn().await?;
 
-    let api_key = api_key::create(
+    let api_key = gateway_key::create(
         &mut conn,
         current_user.tenant_id.ok_or(AppError::Forbidden)?,
         current_user.id,
@@ -124,7 +124,7 @@ async fn list_api_keys(
     let page = query.normalize()?;
     let mut conn = state.db_conn().await?;
 
-    let api_keys = api_key::list_by_user(
+    let api_keys = gateway_key::list_by_user(
         &mut conn,
         current_user.id,
         page.query_limit(),
@@ -194,7 +194,7 @@ async fn delete_api_key(
     Path(id): Path<Uuid>,
 ) -> AppResult<impl IntoResponse> {
     let mut conn = state.db_conn().await?;
-    let deleted = api_key::delete_for_user(&mut conn, current_user.id, id).await?;
+    let deleted = gateway_key::delete_for_user(&mut conn, current_user.id, id).await?;
     info!(
         api_key_id = %deleted.id,
         user_id = %current_user.id,
@@ -213,7 +213,8 @@ async fn update_api_key_enabled(
     let mut conn = state.db_conn().await?;
 
     let api_key =
-        api_key::update_enabled_for_user(&mut conn, current_user.id, id, payload.enabled).await?;
+        gateway_key::update_enabled_for_user(&mut conn, current_user.id, id, payload.enabled)
+            .await?;
     let group = load_group(&mut conn, api_key.api_key.group_id).await?;
     let plugin = load_plugin_summary(
         &mut conn,
@@ -235,7 +236,7 @@ async fn update_api_key_models(
 ) -> AppResult<impl IntoResponse> {
     let mut conn = state.db_conn().await?;
     let api_key =
-        api_key::update_models_for_user(&mut conn, current_user.id, id, payload.allowed_models)
+        gateway_key::update_models_for_user(&mut conn, current_user.id, id, payload.allowed_models)
             .await?;
     let group = load_group(&mut conn, api_key.api_key.group_id).await?;
     let plugin = load_plugin_summary(
@@ -257,9 +258,13 @@ async fn update_api_key_plugin(
     Json(payload): Json<UpdateApiKeyPluginRequest>,
 ) -> AppResult<impl IntoResponse> {
     let mut conn = state.db_conn().await?;
-    let api_key =
-        api_key::update_plugin_for_user(&mut conn, current_user.id, id, payload.plugin_release_id)
-            .await?;
+    let api_key = gateway_key::update_plugin_for_user(
+        &mut conn,
+        current_user.id,
+        id,
+        payload.plugin_release_id,
+    )
+    .await?;
     let group = load_group(&mut conn, api_key.api_key.group_id).await?;
     let plugin = load_plugin_summary(
         &mut conn,
@@ -303,11 +308,11 @@ fn normalize_name(name: String) -> AppResult<String> {
 
 impl ApiKeyResponse {
     fn from_parts(
-        api_key: ApiKeyWithModels,
+        api_key: GatewayApiKeyWithModels,
         group: ProviderGroupWithModels,
         plugin: Option<PluginReleaseSummary>,
     ) -> Self {
-        let ApiKeyWithModels {
+        let GatewayApiKeyWithModels {
             api_key,
             allowed_models,
         } = api_key;

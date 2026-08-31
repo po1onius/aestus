@@ -8,11 +8,11 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
-    err::{AdminResult, AppError, AppResult},
-    http::dash::{
+    api::dash::{
         auth as dash_auth,
         pagination::{ListPage, ListPageQuery},
     },
+    err::{AdminResult, AppError, AppResult},
     provider::{
         group::ProviderGroup,
         maintenance::MaintenanceProvider,

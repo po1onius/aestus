@@ -17,8 +17,8 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::{
+    api::dash::auth,
     err::{AppError, AppResult},
-    http::dash::auth,
     state::AppState,
 };
 

@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
+    api::dash::auth,
     err::{AdminResult, AppError, AppResult},
-    http::dash::auth,
     provider::{
         claude::maintenance::ClaudeMaintenance,
         gpt::{maintenance::GptMaintenance, model as gpt_model},

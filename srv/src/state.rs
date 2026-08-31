@@ -13,7 +13,7 @@ use crate::{
         redis::RedisConnection,
     },
     plugin::runtime::PluginRuntime,
-    request_event::RequestEventPublisher,
+    request::events::RequestEventPublisher,
 };
 
 /// 全局应用状态。
@@ -112,7 +112,7 @@ impl AppState {
 
     /// Dashboard statistics 使用的 ClickHouse 只读客户端。
     ///
-    /// 查询 SQL、结果 DTO 和访问控制继续由 `http::dash::statistics` 管理；AppState 仅提供
+    /// 查询 SQL、结果 DTO 和访问控制继续由 `api::dash::statistics` 管理；AppState 仅提供
     /// 基础设施句柄，worker 不再承担读路径职责。
     pub fn clickhouse(&self) -> &ClickHouseClient {
         &self.inner.clickhouse

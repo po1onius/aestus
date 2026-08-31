@@ -16,7 +16,7 @@ use tracing::{info, warn};
 
 use crate::{
     infra::db::DbPool,
-    request_event::{RequestEvent, RequestEventPublisher},
+    request::events::{RequestEvent, RequestEventPublisher},
 };
 
 use quota::{QuotaDeductionTask, QuotaWorker};

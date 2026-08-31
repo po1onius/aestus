@@ -1,14 +1,11 @@
-mod api_key;
+mod api;
 mod config;
 mod err;
-mod gateway_auth;
-mod http;
+mod gateway_key;
 mod infra;
-mod model;
 mod plugin;
 mod provider;
-mod request_body;
-mod request_event;
+mod request;
 mod state;
 mod tenant;
 mod user;
@@ -89,7 +86,7 @@ async fn run() -> err::AppResult<()> {
         request_log_retention_days = state.config().request_log_retention_days.get(),
         "aestus gateway 启动完成"
     );
-    let app = http::build_router(state);
+    let app = api::build_router(state);
 
     axum::serve(listener, app)
         .await
