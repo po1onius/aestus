@@ -70,10 +70,12 @@ export function UsagePage({
   const [usagePeriod, setUsagePeriod] = useState<UsagePeriod>("year");
   const modelPoints = useMemo(() => compactModelPoints(usage?.models ?? []), [usage]);
   const apiKeyPoints = useMemo(() => compactApiKeyPoints(usage?.api_keys ?? []), [usage]);
-  // 管理员排行展示真实的前八名用户，不把剩余用户汇总成一个会干扰名次的“其他用户”。
-  const userRankPoints = useMemo(() => (usage?.users ?? []).slice(0, 8), [usage]);
+  const userPoints = useMemo(() => usage?.users ?? [], [usage]);
+  // 平台管理员排行展示真实的前八名租户，不把剩余租户汇总成一个会干扰名次的“其他租户”。
+  const tenantRankPoints = useMemo(() => (usage?.tenants ?? []).slice(0, 8), [usage]);
   const usageScope = usage?.scope ?? "current_user";
   const allUsers = usageScope === "all_users";
+  const tenantUsers = usageScope === "tenant";
   const usageActivityOption = useMemo(
     () => {
       const daily = usage?.daily ?? [];
@@ -93,12 +95,24 @@ export function UsagePage({
     () => buildConsumerShareOption(apiKeyPoints, "API Key Token", darkMode),
     [apiKeyPoints, darkMode],
   );
+  const userShareOption = useMemo(
+    () =>
+      buildConsumerShareOption(
+        userPoints.map((point) => ({
+          name: point.username,
+          total_tokens: point.total_tokens,
+        })),
+        "用户 Token",
+        darkMode,
+      ),
+    [darkMode, userPoints],
+  );
   const rankOption = useMemo(
     () =>
       allUsers
         ? buildRankOption(
-            userRankPoints.map((point) => ({
-              name: point.username,
+            tenantRankPoints.map((point) => ({
+              name: point.tenant_name,
               total_tokens: point.total_tokens,
             })),
             CONSUMER_COLORS,
@@ -112,7 +126,7 @@ export function UsagePage({
             MODEL_COLORS,
             darkMode,
           ),
-    [allUsers, darkMode, modelPoints, userRankPoints],
+    [allUsers, darkMode, modelPoints, tenantRankPoints],
   );
   return (
     <section className="grid gap-4">
@@ -174,42 +188,56 @@ export function UsagePage({
             />
           </article>
           <article className={`${panelClass} grid gap-3 p-4`}>
-            <ChartHeading title="全历史消耗占比" />
-            <div className={allUsers ? "grid gap-4" : "grid gap-4 sm:grid-cols-2"}>
+            <ChartHeading title={tenantUsers ? "全历史租户用户消耗占比" : "全历史消耗占比"} />
+            {tenantUsers ? (
               <section className="min-w-0">
-                <h3 className="mb-2 text-center text-xs font-semibold text-slate-500 dark:text-slate-400">模型</h3>
-                {modelPoints.length > 0 ? (
+                {userPoints.length > 0 ? (
                   <EChart
-                    option={modelShareOption}
-                    ariaLabel="模型 Token 消耗占比环形图"
+                    option={userShareOption}
+                    ariaLabel="租户用户 Token 消耗占比环形图"
                     className="h-72 min-h-64 w-full"
                   />
                 ) : (
                   <ShareChartEmptyState />
                 )}
               </section>
-              {!allUsers && (
+            ) : (
+              <div className={allUsers ? "grid gap-4" : "grid gap-4 sm:grid-cols-2"}>
                 <section className="min-w-0">
-                  <h3 className="mb-2 text-center text-xs font-semibold text-slate-500 dark:text-slate-400">API Key</h3>
-                  {apiKeyPoints.length > 0 ? (
+                  <h3 className="mb-2 text-center text-xs font-semibold text-slate-500 dark:text-slate-400">模型</h3>
+                  {modelPoints.length > 0 ? (
                     <EChart
-                      option={apiKeyShareOption}
-                      ariaLabel="API Key Token 使用占比环形图"
+                      option={modelShareOption}
+                      ariaLabel="模型 Token 消耗占比环形图"
                       className="h-72 min-h-64 w-full"
                     />
                   ) : (
                     <ShareChartEmptyState />
                   )}
                 </section>
-              )}
-            </div>
+                {!allUsers && (
+                  <section className="min-w-0">
+                    <h3 className="mb-2 text-center text-xs font-semibold text-slate-500 dark:text-slate-400">API Key</h3>
+                    {apiKeyPoints.length > 0 ? (
+                      <EChart
+                        option={apiKeyShareOption}
+                        ariaLabel="API Key Token 使用占比环形图"
+                        className="h-72 min-h-64 w-full"
+                      />
+                    ) : (
+                      <ShareChartEmptyState />
+                    )}
+                  </section>
+                )}
+              </div>
+            )}
           </article>
           <article className={`${panelClass} grid gap-3 p-4`}>
-            <ChartHeading title={allUsers ? "全历史用户消耗排行" : "全历史模型消耗排行"} />
-            {(allUsers ? userRankPoints.length : modelPoints.length) > 0 ? (
+            <ChartHeading title={allUsers ? "全历史租户消耗排行" : "全历史模型消耗排行"} />
+            {(allUsers ? tenantRankPoints.length : modelPoints.length) > 0 ? (
               <EChart
                 option={rankOption}
-                ariaLabel={allUsers ? "用户 Token 消耗排行柱状图" : "模型 Token 消耗排行柱状图"}
+                ariaLabel={allUsers ? "租户 Token 消耗排行柱状图" : "模型 Token 消耗排行柱状图"}
               />
             ) : (
               <ChartEmptyState />

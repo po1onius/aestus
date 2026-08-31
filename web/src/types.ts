@@ -412,7 +412,7 @@ export interface ListRequestLogsResponse {
   next_cursor: RequestLogCursor | null;
 }
 
-export type UsageScope = "current_user" | "all_users";
+export type UsageScope = "current_user" | "tenant" | "all_users";
 
 export interface UsageLifetime {
   total_tokens: string;
@@ -448,6 +448,14 @@ export interface UsageUserPoint {
   percentage: number;
 }
 
+export interface UsageTenantPoint {
+  tenant_id: string;
+  tenant_name: string;
+  total_tokens: string;
+  request_count: string;
+  percentage: number;
+}
+
 export interface UsageResponse {
   scope: UsageScope;
   remaining_tokens: string;
@@ -460,6 +468,7 @@ export interface UsageResponse {
   models: UsageModelPoint[];
   api_keys: UsageApiKeyPoint[];
   users: UsageUserPoint[];
+  tenants: UsageTenantPoint[];
   generated_at: string;
 }
 

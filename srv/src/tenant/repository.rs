@@ -111,6 +111,15 @@ pub async fn list(conn: &mut AsyncPgConnection) -> AppResult<Vec<TenantSummary>>
         .collect())
 }
 
+/// 用量统计只读取租户稳定标识和展示名称，避免平台概览读取租户码等无关字段。
+pub async fn list_usage_names(conn: &mut AsyncPgConnection) -> AppResult<Vec<(Uuid, String)>> {
+    schema::tenants::table
+        .select((schema::tenants::id, schema::tenants::name))
+        .load::<(Uuid, String)>(conn)
+        .await
+        .map_err(db_error)
+}
+
 pub async fn find_enabled_by_code_for_update(
     conn: &mut AsyncPgConnection,
     code: &str,

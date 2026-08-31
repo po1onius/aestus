@@ -18,6 +18,7 @@ use crate::{
     api::dash::auth,
     err::{AppError, AppResult},
     state::AppState,
+    tenant,
     user::{self, User},
 };
 
@@ -77,10 +78,11 @@ impl UsageScope {
 }
 
 #[derive(Debug)]
-struct UsageUserDirectory {
+struct UsageDirectory {
     remaining_tokens: String,
     consumed_tokens: String,
     usernames_by_id: HashMap<Uuid, String>,
+    tenant_names_by_id: HashMap<Uuid, String>,
 }
 
 #[derive(Debug, Deserialize, Row)]
@@ -120,10 +122,19 @@ struct UsageUserRow {
     request_count: u64,
 }
 
+#[derive(Debug, Deserialize, Row)]
+struct UsageTenantRow {
+    #[serde(with = "clickhouse::serde::uuid")]
+    tenant_id: Uuid,
+    total_tokens_text: String,
+    request_count: u64,
+}
+
 #[derive(Debug)]
 struct UsageBreakdownRows {
     api_keys: Vec<UsageApiKeyRow>,
     users: Vec<UsageUserRow>,
+    tenants: Vec<UsageTenantRow>,
 }
 
 #[derive(Debug, Serialize)]
@@ -139,6 +150,7 @@ struct UsageOverviewResponse {
     models: Vec<UsageModelPoint>,
     api_keys: Vec<UsageApiKeyPoint>,
     users: Vec<UsageUserPoint>,
+    tenants: Vec<UsageTenantPoint>,
     generated_at: DateTime<Utc>,
 }
 
@@ -181,6 +193,15 @@ struct UsageUserPoint {
     percentage: f64,
 }
 
+#[derive(Debug, Serialize)]
+struct UsageTenantPoint {
+    tenant_id: Uuid,
+    tenant_name: String,
+    total_tokens: String,
+    request_count: String,
+    percentage: f64,
+}
+
 pub(super) fn router() -> Router<AppState> {
     Router::new().route("/", get(get_usage))
 }
@@ -194,8 +215,8 @@ async fn get_usage(
 
     // 只有 daily 使用固定年度窗口；总量、模型和消费方分布均查询长期日聚合。各查询
     // 彼此独立且数据量已经受控，并行执行可以降低 Dashboard 首屏延迟。
-    let (users, totals, daily_rows, model_rows, breakdown_rows) = tokio::try_join!(
-        load_usage_user_directory(&state, &current_user, scope),
+    let (directory, totals, daily_rows, model_rows, breakdown_rows) = tokio::try_join!(
+        load_usage_directory(&state, &current_user, scope),
         query_usage_totals(&state, scope),
         query_usage_daily(&state, scope, &query),
         query_usage_models(&state, scope),
@@ -229,12 +250,27 @@ async fn get_usage(
         .into_iter()
         .map(|row| UsageUserPoint {
             percentage: token_percentage(&row.total_tokens_text, lifetime_total),
-            username: users
+            username: directory
                 .usernames_by_id
                 .get(&row.user_id)
                 .cloned()
                 .unwrap_or_else(|| format!("未知用户 ({})", row.user_id)),
             user_id: row.user_id,
+            total_tokens: row.total_tokens_text,
+            request_count: row.request_count.to_string(),
+        })
+        .collect::<Vec<_>>();
+    let tenant_points = breakdown_rows
+        .tenants
+        .into_iter()
+        .map(|row| UsageTenantPoint {
+            percentage: token_percentage(&row.total_tokens_text, lifetime_total),
+            tenant_name: directory
+                .tenant_names_by_id
+                .get(&row.tenant_id)
+                .cloned()
+                .unwrap_or_else(|| format!("未知租户 ({})", row.tenant_id)),
+            tenant_id: row.tenant_id,
             total_tokens: row.total_tokens_text,
             request_count: row.request_count.to_string(),
         })
@@ -255,13 +291,14 @@ async fn get_usage(
         model_groups = models.len(),
         api_key_groups = api_keys.len(),
         user_groups = user_points.len(),
+        tenant_groups = tenant_points.len(),
         "Dashboard token 用量概览聚合完成"
     );
 
     Ok(Json(UsageOverviewResponse {
         scope: scope.as_str(),
-        remaining_tokens: users.remaining_tokens,
-        consumed_tokens: users.consumed_tokens,
+        remaining_tokens: directory.remaining_tokens,
+        consumed_tokens: directory.consumed_tokens,
         start_at: query.start_at,
         end_at: query.end_at,
         timezone: query.timezone,
@@ -273,6 +310,7 @@ async fn get_usage(
         models,
         api_keys,
         users: user_points,
+        tenants: tenant_points,
         generated_at: Utc::now(),
     }))
 }
@@ -299,16 +337,17 @@ fn normalize_usage_range(timezone: chrono_tz::Tz) -> AppResult<NormalizedUsageRa
     })
 }
 
-async fn load_usage_user_directory(
+async fn load_usage_directory(
     state: &AppState,
     current_user: &User,
     scope: UsageScope,
-) -> AppResult<UsageUserDirectory> {
+) -> AppResult<UsageDirectory> {
     if matches!(scope, UsageScope::CurrentUser(_, _)) {
-        return Ok(UsageUserDirectory {
+        return Ok(UsageDirectory {
             remaining_tokens: current_user.quota.to_string(),
             consumed_tokens: current_user.consumed_tokens.to_string(),
             usernames_by_id: HashMap::from([(current_user.id, current_user.username.clone())]),
+            tenant_names_by_id: HashMap::new(),
         });
     }
 
@@ -332,16 +371,27 @@ async fn load_usage_user_directory(
         usernames_by_id.insert(snapshot.id, snapshot.username);
     }
 
+    let tenant_names_by_id = if matches!(scope, UsageScope::AllUsers) {
+        tenant::list_usage_names(&mut conn)
+            .await?
+            .into_iter()
+            .collect::<HashMap<_, _>>()
+    } else {
+        HashMap::new()
+    };
+
     info!(
         user_count = usernames_by_id.len(),
+        tenant_count = tenant_names_by_id.len(),
         remaining_tokens = %remaining_tokens,
         consumed_tokens = %consumed_tokens,
         "Dashboard 全部用户额度快照聚合完成"
     );
-    Ok(UsageUserDirectory {
+    Ok(UsageDirectory {
         remaining_tokens: remaining_tokens.to_string(),
         consumed_tokens: consumed_tokens.to_string(),
         usernames_by_id,
+        tenant_names_by_id,
     })
 }
 
@@ -505,14 +555,17 @@ async fn query_usage_breakdown(
         UsageScope::CurrentUser(tenant_id, user_id) => Ok(UsageBreakdownRows {
             api_keys: query_usage_api_keys(state, tenant_id, user_id).await?,
             users: Vec::new(),
+            tenants: Vec::new(),
         }),
         UsageScope::Tenant(tenant_id) => Ok(UsageBreakdownRows {
             api_keys: Vec::new(),
-            users: query_usage_users(state, Some(tenant_id)).await?,
+            users: query_usage_users(state, tenant_id).await?,
+            tenants: Vec::new(),
         }),
         UsageScope::AllUsers => Ok(UsageBreakdownRows {
             api_keys: Vec::new(),
-            users: query_usage_users(state, None).await?,
+            users: Vec::new(),
+            tenants: query_usage_tenants(state).await?,
         }),
     }
 }
@@ -552,19 +605,31 @@ async fn query_usage_api_keys(
         })
 }
 
-async fn query_usage_users(
-    state: &AppState,
-    tenant_id: Option<Uuid>,
-) -> AppResult<Vec<UsageUserRow>> {
-    let all_sql = "SELECT \
-        user_id, \
+async fn query_usage_tenants(state: &AppState) -> AppResult<Vec<UsageTenantRow>> {
+    let sql = "SELECT \
+        tenant_id, \
         toString(sum(total_tokens)) AS total_tokens_text, \
         sum(request_count) AS request_count \
         FROM ? \
-        GROUP BY user_id \
+        GROUP BY tenant_id \
         HAVING sum(total_tokens) > 0 \
         ORDER BY sum(total_tokens) DESC";
-    let tenant_sql = "SELECT \
+
+    state
+        .clickhouse()
+        .query(sql)
+        .bind(Identifier(
+            state.config().request_usage_daily_table.as_str(),
+        ))
+        .fetch_all::<UsageTenantRow>()
+        .await
+        .map_err(|source| {
+            usage_query_error("lifetime_tenant_distribution", UsageScope::AllUsers, source)
+        })
+}
+
+async fn query_usage_users(state: &AppState, tenant_id: Uuid) -> AppResult<Vec<UsageUserRow>> {
+    let sql = "SELECT \
         user_id, \
         toString(sum(total_tokens)) AS total_tokens_text, \
         sum(request_count) AS request_count \
@@ -574,27 +639,22 @@ async fn query_usage_users(
         HAVING sum(total_tokens) > 0 \
         ORDER BY sum(total_tokens) DESC";
 
-    let request = state
+    state
         .clickhouse()
-        .query(if tenant_id.is_some() {
-            tenant_sql
-        } else {
-            all_sql
-        })
+        .query(sql)
         .bind(Identifier(
             state.config().request_usage_daily_table.as_str(),
-        ));
-    let request = match tenant_id {
-        Some(tenant_id) => request.bind(tenant_id),
-        None => request,
-    };
-    request.fetch_all::<UsageUserRow>().await.map_err(|source| {
-        usage_query_error(
-            "lifetime_user_distribution",
-            tenant_id.map_or(UsageScope::AllUsers, UsageScope::Tenant),
-            source,
-        )
-    })
+        ))
+        .bind(tenant_id)
+        .fetch_all::<UsageUserRow>()
+        .await
+        .map_err(|source| {
+            usage_query_error(
+                "lifetime_user_distribution",
+                UsageScope::Tenant(tenant_id),
+                source,
+            )
+        })
 }
 
 fn usage_query_error(
