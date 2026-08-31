@@ -61,18 +61,22 @@ struct DeletePluginResponse {
 
 async fn list_plugins(
     State(state): State<AppState>,
-    _admin: auth::AdminUser,
+    auth::AdminUser(owner): auth::AdminUser,
 ) -> AdminResult<Json<Vec<PluginReleaseSummary>>> {
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
     let mut conn = state.db_conn().await?;
-    Ok(Json(plugin::sql::list(&mut conn).await?))
+    Ok(Json(plugin::sql::list(&mut conn, tenant_id).await?))
 }
 
 async fn list_plugin_options(
     State(state): State<AppState>,
-    _current_user: auth::CurrentUser,
+    auth::CurrentUser(current_user): auth::CurrentUser,
 ) -> AppResult<Json<Vec<PluginReleaseSummary>>> {
+    let tenant_id = current_user.tenant_id.ok_or(AppError::Forbidden)?;
     let mut conn = state.db_conn().await?;
-    Ok(Json(plugin::sql::list_enabled_options(&mut conn).await?))
+    Ok(Json(
+        plugin::sql::list_enabled_options(&mut conn, tenant_id).await?,
+    ))
 }
 
 async fn delete_plugin(
@@ -80,8 +84,9 @@ async fn delete_plugin(
     auth::AdminUser(admin): auth::AdminUser,
     Path(suite_id): Path<Uuid>,
 ) -> AdminResult<Json<DeletePluginResponse>> {
+    let tenant_id = admin.tenant_id.ok_or(AppError::Forbidden)?;
     let mut conn = state.db_conn().await?;
-    let deleted = plugin::sql::delete_suite(&mut conn, suite_id).await?;
+    let deleted = plugin::sql::delete_suite(&mut conn, tenant_id, suite_id).await?;
     drop(conn);
 
     let deleted_artifact_count = deleted.artifact_ids.len();
@@ -144,8 +149,10 @@ async fn create_plugin(
         .map(|item| clone_upload(&item.upload))
         .collect::<Vec<_>>();
     let mut conn = state.db_conn().await?;
+    let tenant_id = admin.tenant_id.ok_or(AppError::Forbidden)?;
     let summary = plugin::sql::create_and_publish(
         &mut conn,
+        tenant_id,
         admin.id,
         upload.name,
         upload.description,
@@ -171,9 +178,10 @@ async fn publish_release(
     Path(suite_id): Path<Uuid>,
     multipart: Multipart,
 ) -> AdminResult<Json<PluginReleaseSummary>> {
+    let tenant_id = admin.tenant_id.ok_or(AppError::Forbidden)?;
     let artifacts = read_artifact_fields(multipart).await?;
     let mut conn = state.db_conn().await?;
-    let suite = plugin::sql::find_suite(&mut conn, suite_id)
+    let suite = plugin::sql::find_suite(&mut conn, tenant_id, suite_id)
         .await?
         .ok_or_else(|| AppError::BadRequest {
             message: format!("插件套件不存在: {suite_id}"),
@@ -186,9 +194,15 @@ async fn publish_release(
         .map(|item| clone_upload(&item.upload))
         .collect::<Vec<_>>();
     let mut conn = state.db_conn().await?;
-    let summary =
-        plugin::sql::publish_release(&mut conn, suite_id, admin.id, manifest_sha256, uploads)
-            .await?;
+    let summary = plugin::sql::publish_release(
+        &mut conn,
+        tenant_id,
+        suite_id,
+        admin.id,
+        manifest_sha256,
+        uploads,
+    )
+    .await?;
     cache_compiled_release(&state, &summary, compiled)?;
     info!(
         admin_user_id = %admin.id,
@@ -213,10 +227,11 @@ async fn update_plugin_enabled(
     Path(suite_id): Path<Uuid>,
     Json(payload): Json<UpdatePluginEnabledRequest>,
 ) -> AdminResult<Json<Vec<PluginReleaseSummary>>> {
+    let tenant_id = admin.tenant_id.ok_or(AppError::Forbidden)?;
     let mut conn = state.db_conn().await?;
-    plugin::sql::set_enabled(&mut conn, suite_id, payload.enabled).await?;
+    plugin::sql::set_enabled(&mut conn, tenant_id, suite_id, payload.enabled).await?;
     info!(admin_user_id = %admin.id, plugin_suite_id = %suite_id, enabled = payload.enabled, "Admin 已更新 WASM 插件套件状态");
-    Ok(Json(plugin::sql::list(&mut conn).await?))
+    Ok(Json(plugin::sql::list(&mut conn, tenant_id).await?))
 }
 
 struct CreateUpload {

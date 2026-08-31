@@ -11,6 +11,7 @@ pub mod schema {
     diesel::table! {
         users (id) {
             id -> Uuid,
+            tenant_id -> Nullable<Uuid>,
             username -> Text,
             email -> Text,
             password_hash -> Text,
@@ -28,6 +29,7 @@ pub mod schema {
     diesel::table! {
         api_keys (id) {
             id -> Uuid,
+            tenant_id -> Uuid,
             user_id -> Uuid,
             group_id -> Uuid,
             name -> Text,
@@ -51,8 +53,9 @@ pub mod schema {
     diesel::allow_tables_to_appear_in_same_query!(users, api_keys, api_key_models,);
 }
 
-pub const USER_ROLE_ADMIN: &str = "admin";
-pub const USER_ROLE_USER: &str = "user";
+pub const USER_ROLE_PLATFORM_ADMIN: &str = "platform_admin";
+pub const USER_ROLE_TENANT_OWNER: &str = "tenant_owner";
+pub const USER_ROLE_TENANT_USER: &str = "tenant_user";
 
 /// API Key 的数据库行。
 ///
@@ -63,6 +66,7 @@ pub const USER_ROLE_USER: &str = "user";
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct ApiKey {
     pub id: Uuid,
+    pub tenant_id: Uuid,
     pub user_id: Uuid,
     pub group_id: Uuid,
     pub name: String,
@@ -78,6 +82,7 @@ pub struct ApiKey {
 #[derive(Insertable)]
 #[diesel(table_name = schema::api_keys)]
 pub(super) struct NewApiKey {
+    pub tenant_id: Uuid,
     pub user_id: Uuid,
     pub group_id: Uuid,
     pub name: String,
@@ -103,6 +108,7 @@ pub(super) struct NewApiKeyModel {
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct User {
     pub id: Uuid,
+    pub tenant_id: Option<Uuid>,
     pub username: String,
     pub email: String,
     #[serde(skip_serializing)]
@@ -120,6 +126,7 @@ pub struct User {
 #[derive(Debug, Insertable)]
 #[diesel(table_name = schema::users)]
 pub(super) struct NewUser {
+    pub tenant_id: Option<Uuid>,
     pub username: String,
     pub email: String,
     pub password_hash: String,
@@ -139,11 +146,18 @@ pub(super) struct UserStatusPatch {
 }
 
 impl User {
-    pub fn is_admin(&self) -> bool {
-        self.role == USER_ROLE_ADMIN
+    pub fn is_platform_admin(&self) -> bool {
+        self.role == USER_ROLE_PLATFORM_ADMIN
+    }
+
+    pub fn is_tenant_owner(&self) -> bool {
+        self.role == USER_ROLE_TENANT_OWNER
     }
 }
 
 pub fn is_valid_user_role(role: &str) -> bool {
-    matches!(role, USER_ROLE_ADMIN | USER_ROLE_USER)
+    matches!(
+        role,
+        USER_ROLE_PLATFORM_ADMIN | USER_ROLE_TENANT_OWNER | USER_ROLE_TENANT_USER
+    )
 }

@@ -119,6 +119,7 @@ pub mod account {
 
     pub async fn list_page_by_provider(
         conn: &mut AsyncPgConnection,
+        tenant_id: Uuid,
         provider: &str,
         limit: i64,
         offset: i64,
@@ -126,6 +127,7 @@ pub mod account {
         use provider_accounts::dsl;
 
         dsl::provider_accounts
+            .filter(dsl::tenant_id.eq(tenant_id))
             .filter(dsl::provider.eq(provider))
             .order((dsl::created_at.desc(), dsl::id.desc()))
             .limit(limit)
@@ -193,6 +195,7 @@ pub mod account {
     /// 管理员只控制是否参与调度，不允许通过管理接口伪造 credential status。
     pub async fn update_enabled(
         conn: &mut AsyncPgConnection,
+        tenant_id: Uuid,
         provider: &str,
         id: Uuid,
         enabled: bool,
@@ -202,6 +205,7 @@ pub mod account {
         required_account(
             diesel::update(
                 dsl::provider_accounts
+                    .filter(dsl::tenant_id.eq(tenant_id))
                     .filter(dsl::provider.eq(provider))
                     .filter(dsl::id.eq(id)),
             )
@@ -219,6 +223,7 @@ pub mod account {
 
     pub async fn update_group(
         conn: &mut AsyncPgConnection,
+        tenant_id: Uuid,
         provider: &str,
         id: Uuid,
         group_id: Option<Uuid>,
@@ -227,11 +232,15 @@ pub mod account {
 
         conn.transaction::<ProviderAccount, AppError, _>(async |conn| {
             if let Some(group_id) = group_id {
-                group::require_enabled_for_provider_write(&mut *conn, group_id, provider).await?;
+                group::require_enabled_for_provider_write(
+                    &mut *conn, tenant_id, group_id, provider,
+                )
+                .await?;
             }
             required_account(
                 diesel::update(
                     dsl::provider_accounts
+                        .filter(dsl::tenant_id.eq(tenant_id))
                         .filter(dsl::provider.eq(provider))
                         .filter(dsl::id.eq(id)),
                 )
@@ -251,6 +260,7 @@ pub mod account {
 
     pub async fn delete_by_id(
         conn: &mut AsyncPgConnection,
+        tenant_id: Uuid,
         provider: &str,
         id: Uuid,
     ) -> AppResult<ProviderAccount> {
@@ -259,6 +269,7 @@ pub mod account {
         required_account(
             diesel::delete(
                 dsl::provider_accounts
+                    .filter(dsl::tenant_id.eq(tenant_id))
                     .filter(dsl::provider.eq(provider))
                     .filter(dsl::id.eq(id)),
             )
@@ -501,6 +512,7 @@ pub mod account {
 
     pub async fn update_override(
         conn: &mut AsyncPgConnection,
+        tenant_id: Uuid,
         provider: &str,
         id: Uuid,
         request_override: RequestOverride,
@@ -511,6 +523,7 @@ pub mod account {
         required_account(
             diesel::update(
                 dsl::provider_accounts
+                    .filter(dsl::tenant_id.eq(tenant_id))
                     .filter(dsl::provider.eq(provider))
                     .filter(dsl::id.eq(id)),
             )
@@ -577,6 +590,7 @@ pub mod api_key {
 
     pub async fn list_page_by_provider(
         conn: &mut AsyncPgConnection,
+        tenant_id: Uuid,
         provider: &str,
         limit: i64,
         offset: i64,
@@ -584,6 +598,7 @@ pub mod api_key {
         use provider_api_keys::dsl;
 
         dsl::provider_api_keys
+            .filter(dsl::tenant_id.eq(tenant_id))
             .filter(dsl::provider.eq(provider))
             .order((dsl::created_at.desc(), dsl::id.desc()))
             .limit(limit)
@@ -631,6 +646,7 @@ pub mod api_key {
 
     pub async fn update_enabled(
         conn: &mut AsyncPgConnection,
+        tenant_id: Uuid,
         provider: &str,
         id: Uuid,
         enabled: bool,
@@ -644,6 +660,7 @@ pub mod api_key {
         required_api_key(
             diesel::update(
                 dsl::provider_api_keys
+                    .filter(dsl::tenant_id.eq(tenant_id))
                     .filter(dsl::provider.eq(provider))
                     .filter(dsl::id.eq(id)),
             )
@@ -673,6 +690,7 @@ pub mod api_key {
 
     pub async fn update_group(
         conn: &mut AsyncPgConnection,
+        tenant_id: Uuid,
         provider: &str,
         id: Uuid,
         group_id: Option<Uuid>,
@@ -681,11 +699,15 @@ pub mod api_key {
 
         conn.transaction::<ProviderApiKey, AppError, _>(async |conn| {
             if let Some(group_id) = group_id {
-                group::require_enabled_for_provider_write(&mut *conn, group_id, provider).await?;
+                group::require_enabled_for_provider_write(
+                    &mut *conn, tenant_id, group_id, provider,
+                )
+                .await?;
             }
             required_api_key(
                 diesel::update(
                     dsl::provider_api_keys
+                        .filter(dsl::tenant_id.eq(tenant_id))
                         .filter(dsl::provider.eq(provider))
                         .filter(dsl::id.eq(id)),
                 )
@@ -786,6 +808,7 @@ pub mod api_key {
 
     pub async fn update_override(
         conn: &mut AsyncPgConnection,
+        tenant_id: Uuid,
         provider: &str,
         id: Uuid,
         request_override: RequestOverride,
@@ -796,6 +819,7 @@ pub mod api_key {
         required_api_key(
             diesel::update(
                 dsl::provider_api_keys
+                    .filter(dsl::tenant_id.eq(tenant_id))
                     .filter(dsl::provider.eq(provider))
                     .filter(dsl::id.eq(id)),
             )
@@ -813,6 +837,7 @@ pub mod api_key {
 
     pub async fn delete_by_id(
         conn: &mut AsyncPgConnection,
+        tenant_id: Uuid,
         provider: &str,
         id: Uuid,
     ) -> AppResult<ProviderApiKey> {
@@ -821,6 +846,7 @@ pub mod api_key {
         required_api_key(
             diesel::delete(
                 dsl::provider_api_keys
+                    .filter(dsl::tenant_id.eq(tenant_id))
                     .filter(dsl::provider.eq(provider))
                     .filter(dsl::id.eq(id)),
             )

@@ -6,6 +6,7 @@ mod plugins;
 mod provider_groups;
 mod provider_upstream_api_keys;
 mod statistics;
+mod tenants;
 mod users;
 
 use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::get};
@@ -44,6 +45,7 @@ pub fn router() -> Router<AppState> {
         )
         .nest("/request-logs", statistics::request_logs_router())
         .nest("/usage", statistics::usage_router())
+        .nest("/tenants", tenants::router())
         .nest("/users", users::router())
         // `/dash` 未知路径必须返回 JSON 404，不能继续落入 SPA 的 index.html fallback。
         .fallback(dash_not_found)

@@ -2,7 +2,7 @@ use bcrypt::{DEFAULT_COST, hash, verify};
 use chrono::{DateTime, Duration, Utc};
 use diesel::dsl::case_when;
 use diesel::prelude::*;
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
@@ -14,11 +14,12 @@ use crate::{
     err::{AppError, AppResult},
     infra::db::{self, DbPool},
     model::{
-        NewUser, USER_ROLE_ADMIN, USER_ROLE_USER, User, UserStatusPatch, is_valid_user_role,
-        schema::users,
+        NewUser, USER_ROLE_PLATFORM_ADMIN, USER_ROLE_TENANT_OWNER, USER_ROLE_TENANT_USER, User,
+        UserStatusPatch, is_valid_user_role, schema::users,
     },
     request_event::TokenUsage,
     state::AppState,
+    tenant,
 };
 
 const EMAIL_CODE_DIGITS: u32 = 6;
@@ -69,6 +70,7 @@ pub struct JwtClaims {
 #[derive(Debug, Clone, Serialize)]
 pub struct PublicUser {
     pub id: Uuid,
+    pub tenant_id: Option<Uuid>,
     pub username: String,
     pub email: String,
     pub role: String,
@@ -96,6 +98,7 @@ impl From<User> for PublicUser {
     fn from(user: User) -> Self {
         Self {
             id: user.id,
+            tenant_id: user.tenant_id,
             username: user.username,
             email: user.email,
             role: user.role,
@@ -109,9 +112,9 @@ impl From<User> for PublicUser {
     }
 }
 
-/// 启动时初始化 admin 用户。
+/// 启动时初始化平台管理员用户。
 ///
-/// 如果 admin 邮箱已经存在，只记录日志不覆盖密码和额度，避免服务重启时误改人为调整。
+/// 如果平台管理员邮箱已经存在，只记录日志不覆盖密码和额度，避免服务重启时误改人为调整。
 pub async fn bootstrap_admin(state: &AppState) -> AppResult<()> {
     let username = normalize_username(&state.config().admin_username)?;
     let email = normalize_email(&state.config().admin_email)?;
@@ -122,22 +125,23 @@ pub async fn bootstrap_admin(state: &AppState) -> AppResult<()> {
     let mut conn = state.db_conn().await?;
 
     if let Some(user) = find_by_email(&mut conn, &email).await? {
-        info!(user_id = %user.id, username = %user.username, email, "admin 用户已存在，跳过启动初始化");
+        info!(user_id = %user.id, username = %user.username, email, "平台管理员用户已存在，跳过启动初始化");
         return Ok(());
     }
     if find_by_username(&mut conn, &username).await?.is_some() {
         return Err(AppError::BadRequest {
-            message: format!("admin 用户名已被其他用户占用: {username}"),
+            message: format!("平台管理员用户名已被其他用户占用: {username}"),
         });
     }
 
     let password_hash = hash_password(state.config().admin_password.clone()).await?;
     let user = create_user(
         &mut conn,
+        None,
         username,
         email,
         password_hash,
-        USER_ROLE_ADMIN.to_owned(),
+        USER_ROLE_PLATFORM_ADMIN.to_owned(),
         state.config().admin_initial_quota,
         true,
     )
@@ -148,50 +152,69 @@ pub async fn bootstrap_admin(state: &AppState) -> AppResult<()> {
         username = %user.username,
         email = %user.email,
         quota = user.quota,
-        "admin 用户初始化完成"
+        "平台管理员用户初始化完成"
     );
 
     Ok(())
 }
 
-pub async fn create_regular_user(
+pub async fn register_with_tenant_code(
     conn: &mut AsyncPgConnection,
+    tenant_code: String,
     username: String,
     email: String,
     password: String,
 ) -> AppResult<User> {
     let username = normalize_username(&username)?;
     let email = normalize_email(&email)?;
-    if find_by_username(conn, &username).await?.is_some() {
-        return Err(AppError::BadRequest {
-            message: "用户名已被使用".to_owned(),
-        });
-    }
-    if find_by_email(conn, &email).await?.is_some() {
-        return Err(AppError::BadRequest {
-            message: "邮箱已注册".to_owned(),
-        });
-    }
+    let tenant_code = tenant::normalize_code(tenant_code)?;
+    let password_hash = hash_password(password).await?;
 
-    create_user(
-        conn,
-        username,
-        email,
-        hash_password(password).await?,
-        USER_ROLE_USER.to_owned(),
-        0,
-        true,
-    )
+    conn.transaction::<User, AppError, _>(async |conn| {
+        let tenant = tenant::find_enabled_by_code_for_update(&mut *conn, &tenant_code)
+            .await?
+            .ok_or_else(|| AppError::BadRequest {
+                message: "租户码无效或对应租户已停用".to_owned(),
+            })?;
+        let owner_exists = users::table
+            .filter(users::tenant_id.eq(tenant.id))
+            .filter(users::role.eq(USER_ROLE_TENANT_OWNER))
+            .select(users::id)
+            .first::<Uuid>(&mut *conn)
+            .await
+            .optional()
+            .map_err(|source| AppError::DbQuery {
+                message: source.to_string(),
+            })?
+            .is_some();
+        let role = if owner_exists {
+            USER_ROLE_TENANT_USER
+        } else {
+            USER_ROLE_TENANT_OWNER
+        };
+        create_user(
+            &mut *conn,
+            Some(tenant.id),
+            username,
+            email,
+            password_hash,
+            role.to_owned(),
+            0,
+            true,
+        )
+        .await
+    })
     .await
 }
 
-/// 由管理员直接创建普通用户。
+/// 由租户 owner 直接创建普通用户。
 ///
-/// 管理员已经在受保护的 Dashboard 中完成身份校验，因此该流程不发送或校验邮箱验证码；
+/// 租户 owner 已经在受保护的 Dashboard 中完成身份校验，因此该流程不发送或校验邮箱验证码；
 /// 邮箱留空时使用归一化后的用户名生成稳定的站内默认地址。最终仍复用普通用户创建逻辑，
 /// 使用户名、邮箱、密码边界以及数据库唯一冲突在所有创建入口保持一致。
-pub async fn create_admin_managed_user(
+pub async fn create_owner_managed_user(
     conn: &mut AsyncPgConnection,
+    tenant_id: Uuid,
     username: String,
     email: Option<String>,
     password: String,
@@ -204,14 +227,25 @@ pub async fn create_admin_managed_user(
 
     info!(
         username,
-        email, default_email_used, "管理员创建用户请求已完成字段归一化"
+        email, default_email_used, "租户 owner 创建用户请求已完成字段归一化"
     );
 
-    create_regular_user(conn, username, email, password).await
+    create_user(
+        conn,
+        Some(tenant_id),
+        username,
+        email,
+        hash_password(password).await?,
+        USER_ROLE_TENANT_USER.to_owned(),
+        0,
+        true,
+    )
+    .await
 }
 
 pub async fn create_user(
     conn: &mut AsyncPgConnection,
+    tenant_id: Option<Uuid>,
     username: String,
     email: String,
     password_hash: String,
@@ -232,6 +266,7 @@ pub async fn create_user(
 
     let user = diesel::insert_into(dsl::users)
         .values(&NewUser {
+            tenant_id,
             username,
             email,
             password_hash,
@@ -325,10 +360,16 @@ pub async fn find_by_id(conn: &mut AsyncPgConnection, id: Uuid) -> AppResult<Opt
     }
 }
 
-pub async fn list(conn: &mut AsyncPgConnection, limit: i64, offset: i64) -> AppResult<Vec<User>> {
+pub async fn list_by_tenant(
+    conn: &mut AsyncPgConnection,
+    tenant_id: Uuid,
+    limit: i64,
+    offset: i64,
+) -> AppResult<Vec<User>> {
     use self::users::dsl;
 
     dsl::users
+        .filter(dsl::tenant_id.eq(tenant_id))
         .order((dsl::created_at.desc(), dsl::id.desc()))
         .limit(limit)
         .offset(offset)
@@ -342,10 +383,15 @@ pub async fn list(conn: &mut AsyncPgConnection, limit: i64, offset: i64) -> AppR
 
 pub async fn list_usage_snapshots(
     conn: &mut AsyncPgConnection,
+    tenant_id: Option<Uuid>,
 ) -> AppResult<Vec<UserUsageSnapshot>> {
     use self::users::dsl;
 
-    dsl::users
+    let mut query = dsl::users.into_boxed();
+    if let Some(tenant_id) = tenant_id {
+        query = query.filter(dsl::tenant_id.eq(tenant_id));
+    }
+    query
         .select((dsl::id, dsl::username, dsl::quota, dsl::consumed_tokens))
         .load::<(Uuid, String, i64, i64)>(conn)
         .await
@@ -364,16 +410,25 @@ pub async fn list_usage_snapshots(
         })
 }
 
-pub async fn update_quota(conn: &mut AsyncPgConnection, id: Uuid, quota: i64) -> AppResult<User> {
+pub async fn update_quota_for_tenant(
+    conn: &mut AsyncPgConnection,
+    tenant_id: Uuid,
+    id: Uuid,
+    quota: i64,
+) -> AppResult<User> {
     use self::users::dsl;
 
     validate_user_quota(quota)?;
 
-    let result = diesel::update(dsl::users.filter(dsl::id.eq(id)))
-        .set((dsl::quota.eq(quota), dsl::updated_at.eq(Utc::now())))
-        .returning(User::as_returning())
-        .get_result::<User>(conn)
-        .await;
+    let result = diesel::update(
+        dsl::users
+            .filter(dsl::id.eq(id))
+            .filter(dsl::tenant_id.eq(tenant_id)),
+    )
+    .set((dsl::quota.eq(quota), dsl::updated_at.eq(Utc::now())))
+    .returning(User::as_returning())
+    .get_result::<User>(conn)
+    .await;
 
     match result {
         Ok(user) => {
@@ -391,6 +446,7 @@ pub async fn update_quota(conn: &mut AsyncPgConnection, id: Uuid, quota: i64) ->
 
 pub async fn update_status(
     conn: &mut AsyncPgConnection,
+    tenant_id: Uuid,
     id: Uuid,
     enabled: bool,
 ) -> AppResult<User> {
@@ -402,11 +458,16 @@ pub async fn update_status(
         updated_at: Utc::now(),
     };
 
-    let result = diesel::update(dsl::users.filter(dsl::id.eq(id)))
-        .set(&patch)
-        .returning(User::as_returning())
-        .get_result::<User>(conn)
-        .await;
+    let result = diesel::update(
+        dsl::users
+            .filter(dsl::id.eq(id))
+            .filter(dsl::tenant_id.eq(tenant_id))
+            .filter(dsl::role.eq(USER_ROLE_TENANT_USER)),
+    )
+    .set(&patch)
+    .returning(User::as_returning())
+    .get_result::<User>(conn)
+    .await;
 
     match result {
         Ok(user) => {

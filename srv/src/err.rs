@@ -9,9 +9,7 @@ use tracing::error;
 use uuid::Uuid;
 
 pub type AppResult<T> = Result<T, AppError>;
-pub type AdminResult<T> = Result<T, AdminError>;
-
-const MAX_ADMIN_ERROR_MESSAGE_CHARS: usize = 4_096;
+pub type AdminResult<T> = Result<T, AppError>;
 
 /// 非标准 499 状态码沿用网关领域的通用约定，表示调用方在服务返回响应前关闭了连接。
 ///
@@ -145,19 +143,6 @@ pub enum AppError {
     },
 }
 
-/// 已通过 admin 身份校验后的 handler 错误。
-///
-/// 普通 `AppError` 永远只返回经过脱敏的公共信息；admin handler 在鉴权 extractor 成功后
-/// 使用本包装类型，才会在响应中携带截断后的技术诊断。原始错误始终完整写入服务日志。
-#[derive(Debug)]
-pub struct AdminError(AppError);
-
-impl From<AppError> for AdminError {
-    fn from(error: AppError) -> Self {
-        Self(error)
-    }
-}
-
 #[derive(Debug, Serialize)]
 struct ErrorResponse<'a> {
     error: ErrorBody<'a>,
@@ -169,12 +154,6 @@ struct ErrorBody<'a> {
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     details: Option<Value>,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ErrorAudience {
-    Public,
-    Admin,
 }
 
 impl AppError {
@@ -247,11 +226,11 @@ impl AppError {
         }
     }
 
-    fn response_body_bytes_for(&self, audience: ErrorAudience) -> Vec<u8> {
+    fn response_body_bytes(&self) -> Vec<u8> {
         let payload = ErrorResponse {
             error: ErrorBody {
                 code: self.code(),
-                message: self.message_for(audience),
+                message: self.public_message(),
                 details: self.safe_details(),
             },
         };
@@ -262,11 +241,7 @@ impl AppError {
         })
     }
 
-    fn message_for(&self, audience: ErrorAudience) -> String {
-        if matches!(audience, ErrorAudience::Admin) {
-            return truncate_chars(&self.to_string(), MAX_ADMIN_ERROR_MESSAGE_CHARS);
-        }
-
+    fn public_message(&self) -> String {
         match self {
             AppError::ReadConfig { .. }
             | AppError::InvalidConfig { .. }
@@ -313,7 +288,7 @@ impl AppError {
         }
     }
 
-    fn into_response_for(self, audience: ErrorAudience) -> Response {
+    fn into_response_with_logging(self) -> Response {
         let status = self.status_code();
         let code = self.code();
         let diagnostic_message = self.to_string();
@@ -322,14 +297,11 @@ impl AppError {
             error_code = code,
             http_status = status.as_u16(),
             error_message = %diagnostic_message,
-            response_audience = match audience {
-                ErrorAudience::Public => "public",
-                ErrorAudience::Admin => "admin",
-            },
+            response_audience = "public",
             "请求处理失败"
         );
 
-        let body = self.response_body_bytes_for(audience);
+        let body = self.response_body_bytes();
         (
             status,
             [(axum::http::header::CONTENT_TYPE, "application/json")],
@@ -341,13 +313,7 @@ impl AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        self.into_response_for(ErrorAudience::Public)
-    }
-}
-
-impl IntoResponse for AdminError {
-    fn into_response(self) -> Response {
-        self.0.into_response_for(ErrorAudience::Admin)
+        self.into_response_with_logging()
     }
 }
 
@@ -357,8 +323,4 @@ impl From<diesel::result::Error> for AppError {
             message: source.to_string(),
         }
     }
-}
-
-fn truncate_chars(value: &str, max_chars: usize) -> String {
-    value.chars().take(max_chars).collect()
 }

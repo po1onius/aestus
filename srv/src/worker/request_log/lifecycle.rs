@@ -23,6 +23,7 @@ const REQUEST_LOG_STALE_AFTER_HOURS: i64 = 24;
 /// 网关鉴权成功后确定的调用方归属。
 #[derive(Debug)]
 pub(super) struct GatewayAttribution {
+    pub(super) tenant_id: Uuid,
     /// 请求发生时的 Key 名称快照，用于请求日志持久化和 Dashboard 展示。
     pub(super) api_key_name: String,
     pub(super) user_id: Uuid,
@@ -226,6 +227,7 @@ impl RequestLogLifecycle {
 
     fn set_gateway_attribution(&mut self, request_id: Uuid, details: GatewayAuthDetailsEvent) {
         let GatewayAuthDetailsEvent {
+            tenant_id,
             api_key_id,
             api_key_name,
             user_id,
@@ -248,6 +250,7 @@ impl RequestLogLifecycle {
             warn!(request_id = %request_id, "worker 收到重复网关鉴权事件，使用最新归属快照");
         }
         entry.gateway_attribution = Some(GatewayAttribution {
+            tenant_id,
             api_key_name,
             user_id,
             username,
@@ -256,6 +259,7 @@ impl RequestLogLifecycle {
         });
         info!(
             request_id = %request_id,
+            tenant_id = %tenant_id,
             api_key_id = %api_key_id,
             user_id = %user_id,
             provider_group_id = %provider_group_id,

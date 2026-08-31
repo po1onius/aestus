@@ -97,14 +97,15 @@ pub fn router<P: MaintenanceProvider>() -> Router<AppState> {
 
 async fn create_provider_upstream_api_key<P: MaintenanceProvider>(
     State(state): State<AppState>,
-    _admin: dash_auth::AdminUser,
+    dash_auth::AdminUser(owner): dash_auth::AdminUser,
     Json(payload): Json<CreateProviderUpstreamApiKeyRequest>,
 ) -> AdminResult<Json<ProviderUpstreamApiKeyResponse>> {
     let api_key = normalize_api_key(payload.api_key)?;
     let base_url = normalize_base_url(payload.base_url)?;
     payload.override_.validate()?;
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
     let snapshot = ProviderResourceService::<P>::new(&state)
-        .create_api_key(api_key, base_url, payload.override_)
+        .create_api_key(tenant_id, api_key, base_url, payload.override_)
         .await?;
 
     info!(
@@ -119,12 +120,13 @@ async fn create_provider_upstream_api_key<P: MaintenanceProvider>(
 
 async fn list_provider_upstream_api_keys<P: MaintenanceProvider>(
     State(state): State<AppState>,
-    _admin: dash_auth::AdminUser,
+    dash_auth::AdminUser(owner): dash_auth::AdminUser,
     Query(query): Query<ListPageQuery>,
 ) -> AdminResult<Json<ListPage<ProviderUpstreamApiKeyResponse>>> {
     let page = query.normalize()?;
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
     let snapshots = ProviderResourceService::<P>::new(&state)
-        .list_api_keys(page.query_limit(), page.offset())
+        .list_api_keys(tenant_id, page.query_limit(), page.offset())
         .await?;
     let items = snapshots
         .into_iter()
@@ -135,13 +137,14 @@ async fn list_provider_upstream_api_keys<P: MaintenanceProvider>(
 
 async fn update_provider_upstream_api_key_override<P: MaintenanceProvider>(
     State(state): State<AppState>,
-    _admin: dash_auth::AdminUser,
+    dash_auth::AdminUser(owner): dash_auth::AdminUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateRequestOverrideRequest>,
 ) -> AdminResult<Json<ProviderUpstreamApiKeyResponse>> {
     payload.override_.validate()?;
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
     let snapshot = ProviderResourceService::<P>::new(&state)
-        .update_api_key_override(id, payload.override_)
+        .update_api_key_override(tenant_id, id, payload.override_)
         .await?;
     info!(
         provider = P::NAME,
@@ -155,12 +158,13 @@ async fn update_provider_upstream_api_key_override<P: MaintenanceProvider>(
 
 async fn update_provider_upstream_api_key_enabled<P: MaintenanceProvider>(
     State(state): State<AppState>,
-    _admin: dash_auth::AdminUser,
+    dash_auth::AdminUser(owner): dash_auth::AdminUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateProviderUpstreamApiKeyEnabledRequest>,
 ) -> AdminResult<Json<ProviderUpstreamApiKeyResponse>> {
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
     let snapshot = ProviderResourceService::<P>::new(&state)
-        .update_api_key_enabled(id, payload.enabled)
+        .update_api_key_enabled(tenant_id, id, payload.enabled)
         .await?;
     info!(
         provider = P::NAME,
@@ -176,12 +180,13 @@ async fn update_provider_upstream_api_key_enabled<P: MaintenanceProvider>(
 
 async fn update_provider_upstream_api_key_group<P: MaintenanceProvider>(
     State(state): State<AppState>,
-    _admin: dash_auth::AdminUser,
+    dash_auth::AdminUser(owner): dash_auth::AdminUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateProviderGroupRequest>,
 ) -> AdminResult<Json<ProviderUpstreamApiKeyResponse>> {
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
     let snapshot = ProviderResourceService::<P>::new(&state)
-        .update_api_key_group(id, payload.group_id)
+        .update_api_key_group(tenant_id, id, payload.group_id)
         .await?;
     info!(
         provider = P::NAME,
@@ -196,11 +201,12 @@ async fn update_provider_upstream_api_key_group<P: MaintenanceProvider>(
 
 async fn delete_provider_upstream_api_key<P: MaintenanceProvider>(
     State(state): State<AppState>,
-    _admin: dash_auth::AdminUser,
+    dash_auth::AdminUser(owner): dash_auth::AdminUser,
     Path(id): Path<Uuid>,
 ) -> AdminResult<Json<DeleteProviderUpstreamApiKeyResponse>> {
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
     let deleted = ProviderResourceService::<P>::new(&state)
-        .delete_api_key(id)
+        .delete_api_key(tenant_id, id)
         .await?;
     warn!(
         provider = P::NAME,

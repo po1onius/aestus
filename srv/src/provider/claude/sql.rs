@@ -20,6 +20,7 @@ pub mod account {
 
     pub async fn create(
         conn: &mut AsyncPgConnection,
+        tenant_id: uuid::Uuid,
         refresh_token: String,
         access_token: String,
         next_token_refresh_at: DateTime<Utc>,
@@ -29,6 +30,7 @@ pub mod account {
         let account = provider_sql::account::create_with_db_error_mapper(
             conn,
             NewProviderAccount {
+                tenant_id,
                 provider: PROVIDER.to_owned(),
                 refresh_token,
                 access_token,

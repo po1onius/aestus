@@ -20,6 +20,7 @@ pub mod account {
     #[allow(clippy::too_many_arguments)]
     pub async fn create_with_override(
         conn: &mut AsyncPgConnection,
+        tenant_id: uuid::Uuid,
         chatgpt_account_id: Option<String>,
         email: Option<String>,
         plan_type: String,
@@ -39,6 +40,7 @@ pub mod account {
         let account = provider_sql::account::create(
             conn,
             NewProviderAccount {
+                tenant_id,
                 provider: PROVIDER.to_owned(),
                 refresh_token,
                 access_token,

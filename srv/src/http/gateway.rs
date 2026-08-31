@@ -245,6 +245,7 @@ where
         .emit(RequestEvent::GatewayAuthenticated {
             request_id,
             details: GatewayAuthDetails {
+                tenant_id: auth.tenant_id(),
                 api_key_id: auth.api_key_id(),
                 api_key_name: auth.api_key_name().to_owned(),
                 user_id: auth.user_id(),

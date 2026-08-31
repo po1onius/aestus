@@ -1,7 +1,7 @@
 //! Dashboard token 用量聚合接口。
 //!
-//! 普通用户只统计自己的余额与请求日志，admin 统计 PostgreSQL 中全部用户的余额及
-//! ClickHouse 中全部已归属用户的每日预聚合。额度属于附属能力，允许极端故障下少量统计
+//! 普通用户只统计自己的余额与请求日志，租户 owner 统计本租户全部用户，平台管理员统计
+//! PostgreSQL 与 ClickHouse 中全部已归属用户的每日预聚合。额度属于附属能力，允许极端故障下少量统计
 //! 缺失，因此这里不引入账单流水或跨库事务。用量概览固定统计服务时区下包含今天的
 //! 最近 365 个自然日，并一次返回总量、分布与每日明细。
 
@@ -38,29 +38,40 @@ struct NormalizedUsageRange {
 /// 用量查询的数据边界由已认证用户角色唯一决定，不接受调用方通过 query 参数自行扩大。
 #[derive(Debug, Clone, Copy)]
 enum UsageScope {
-    CurrentUser(Uuid),
+    CurrentUser(Uuid, Uuid),
+    Tenant(Uuid),
     AllUsers,
 }
 
 impl UsageScope {
     fn from_user(user: &User) -> Self {
-        if user.is_admin() {
+        if user.is_platform_admin() {
             Self::AllUsers
+        } else if user.is_tenant_owner() {
+            Self::Tenant(user.tenant_id.expect("tenant owner 必须归属租户"))
         } else {
-            Self::CurrentUser(user.id)
+            Self::CurrentUser(user.tenant_id.expect("tenant user 必须归属租户"), user.id)
         }
     }
 
     fn as_str(self) -> &'static str {
         match self {
-            Self::CurrentUser(_) => "current_user",
+            Self::CurrentUser(_, _) => "current_user",
+            Self::Tenant(_) => "tenant",
             Self::AllUsers => "all_users",
         }
     }
 
     fn user_id(self) -> Option<Uuid> {
         match self {
-            Self::CurrentUser(user_id) => Some(user_id),
+            Self::CurrentUser(_, user_id) => Some(user_id),
+            Self::Tenant(_) | Self::AllUsers => None,
+        }
+    }
+
+    fn tenant_id(self) -> Option<Uuid> {
+        match self {
+            Self::CurrentUser(tenant_id, _) | Self::Tenant(tenant_id) => Some(tenant_id),
             Self::AllUsers => None,
         }
     }
@@ -234,6 +245,7 @@ async fn get_usage(
         actor_user_id = %current_user.id,
         usage_scope = scope.as_str(),
         scoped_user_id = ?scope.user_id(),
+        scoped_tenant_id = ?scope.tenant_id(),
         annual_start_at = %query.start_at,
         annual_end_at = %query.end_at,
         timezone = %query.timezone,
@@ -293,7 +305,7 @@ async fn load_usage_user_directory(
     current_user: &User,
     scope: UsageScope,
 ) -> AppResult<UsageUserDirectory> {
-    if matches!(scope, UsageScope::CurrentUser(_)) {
+    if matches!(scope, UsageScope::CurrentUser(_, _)) {
         return Ok(UsageUserDirectory {
             remaining_tokens: current_user.quota.to_string(),
             consumed_tokens: current_user.consumed_tokens.to_string(),
@@ -302,7 +314,7 @@ async fn load_usage_user_directory(
     }
 
     let mut conn = state.db_conn().await?;
-    let snapshots = user::list_usage_snapshots(&mut conn).await?;
+    let snapshots = user::list_usage_snapshots(&mut conn, scope.tenant_id()).await?;
     let mut remaining_tokens = 0_i128;
     let mut consumed_tokens = 0_i128;
     let mut usernames_by_id = HashMap::with_capacity(snapshots.len());
@@ -339,7 +351,12 @@ async fn query_usage_totals(state: &AppState, scope: UsageScope) -> AppResult<Us
         toString(sum(total_tokens)) AS total_tokens, \
         sum(request_count) AS request_count \
         FROM ? \
-        WHERE user_id = ?";
+        WHERE tenant_id = ? AND user_id = ?";
+    let tenant_sql = "SELECT \
+        toString(sum(total_tokens)) AS total_tokens, \
+        sum(request_count) AS request_count \
+        FROM ? \
+        WHERE tenant_id = ?";
     let all_users_sql = "SELECT \
         toString(sum(total_tokens)) AS total_tokens, \
         sum(request_count) AS request_count \
@@ -348,14 +365,16 @@ async fn query_usage_totals(state: &AppState, scope: UsageScope) -> AppResult<Us
     let request = state
         .clickhouse()
         .query(match scope {
-            UsageScope::CurrentUser(_) => current_user_sql,
+            UsageScope::CurrentUser(_, _) => current_user_sql,
+            UsageScope::Tenant(_) => tenant_sql,
             UsageScope::AllUsers => all_users_sql,
         })
         .bind(Identifier(
             state.config().request_usage_daily_table.as_str(),
         ));
     let request = match scope {
-        UsageScope::CurrentUser(user_id) => request.bind(user_id),
+        UsageScope::CurrentUser(tenant_id, user_id) => request.bind(tenant_id).bind(user_id),
+        UsageScope::Tenant(tenant_id) => request.bind(tenant_id),
         UsageScope::AllUsers => request,
     };
     request
@@ -376,7 +395,17 @@ async fn query_usage_daily(
             toString(sum(total_tokens)) AS total_tokens_text, \
             sum(request_count) AS request_count \
          FROM ? \
-         WHERE user_id = ? \
+         WHERE tenant_id = ? AND user_id = ? \
+           AND usage_date >= toDate(?) \
+           AND usage_date < toDate(?) \
+         GROUP BY usage_date \
+         ORDER BY usage_date";
+    let tenant_sql = "SELECT \
+            usage_date, \
+            toString(sum(total_tokens)) AS total_tokens_text, \
+            sum(request_count) AS request_count \
+         FROM ? \
+         WHERE tenant_id = ? \
            AND usage_date >= toDate(?) \
            AND usage_date < toDate(?) \
          GROUP BY usage_date \
@@ -394,14 +423,16 @@ async fn query_usage_daily(
     let request = state
         .clickhouse()
         .query(match scope {
-            UsageScope::CurrentUser(_) => current_user_sql,
+            UsageScope::CurrentUser(_, _) => current_user_sql,
+            UsageScope::Tenant(_) => tenant_sql,
             UsageScope::AllUsers => all_users_sql,
         })
         .bind(Identifier(
             state.config().request_usage_daily_table.as_str(),
         ));
     let request = match scope {
-        UsageScope::CurrentUser(user_id) => request.bind(user_id),
+        UsageScope::CurrentUser(tenant_id, user_id) => request.bind(tenant_id).bind(user_id),
+        UsageScope::Tenant(tenant_id) => request.bind(tenant_id),
         UsageScope::AllUsers => request,
     };
     request
@@ -422,7 +453,17 @@ async fn query_usage_models(state: &AppState, scope: UsageScope) -> AppResult<Ve
         toString(sum(total_tokens)) AS total_tokens_text, \
         sum(request_count) AS request_count \
         FROM ? \
-        WHERE user_id = ? \
+        WHERE tenant_id = ? AND user_id = ? \
+        GROUP BY provider, model \
+        HAVING sum(total_tokens) > 0 \
+        ORDER BY sum(total_tokens) DESC";
+    let tenant_sql = "SELECT \
+        provider, \
+        model, \
+        toString(sum(total_tokens)) AS total_tokens_text, \
+        sum(request_count) AS request_count \
+        FROM ? \
+        WHERE tenant_id = ? \
         GROUP BY provider, model \
         HAVING sum(total_tokens) > 0 \
         ORDER BY sum(total_tokens) DESC";
@@ -439,14 +480,16 @@ async fn query_usage_models(state: &AppState, scope: UsageScope) -> AppResult<Ve
     let request = state
         .clickhouse()
         .query(match scope {
-            UsageScope::CurrentUser(_) => current_user_sql,
+            UsageScope::CurrentUser(_, _) => current_user_sql,
+            UsageScope::Tenant(_) => tenant_sql,
             UsageScope::AllUsers => all_users_sql,
         })
         .bind(Identifier(
             state.config().request_usage_daily_table.as_str(),
         ));
     let request = match scope {
-        UsageScope::CurrentUser(user_id) => request.bind(user_id),
+        UsageScope::CurrentUser(tenant_id, user_id) => request.bind(tenant_id).bind(user_id),
+        UsageScope::Tenant(tenant_id) => request.bind(tenant_id),
         UsageScope::AllUsers => request,
     };
     request
@@ -460,25 +503,33 @@ async fn query_usage_breakdown(
     scope: UsageScope,
 ) -> AppResult<UsageBreakdownRows> {
     match scope {
-        UsageScope::CurrentUser(user_id) => Ok(UsageBreakdownRows {
-            api_keys: query_usage_api_keys(state, user_id).await?,
+        UsageScope::CurrentUser(tenant_id, user_id) => Ok(UsageBreakdownRows {
+            api_keys: query_usage_api_keys(state, tenant_id, user_id).await?,
             users: Vec::new(),
+        }),
+        UsageScope::Tenant(tenant_id) => Ok(UsageBreakdownRows {
+            api_keys: Vec::new(),
+            users: query_usage_users(state, Some(tenant_id)).await?,
         }),
         UsageScope::AllUsers => Ok(UsageBreakdownRows {
             api_keys: Vec::new(),
-            users: query_usage_users(state).await?,
+            users: query_usage_users(state, None).await?,
         }),
     }
 }
 
-async fn query_usage_api_keys(state: &AppState, user_id: Uuid) -> AppResult<Vec<UsageApiKeyRow>> {
+async fn query_usage_api_keys(
+    state: &AppState,
+    tenant_id: Uuid,
+    user_id: Uuid,
+) -> AppResult<Vec<UsageApiKeyRow>> {
     // API Key 名称在单个用户内唯一且不支持改名，普通用户视图可以直接按名称聚合。
     let sql = "SELECT \
         api_key_name AS api_key_name_text, \
         toString(sum(total_tokens)) AS total_tokens_text, \
         sum(request_count) AS request_count \
         FROM ? \
-        WHERE user_id = ? \
+        WHERE tenant_id = ? AND user_id = ? \
         GROUP BY api_key_name_text \
         HAVING sum(total_tokens) > 0 \
         ORDER BY sum(total_tokens) DESC";
@@ -489,20 +540,24 @@ async fn query_usage_api_keys(state: &AppState, user_id: Uuid) -> AppResult<Vec<
         .bind(Identifier(
             state.config().request_usage_daily_table.as_str(),
         ))
+        .bind(tenant_id)
         .bind(user_id)
         .fetch_all::<UsageApiKeyRow>()
         .await
         .map_err(|source| {
             usage_query_error(
                 "lifetime_api_key_distribution",
-                UsageScope::CurrentUser(user_id),
+                UsageScope::CurrentUser(tenant_id, user_id),
                 source,
             )
         })
 }
 
-async fn query_usage_users(state: &AppState) -> AppResult<Vec<UsageUserRow>> {
-    let sql = "SELECT \
+async fn query_usage_users(
+    state: &AppState,
+    tenant_id: Option<Uuid>,
+) -> AppResult<Vec<UsageUserRow>> {
+    let all_sql = "SELECT \
         user_id, \
         toString(sum(total_tokens)) AS total_tokens_text, \
         sum(request_count) AS request_count \
@@ -510,18 +565,37 @@ async fn query_usage_users(state: &AppState) -> AppResult<Vec<UsageUserRow>> {
         GROUP BY user_id \
         HAVING sum(total_tokens) > 0 \
         ORDER BY sum(total_tokens) DESC";
+    let tenant_sql = "SELECT \
+        user_id, \
+        toString(sum(total_tokens)) AS total_tokens_text, \
+        sum(request_count) AS request_count \
+        FROM ? \
+        WHERE tenant_id = ? \
+        GROUP BY user_id \
+        HAVING sum(total_tokens) > 0 \
+        ORDER BY sum(total_tokens) DESC";
 
-    state
+    let request = state
         .clickhouse()
-        .query(sql)
+        .query(if tenant_id.is_some() {
+            tenant_sql
+        } else {
+            all_sql
+        })
         .bind(Identifier(
             state.config().request_usage_daily_table.as_str(),
-        ))
-        .fetch_all::<UsageUserRow>()
-        .await
-        .map_err(|source| {
-            usage_query_error("lifetime_user_distribution", UsageScope::AllUsers, source)
-        })
+        ));
+    let request = match tenant_id {
+        Some(tenant_id) => request.bind(tenant_id),
+        None => request,
+    };
+    request.fetch_all::<UsageUserRow>().await.map_err(|source| {
+        usage_query_error(
+            "lifetime_user_distribution",
+            tenant_id.map_or(UsageScope::AllUsers, UsageScope::Tenant),
+            source,
+        )
+    })
 }
 
 fn usage_query_error(
@@ -534,6 +608,7 @@ fn usage_query_error(
         query_kind,
         usage_scope = scope.as_str(),
         scoped_user_id = ?scope.user_id(),
+        scoped_tenant_id = ?scope.tenant_id(),
         "Dashboard 查询 ClickHouse 全历史 token 用量统计失败"
     );
     AppError::DbQuery {

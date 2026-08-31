@@ -29,6 +29,7 @@ export const providerGroupsPath = "/dash/provider-groups";
 export const requestLogsPath = "/dash/request-logs";
 export const usagePath = "/dash/usage";
 export const usersPath = "/dash/users";
+export const tenantsPath = "/dash/tenants";
 export const authTokenStorageKey = "aestus_dashboard_token";
 export const themeStorageKey = "aestus_dashboard_theme";
 export const requestLogPageSize = 100;
@@ -38,39 +39,39 @@ export const defaultGptClientId = "app_EMoamEEZ73f0CkXaXp7hrann";
 
 export const dashboardRoutes: DashboardRoute[] = [
   {
+    page: "tenants",
+    path: "/platform/tenants",
+    label: "租户",
+    platformOnly: true,
+  },
+  {
     page: "accounts",
     path: "/admin/accounts",
     label: "Provider",
-    adminOnly: true,
+    ownerOnly: true,
   },
   {
     page: "plugins",
     path: "/admin/plugins",
     label: "插件",
-    adminOnly: true,
+    ownerOnly: true,
   },
   {
     page: "users",
     path: "/admin/users",
     label: "用户",
-    adminOnly: true,
-  },
-  {
-    page: "usage",
-    path: "/admin/usage",
-    label: "用量概览",
-    adminOnly: true,
+    ownerOnly: true,
   },
   {
     page: "usage",
     path: "/dashboard/usage",
     label: "用量概览",
-    userOnly: true,
   },
   {
     page: "apiKeys",
     path: "/admin/api-keys",
     label: "API Key",
+    tenantOnly: true,
   },
   {
     page: "requestLogs",

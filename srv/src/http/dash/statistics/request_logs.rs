@@ -149,6 +149,7 @@ impl From<RequestLogQueryRow> for RequestLogRecord {
 #[derive(Debug)]
 struct RequestLogQuery {
     limit: usize,
+    tenant_id: Option<Uuid>,
     user_id: Option<Uuid>,
     start_at: DateTime<Utc>,
     end_at: DateTime<Utc>,
@@ -195,11 +196,9 @@ async fn list_request_logs(
     )?;
     let log_query = RequestLogQuery {
         limit,
-        user_id: if current_user.is_admin() {
-            None
-        } else {
-            Some(current_user.id)
-        },
+        tenant_id: current_user.tenant_id,
+        user_id: (!current_user.is_platform_admin() && !current_user.is_tenant_owner())
+            .then_some(current_user.id),
         start_at: date_range.start_at,
         end_at: date_range.end_at,
         before_started_at,
@@ -294,6 +293,9 @@ async fn query_request_log_page(
         .bind(datetime_millis(query.start_at))
         .bind(datetime_millis(query.end_at));
 
+    if let Some(tenant_id) = query.tenant_id {
+        clickhouse_query = clickhouse_query.bind(tenant_id);
+    }
     if let Some(user_id) = query.user_id {
         clickhouse_query = clickhouse_query.bind(user_id);
     }
@@ -313,6 +315,7 @@ async fn query_request_log_page(
             error!(
                 error = %query_error,
                 clickhouse_table = table,
+                tenant_id = ?query.tenant_id,
                 user_id = query.user_id.map(|id| id.to_string()).unwrap_or_else(|| "<all>".to_owned()),
                 limit = query.limit,
                 start_at = %query.start_at,
@@ -343,6 +346,7 @@ async fn query_request_log_page(
 
     info!(
         clickhouse_table = table,
+        tenant_id = ?query.tenant_id,
         user_id = query.user_id.map(|id| id.to_string()).unwrap_or_else(|| "<all>".to_owned()),
         limit = query.limit,
         returned_rows = records.len(),
@@ -386,6 +390,9 @@ fn request_log_page_sql(query: &RequestLogQuery) -> String {
 
     if query.user_id.is_some() {
         conditions.push("user_id = ?".to_owned());
+    }
+    if query.tenant_id.is_some() {
+        conditions.insert(2, "tenant_id = ?".to_owned());
     }
     if query.non_success_only {
         conditions.push("status IN ('abnormal', 'failed')".to_owned());

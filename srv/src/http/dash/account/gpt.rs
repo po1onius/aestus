@@ -129,13 +129,15 @@ pub fn router() -> Router<AppState> {
 
 async fn create_oauth_authorization(
     State(state): State<AppState>,
-    _admin: dash_auth::AdminUser,
+    dash_auth::AdminUser(owner): dash_auth::AdminUser,
 ) -> AdminResult<Json<CreateOauthAuthorizationResponse>> {
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
     let authorization = auth::create_authorization(&state).await?;
     // OAuth 握手与账号最终归属解耦：Redis 只保存 PKCE 临时参数，不记录 Provider 分组。
     provider_oauth::create(
         &state,
         gpt_model::PROVIDER,
+        tenant_id,
         &authorization.state,
         authorization.pkce_verifier,
         authorization.redirect_uri.clone(),
@@ -153,7 +155,7 @@ async fn create_oauth_authorization(
 
 async fn complete_oauth_callback(
     State(state): State<AppState>,
-    _admin: dash_auth::AdminUser,
+    dash_auth::AdminUser(owner): dash_auth::AdminUser,
     Json(payload): Json<CompleteOauthRequest>,
 ) -> AdminResult<Json<GptAccountResponse>> {
     // override 属于纯本地输入，必须在消费一次性 OAuth state 和交换 code 之前完成校验。
@@ -167,6 +169,11 @@ async fn complete_oauth_callback(
         .ok_or_else(|| AppError::BadRequest {
             message: "OAuth state 无效或已过期，请重新生成授权 URL".to_owned(),
         })?;
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
+    if session.tenant_id != tenant_id {
+        warn!(owner_user_id = %owner.id, owner_tenant_id = %tenant_id, oauth_tenant_id = %session.tenant_id, "GPT OAuth 会话租户与当前 owner 不一致，拒绝消费");
+        return Err(AppError::Forbidden.into());
+    }
 
     let auth_token = auth::exchange_callback_code(
         &state,
@@ -175,7 +182,8 @@ async fn complete_oauth_callback(
         &callback.code,
     )
     .await?;
-    let account = persist_oauth_auth_token(&state, auth_token, payload.override_).await?;
+    let account =
+        persist_oauth_auth_token(&state, tenant_id, auth_token, payload.override_).await?;
     let snapshot = ProviderResourceService::<GptMaintenance>::new(&state)
         .sync_account(account)
         .await?;
@@ -191,7 +199,7 @@ async fn complete_oauth_callback(
 
 async fn create_gpt_account(
     State(state): State<AppState>,
-    _admin: dash_auth::AdminUser,
+    dash_auth::AdminUser(owner): dash_auth::AdminUser,
     Json(payload): Json<CreateGptAccountRequest>,
 ) -> AdminResult<Json<GptAccountResponse>> {
     payload.override_.validate()?;
@@ -227,8 +235,10 @@ async fn create_gpt_account(
     };
     let auth_token =
         auth_token_from_refresh_import(refresh_token, chatgpt_account_id, refresh_grant)?;
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
     let account =
-        persist_imported_auth_token(&state, client_id, auth_token, payload.override_).await?;
+        persist_imported_auth_token(&state, tenant_id, client_id, auth_token, payload.override_)
+            .await?;
     let snapshot = ProviderResourceService::<GptMaintenance>::new(&state)
         .sync_account(account)
         .await?;
@@ -247,6 +257,7 @@ async fn create_gpt_account(
 
 async fn persist_imported_auth_token(
     state: &AppState,
+    tenant_id: Uuid,
     client_id: String,
     auth_token: RefreshedAuthToken,
     request_override: RequestOverride,
@@ -256,7 +267,15 @@ async fn persist_imported_auth_token(
         .clone()
         .unwrap_or_else(|| gpt_model::PLAN_TYPE_UNKNOWN.to_owned());
 
-    persist_auth_token_with_plan(state, client_id, auth_token, plan_type, request_override).await
+    persist_auth_token_with_plan(
+        state,
+        tenant_id,
+        client_id,
+        auth_token,
+        plan_type,
+        request_override,
+    )
+    .await
 }
 
 fn auth_token_from_refresh_import(
@@ -314,6 +333,7 @@ fn map_refresh_token_import_error(error: auth::TokenRefreshError) -> AppError {
 
 async fn persist_oauth_auth_token(
     state: &AppState,
+    tenant_id: Uuid,
     auth_token: RefreshedAuthToken,
     request_override: RequestOverride,
 ) -> AppResult<ProviderAccount> {
@@ -324,6 +344,7 @@ async fn persist_oauth_auth_token(
 
     persist_auth_token_with_plan(
         state,
+        tenant_id,
         auth::CODEX_OAUTH_CLIENT_ID.to_owned(),
         auth_token,
         plan_type,
@@ -334,6 +355,7 @@ async fn persist_oauth_auth_token(
 
 async fn persist_auth_token_with_plan(
     state: &AppState,
+    tenant_id: Uuid,
     client_id: String,
     auth_token: RefreshedAuthToken,
     plan_type: String,
@@ -345,6 +367,7 @@ async fn persist_auth_token_with_plan(
     // Codex id_token claims；缺失时写入 unknown，避免把未知套餐误标成 free。
     account::create_with_override(
         &mut conn,
+        tenant_id,
         auth_token.chatgpt_account_id,
         auth_token.email,
         plan_type,
@@ -360,12 +383,13 @@ async fn persist_auth_token_with_plan(
 
 async fn list_gpt_accounts(
     State(state): State<AppState>,
-    _admin: dash_auth::AdminUser,
+    dash_auth::AdminUser(owner): dash_auth::AdminUser,
     Query(query): Query<ListPageQuery>,
 ) -> AdminResult<Json<ListPage<GptAccountResponse>>> {
     let page = query.normalize()?;
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
     let snapshots = ProviderResourceService::<GptMaintenance>::new(&state)
-        .list_accounts(page.query_limit(), page.offset())
+        .list_accounts(tenant_id, page.query_limit(), page.offset())
         .await?;
     let items = snapshots
         .into_iter()
@@ -377,12 +401,13 @@ async fn list_gpt_accounts(
 
 async fn update_gpt_account_enabled(
     State(state): State<AppState>,
-    _admin: dash_auth::AdminUser,
+    dash_auth::AdminUser(owner): dash_auth::AdminUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateGptAccountEnabledRequest>,
 ) -> AdminResult<Json<GptAccountResponse>> {
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
     let snapshot = ProviderResourceService::<GptMaintenance>::new(&state)
-        .update_account_enabled(id, payload.enabled)
+        .update_account_enabled(tenant_id, id, payload.enabled)
         .await?;
 
     Ok(Json(GptAccountResponse::from_snapshot(snapshot)?))
@@ -390,13 +415,14 @@ async fn update_gpt_account_enabled(
 
 async fn update_gpt_account_override(
     State(state): State<AppState>,
-    _admin: dash_auth::AdminUser,
+    dash_auth::AdminUser(owner): dash_auth::AdminUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateRequestOverrideRequest>,
 ) -> AdminResult<Json<GptAccountResponse>> {
     payload.override_.validate()?;
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
     let snapshot = ProviderResourceService::<GptMaintenance>::new(&state)
-        .update_account_override(id, payload.override_)
+        .update_account_override(tenant_id, id, payload.override_)
         .await?;
 
     info!(
@@ -408,12 +434,13 @@ async fn update_gpt_account_override(
 
 async fn update_gpt_account_group(
     State(state): State<AppState>,
-    _admin: dash_auth::AdminUser,
+    dash_auth::AdminUser(owner): dash_auth::AdminUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<ProviderGroupRequest>,
 ) -> AdminResult<Json<GptAccountResponse>> {
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
     let snapshot = ProviderResourceService::<GptMaintenance>::new(&state)
-        .update_account_group(id, payload.group_id)
+        .update_account_group(tenant_id, id, payload.group_id)
         .await?;
     info!(
         gpt_account_id = %snapshot.account.id,
@@ -425,11 +452,12 @@ async fn update_gpt_account_group(
 
 async fn refresh_gpt_account_quota(
     State(state): State<AppState>,
-    _admin: dash_auth::AdminUser,
+    dash_auth::AdminUser(owner): dash_auth::AdminUser,
     Path(id): Path<Uuid>,
 ) -> AdminResult<Json<quota::GptAccountQuotaResponse>> {
     let service = ProviderResourceService::<GptMaintenance>::new(&state);
-    let account = service.find_account(id).await?.ok_or_else(|| {
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
+    let account = service.find_account(tenant_id, id).await?.ok_or_else(|| {
         warn!(gpt_account_id = %id, "管理端刷新 GPT 账号额度失败，账号不存在");
         AppError::BadRequest {
             message: format!("GPT 账号不存在: {id}"),
@@ -450,6 +478,7 @@ async fn refresh_gpt_account_quota(
     {
         match service
             .clear_account_quota_limit_if_snapshot(
+                tenant_id,
                 account.id,
                 expected_quota_resets_at,
                 expected_updated_at,
@@ -499,11 +528,12 @@ async fn refresh_gpt_account_quota(
 /// 查询指定 GPT OAuth 账号可用的人工额度重置记录。
 async fn list_gpt_account_rate_limit_reset_credits(
     State(state): State<AppState>,
-    _admin: dash_auth::AdminUser,
+    dash_auth::AdminUser(owner): dash_auth::AdminUser,
     Path(id): Path<Uuid>,
 ) -> AdminResult<Json<rate_limit_reset::RateLimitResetCreditsResponse>> {
     let service = ProviderResourceService::<GptMaintenance>::new(&state);
-    let account = service.find_account(id).await?.ok_or_else(|| {
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
+    let account = service.find_account(tenant_id, id).await?.ok_or_else(|| {
         warn!(gpt_account_id = %id, "管理端查询 GPT 账号额度重置记录失败，账号不存在");
         AppError::BadRequest {
             message: format!("GPT 账号不存在: {id}"),
@@ -523,12 +553,13 @@ async fn list_gpt_account_rate_limit_reset_credits(
 /// 应用一条由查询接口返回的额度重置记录。
 async fn consume_gpt_account_rate_limit_reset_credit(
     State(state): State<AppState>,
-    _admin: dash_auth::AdminUser,
+    dash_auth::AdminUser(owner): dash_auth::AdminUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<rate_limit_reset::ConsumeRateLimitResetCreditRequest>,
 ) -> AdminResult<Json<rate_limit_reset::ConsumeRateLimitResetCreditResponse>> {
     let service = ProviderResourceService::<GptMaintenance>::new(&state);
-    let account = service.find_account(id).await?.ok_or_else(|| {
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
+    let account = service.find_account(tenant_id, id).await?.ok_or_else(|| {
         warn!(gpt_account_id = %id, "管理端应用 GPT 账号额度重置记录失败，账号不存在");
         AppError::BadRequest {
             message: format!("GPT 账号不存在: {id}"),
@@ -558,11 +589,12 @@ async fn consume_gpt_account_rate_limit_reset_credit(
 
 async fn delete_gpt_account(
     State(state): State<AppState>,
-    _admin: dash_auth::AdminUser,
+    dash_auth::AdminUser(owner): dash_auth::AdminUser,
     Path(id): Path<Uuid>,
 ) -> AdminResult<Json<DeleteGptAccountResponse>> {
     let service = ProviderResourceService::<GptMaintenance>::new(&state);
-    let account_exists = service.find_account(id).await?.is_some();
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
+    let account_exists = service.find_account(tenant_id, id).await?.is_some();
 
     if !account_exists {
         warn!(gpt_account_id = %id, "管理端删除 GPT 账号失败，账号不存在");
@@ -572,7 +604,7 @@ async fn delete_gpt_account(
         .into());
     }
 
-    let deleted = service.delete_account(id).await?;
+    let deleted = service.delete_account(tenant_id, id).await?;
 
     info!(
         gpt_account_id = %deleted.id,

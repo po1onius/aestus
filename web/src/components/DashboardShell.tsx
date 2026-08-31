@@ -1,4 +1,5 @@
 import {
+  Building2,
   ChartNoAxesCombined,
   KeyRound,
   Loader2,
@@ -15,13 +16,20 @@ import type { ReactNode } from "react";
 import { Toaster } from "sonner";
 import tokenGatewayLogo from "../assets/token-gateway-logo.svg";
 import { cx, iconButton, spinnerClass } from "../lib/ui";
-import type { DashboardPage, DashboardRoute, DashboardTheme, DashboardUser } from "../types";
+import type {
+  DashboardPage,
+  DashboardRoute,
+  DashboardTenant,
+  DashboardTheme,
+  DashboardUser,
+} from "../types";
 
 interface DashboardShellProps {
   activePage: DashboardPage;
   activeRoute: DashboardRoute;
   routes: DashboardRoute[];
   currentUser: DashboardUser;
+  tenant: DashboardTenant | null;
   theme: DashboardTheme;
   refreshing: boolean;
   overlays: ReactNode;
@@ -51,6 +59,7 @@ export function DashboardShell({
   activeRoute,
   routes,
   currentUser,
+  tenant,
   theme,
   refreshing,
   overlays,
@@ -156,6 +165,13 @@ export function DashboardShell({
               <LogOut size={17} />
             </button>
             <div
+              className="inline-flex h-9 max-w-48 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+              title={tenant?.id ?? "平台管理员"}
+            >
+              <Building2 size={15} className="shrink-0" />
+              <span className="truncate">{tenant?.name ?? "平台管理"}</span>
+            </div>
+            <div
               className="inline-flex h-9 max-w-48 items-center rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
               title={currentUser.email}
             >
@@ -174,6 +190,8 @@ export function DashboardShell({
 
 function RouteIcon({ page }: { page: DashboardPage }) {
   switch (page) {
+    case "tenants":
+      return <Building2 size={18} />;
     case "accounts":
       return <ServerCog size={18} />;
     case "plugins":

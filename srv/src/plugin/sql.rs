@@ -23,6 +23,7 @@ use super::{
 type ReleaseRow = (
     Uuid,
     Uuid,
+    Uuid,
     String,
     String,
     String,
@@ -46,6 +47,7 @@ macro_rules! release_select {
         (
             plugin_suite_releases::id,
             plugin_suite_releases::suite_id,
+            plugin_suites::tenant_id,
             plugin_suites::name,
             plugin_suites::description,
             plugin_suites::provider,
@@ -61,6 +63,7 @@ macro_rules! suite_select {
     () => {
         (
             plugin_suites::id,
+            plugin_suites::tenant_id,
             plugin_suites::name,
             plugin_suites::description,
             plugin_suites::provider,
@@ -71,6 +74,7 @@ macro_rules! suite_select {
 
 pub async fn create_and_publish(
     conn: &mut AsyncPgConnection,
+    tenant_id: Uuid,
     created_by: Uuid,
     name: String,
     description: String,
@@ -83,6 +87,7 @@ pub async fn create_and_publish(
         .transaction::<ReleaseRow, AppError, _>(async |conn| {
             let suite = diesel::insert_into(plugin_suites::table)
                 .values(NewPluginSuite {
+                    tenant_id,
                     name,
                     description,
                     provider,
@@ -110,6 +115,7 @@ pub async fn create_and_publish(
 
 pub async fn publish_release(
     conn: &mut AsyncPgConnection,
+    tenant_id: Uuid,
     suite_id: Uuid,
     created_by: Uuid,
     manifest_sha256: String,
@@ -120,6 +126,7 @@ pub async fn publish_release(
         .transaction::<ReleaseRow, AppError, _>(async |conn| {
             let suite = plugin_suites::table
                 .filter(plugin_suites::id.eq(suite_id))
+                .filter(plugin_suites::tenant_id.eq(tenant_id))
                 .for_update()
                 .select(suite_select!())
                 .first::<PluginSuite>(&mut *conn)
@@ -202,6 +209,7 @@ async fn insert_release(
     Ok((
         release.0,
         release.1,
+        suite.tenant_id,
         suite.name.clone(),
         suite.description.clone(),
         suite.provider.clone(),
@@ -212,9 +220,13 @@ async fn insert_release(
     ))
 }
 
-pub async fn list(conn: &mut AsyncPgConnection) -> AppResult<Vec<PluginReleaseSummary>> {
+pub async fn list(
+    conn: &mut AsyncPgConnection,
+    tenant_id: Uuid,
+) -> AppResult<Vec<PluginReleaseSummary>> {
     let rows = plugin_suite_releases::table
         .inner_join(plugin_suites::table.on(plugin_suites::id.eq(plugin_suite_releases::suite_id)))
+        .filter(plugin_suites::tenant_id.eq(tenant_id))
         .order((
             plugin_suites::created_at.desc(),
             plugin_suite_releases::version.desc(),
@@ -227,10 +239,12 @@ pub async fn list(conn: &mut AsyncPgConnection) -> AppResult<Vec<PluginReleaseSu
 
 pub async fn list_enabled_options(
     conn: &mut AsyncPgConnection,
+    tenant_id: Uuid,
 ) -> AppResult<Vec<PluginReleaseSummary>> {
     let rows = plugin_suite_releases::table
         .inner_join(plugin_suites::table.on(plugin_suites::id.eq(plugin_suite_releases::suite_id)))
         .filter(plugin_suites::enabled.eq(true))
+        .filter(plugin_suites::tenant_id.eq(tenant_id))
         .order((
             plugin_suites::provider.asc(),
             plugin_suites::name.asc(),
@@ -244,10 +258,12 @@ pub async fn list_enabled_options(
 
 pub async fn find_suite(
     conn: &mut AsyncPgConnection,
+    tenant_id: Uuid,
     suite_id: Uuid,
 ) -> AppResult<Option<PluginSuite>> {
     plugin_suites::table
         .filter(plugin_suites::id.eq(suite_id))
+        .filter(plugin_suites::tenant_id.eq(tenant_id))
         .select(suite_select!())
         .first::<PluginSuite>(conn)
         .await
@@ -257,6 +273,7 @@ pub async fn find_suite(
 
 pub async fn find_summaries_by_ids(
     conn: &mut AsyncPgConnection,
+    tenant_id: Uuid,
     ids: &[Uuid],
 ) -> AppResult<HashMap<Uuid, PluginReleaseSummary>> {
     if ids.is_empty() {
@@ -265,6 +282,7 @@ pub async fn find_summaries_by_ids(
     let rows = plugin_suite_releases::table
         .inner_join(plugin_suites::table.on(plugin_suites::id.eq(plugin_suite_releases::suite_id)))
         .filter(plugin_suite_releases::id.eq_any(ids))
+        .filter(plugin_suites::tenant_id.eq(tenant_id))
         .select(release_select!())
         .load::<ReleaseRow>(conn)
         .await?;
@@ -277,6 +295,7 @@ pub async fn find_summaries_by_ids(
 
 pub async fn require_enabled_release_for_provider(
     conn: &mut AsyncPgConnection,
+    tenant_id: Uuid,
     release_id: Uuid,
     provider: &str,
 ) -> AppResult<PluginReleaseSummary> {
@@ -284,6 +303,7 @@ pub async fn require_enabled_release_for_provider(
         .inner_join(plugin_suites::table.on(plugin_suites::id.eq(plugin_suite_releases::suite_id)))
         .filter(plugin_suite_releases::id.eq(release_id))
         .filter(plugin_suites::enabled.eq(true))
+        .filter(plugin_suites::tenant_id.eq(tenant_id))
         .filter(plugin_suites::provider.eq(provider))
         .select(release_select!())
         .first::<ReleaseRow>(conn)
@@ -302,6 +322,7 @@ pub async fn require_enabled_release_for_provider(
 /// 套件已经不存在；绑定先取得套件锁时，删除会在其提交后解除刚写入的绑定。
 pub async fn require_enabled_release_for_provider_write(
     conn: &mut AsyncPgConnection,
+    tenant_id: Uuid,
     release_id: Uuid,
     provider: &str,
 ) -> AppResult<PluginReleaseSummary> {
@@ -316,6 +337,7 @@ pub async fn require_enabled_release_for_provider_write(
         })?;
     let suite_exists = plugin_suites::table
         .filter(plugin_suites::id.eq(suite_id))
+        .filter(plugin_suites::tenant_id.eq(tenant_id))
         .filter(plugin_suites::enabled.eq(true))
         .filter(plugin_suites::provider.eq(provider))
         .for_update()
@@ -329,15 +351,17 @@ pub async fn require_enabled_release_for_provider_write(
             message: format!("插件套件发布版本不存在、已停用或不属于 {provider}: {release_id}"),
         });
     }
-    require_enabled_release_for_provider(&mut *conn, release_id, provider).await
+    require_enabled_release_for_provider(&mut *conn, tenant_id, release_id, provider).await
 }
 
 pub async fn load_binding(
     conn: &mut AsyncPgConnection,
+    tenant_id: Uuid,
     release_id: Uuid,
     provider: &str,
 ) -> AppResult<PluginBinding> {
-    let summary = require_enabled_release_for_provider(conn, release_id, provider).await?;
+    let summary =
+        require_enabled_release_for_provider(conn, tenant_id, release_id, provider).await?;
     binding_from_summary(summary)
 }
 
@@ -363,6 +387,7 @@ pub async fn load_artifact(
         .filter(plugin_suite_artifacts::id.eq(artifact_id))
         .filter(plugin_suite_artifacts::release_id.eq(suite_binding.release_id))
         .filter(plugin_suites::enabled.eq(true))
+        .filter(plugin_suites::tenant_id.eq(suite_binding.tenant_id))
         .select((
             plugin_suite_artifacts::wasm_sha256,
             plugin_suite_artifacts::wasm_bytes,
@@ -387,16 +412,21 @@ pub async fn load_artifact(
 
 pub async fn set_enabled(
     conn: &mut AsyncPgConnection,
+    tenant_id: Uuid,
     suite_id: Uuid,
     enabled: bool,
 ) -> AppResult<()> {
-    let changed = diesel::update(plugin_suites::table.filter(plugin_suites::id.eq(suite_id)))
-        .set((
-            plugin_suites::enabled.eq(enabled),
-            plugin_suites::updated_at.eq(diesel::dsl::now),
-        ))
-        .execute(conn)
-        .await?;
+    let changed = diesel::update(
+        plugin_suites::table
+            .filter(plugin_suites::id.eq(suite_id))
+            .filter(plugin_suites::tenant_id.eq(tenant_id)),
+    )
+    .set((
+        plugin_suites::enabled.eq(enabled),
+        plugin_suites::updated_at.eq(diesel::dsl::now),
+    ))
+    .execute(conn)
+    .await?;
     if changed == 0 {
         return Err(AppError::BadRequest {
             message: format!("插件套件不存在: {suite_id}"),
@@ -413,12 +443,14 @@ pub async fn set_enabled(
 /// 自动回落到 Provider 原生流程。
 pub async fn delete_suite(
     conn: &mut AsyncPgConnection,
+    tenant_id: Uuid,
     suite_id: Uuid,
 ) -> AppResult<DeletedPluginSuite> {
     let deleted = conn
         .transaction::<DeletedPluginSuite, AppError, _>(async |conn| {
             let suite = plugin_suites::table
                 .filter(plugin_suites::id.eq(suite_id))
+                .filter(plugin_suites::tenant_id.eq(tenant_id))
                 .for_update()
                 .select(suite_select!())
                 .first::<PluginSuite>(&mut *conn)
@@ -644,14 +676,15 @@ fn summary_from_parts(
     PluginReleaseSummary {
         id: row.0,
         suite_id: row.1,
-        suite_name: row.2,
-        description: row.3,
-        provider: row.4,
-        suite_enabled: row.5,
-        version: row.6,
-        manifest_sha256: row.7,
+        tenant_id: row.2,
+        suite_name: row.3,
+        description: row.4,
+        provider: row.5,
+        suite_enabled: row.6,
+        version: row.7,
+        manifest_sha256: row.8,
         artifacts,
-        published_at: row.8,
+        published_at: row.9,
     }
 }
 
@@ -674,6 +707,7 @@ fn binding_from_summary(summary: PluginReleaseSummary) -> AppResult<PluginBindin
     Ok(PluginBinding {
         release_id: summary.id,
         suite_id: summary.suite_id,
+        tenant_id: summary.tenant_id,
         suite_name: summary.suite_name,
         provider: summary.provider,
         version: summary.version,

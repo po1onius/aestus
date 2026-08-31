@@ -1,11 +1,39 @@
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
+CREATE TABLE tenants (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL UNIQUE,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_by UUID NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    disabled_at TIMESTAMPTZ,
+    CHECK (char_length(name) BETWEEN 1 AND 128),
+    CHECK (octet_length(name) <= 512),
+    CHECK ((enabled AND disabled_at IS NULL) OR (NOT enabled AND disabled_at IS NOT NULL))
+);
+
+CREATE INDEX idx_tenants_enabled ON tenants (enabled);
+CREATE INDEX idx_tenants_created_at_id ON tenants (created_at DESC, id DESC);
+
+-- 租户码是平台管理员分发的明文注册码。删除记录即撤销租户码；同一个租户码可以在
+-- owner 产生后继续注册普通成员。项目禁止数据库外键，tenant_id 关联由应用事务维护。
+CREATE TABLE tenant_codes (
+    code TEXT PRIMARY KEY,
+    tenant_id UUID NOT NULL UNIQUE,
+    created_by UUID NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (code <> ''),
+    CHECK (octet_length(code) <= 128)
+);
+
 CREATE TABLE users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID,
     username TEXT NOT NULL,
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
-    role TEXT NOT NULL DEFAULT 'user',
+    role TEXT NOT NULL DEFAULT 'tenant_user',
     quota BIGINT NOT NULL DEFAULT 0 CHECK (quota >= 0 AND quota <= 9007199254740991),
     consumed_tokens BIGINT NOT NULL DEFAULT 0 CHECK (consumed_tokens >= 0),
     email_verified BOOLEAN NOT NULL DEFAULT FALSE,
@@ -15,16 +43,24 @@ CREATE TABLE users (
     disabled_at TIMESTAMPTZ,
     CHECK (char_length(username) BETWEEN 1 AND 32),
     CHECK (octet_length(username) <= 128),
-    CHECK (username !~ '[[:space:]@[:cntrl:]]')
+    CHECK (username !~ '[[:space:]@[:cntrl:]]'),
+    CHECK (role IN ('platform_admin', 'tenant_owner', 'tenant_user')),
+    CHECK (
+        (role = 'platform_admin' AND tenant_id IS NULL)
+        OR (role IN ('tenant_owner', 'tenant_user') AND tenant_id IS NOT NULL)
+    )
 );
 
 CREATE UNIQUE INDEX uq_users_username ON users (username);
 CREATE INDEX idx_users_role ON users (role);
+CREATE INDEX idx_users_tenant_id ON users (tenant_id);
+CREATE UNIQUE INDEX uq_users_tenant_owner ON users (tenant_id) WHERE role = 'tenant_owner';
 CREATE INDEX idx_users_enabled ON users (enabled);
 CREATE INDEX idx_users_created_at_id ON users (created_at DESC, id DESC);
 
 CREATE TABLE provider_groups (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL,
     provider TEXT NOT NULL,
     name TEXT NOT NULL,
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
@@ -36,8 +72,8 @@ CREATE TABLE provider_groups (
     CHECK ((enabled AND disabled_at IS NULL) OR (NOT enabled AND disabled_at IS NOT NULL))
 );
 
-CREATE UNIQUE INDEX uq_provider_groups_provider_name ON provider_groups (provider, name);
-CREATE INDEX idx_provider_groups_provider_enabled ON provider_groups (provider, enabled);
+CREATE UNIQUE INDEX uq_provider_groups_tenant_provider_name ON provider_groups (tenant_id, provider, name);
+CREATE INDEX idx_provider_groups_tenant_provider_enabled ON provider_groups (tenant_id, provider, enabled);
 
 -- 模型名是上游协议中的外部标识，当前没有独立生命周期，因此直接作为分组模型映射的
 -- 业务键。项目禁止数据库外键，分组创建及白名单整组替换必须由应用在事务中写入。
@@ -58,6 +94,7 @@ CREATE INDEX idx_provider_group_models_model_name ON provider_group_models (mode
 -- 项目统一不使用数据库外键，关联完整性由发布、绑定和请求鉴权路径显式校验。
 CREATE TABLE plugin_suites (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL,
     name TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     provider TEXT NOT NULL,
@@ -69,10 +106,10 @@ CREATE TABLE plugin_suites (
     CHECK (octet_length(name) <= 128),
     CHECK (octet_length(description) <= 1024),
     CHECK (provider IN ('gpt', 'claude')),
-    UNIQUE (provider, name)
+    UNIQUE (tenant_id, provider, name)
 );
 
-CREATE INDEX idx_plugin_suites_provider_enabled ON plugin_suites (provider, enabled);
+CREATE INDEX idx_plugin_suites_tenant_provider_enabled ON plugin_suites (tenant_id, provider, enabled);
 
 CREATE TABLE plugin_suite_releases (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -112,6 +149,7 @@ CREATE INDEX idx_plugin_suite_artifacts_release_id
 
 CREATE TABLE api_keys (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL,
     user_id UUID NOT NULL,
     group_id UUID NOT NULL,
     name TEXT NOT NULL,
@@ -125,6 +163,7 @@ CREATE TABLE api_keys (
 );
 
 CREATE INDEX idx_api_keys_user_id ON api_keys (user_id);
+CREATE INDEX idx_api_keys_tenant_id ON api_keys (tenant_id);
 CREATE INDEX idx_api_keys_group_id ON api_keys (group_id);
 CREATE INDEX idx_api_keys_enabled ON api_keys (enabled);
 CREATE INDEX idx_api_keys_plugin_release_id ON api_keys (plugin_release_id);
@@ -146,6 +185,7 @@ CREATE INDEX idx_api_key_models_model_name ON api_key_models (model_name);
 
 CREATE TABLE provider_accounts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL,
     provider TEXT NOT NULL,
     -- 上游资源可以先独立导入，之后再由创建分组或资源迁移操作绑定到至多一个分组。
     -- NULL 资源继续接受 maintenance 刷新，但不会发布到 Redis 可调度池。
@@ -180,6 +220,7 @@ CREATE TABLE provider_accounts (
 );
 
 CREATE INDEX idx_provider_accounts_provider_enabled_status ON provider_accounts (provider, enabled, status);
+CREATE INDEX idx_provider_accounts_tenant_provider_created_at_id ON provider_accounts (tenant_id, provider, created_at DESC, id DESC);
 CREATE INDEX idx_provider_accounts_group_id ON provider_accounts (group_id);
 CREATE INDEX idx_provider_accounts_provider_created_at_id ON provider_accounts (provider, created_at DESC, id DESC);
 CREATE INDEX idx_provider_accounts_refresh_due ON provider_accounts (provider, status, next_token_refresh_at);
@@ -189,11 +230,12 @@ CREATE INDEX idx_provider_accounts_quota_due ON provider_accounts (provider, quo
 -- 索引既不会把 Claude 字段提升到通用表结构，也能在多个 OAuth callback 并发入库时由
 -- PostgreSQL 原子拒绝重复账号；其他 provider（尤其允许账号 ID 重复的 GPT）不受影响。
 CREATE UNIQUE INDEX uq_provider_accounts_claude_account_uuid
-    ON provider_accounts ((specific ->> 'account_uuid'))
+    ON provider_accounts (tenant_id, (specific ->> 'account_uuid'))
     WHERE provider = 'claude' AND (specific ->> 'account_uuid') IS NOT NULL;
 
 CREATE TABLE provider_api_keys (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL,
     provider TEXT NOT NULL,
     -- 官方 Key 与 OAuth 账号使用相同的可选单分组归属语义。
     group_id UUID,
@@ -218,5 +260,6 @@ CREATE TABLE provider_api_keys (
 );
 
 CREATE INDEX idx_provider_api_keys_provider_created_at_id ON provider_api_keys (provider, created_at DESC, id DESC);
+CREATE INDEX idx_provider_api_keys_tenant_provider_created_at_id ON provider_api_keys (tenant_id, provider, created_at DESC, id DESC);
 CREATE INDEX idx_provider_api_keys_group_id ON provider_api_keys (group_id);
 CREATE INDEX idx_provider_api_keys_probe_due ON provider_api_keys (provider, next_probe_at) WHERE enabled AND next_probe_at IS NOT NULL;

@@ -32,6 +32,8 @@ pub(super) struct RequestLogRow {
     pub(super) route: String,
     pub(super) api_key_name: Option<String>,
     #[serde(with = "clickhouse::serde::uuid::option")]
+    pub(super) tenant_id: Option<Uuid>,
+    #[serde(with = "clickhouse::serde::uuid::option")]
     pub(super) user_id: Option<Uuid>,
     pub(super) username: Option<String>,
     #[serde(with = "clickhouse::serde::uuid::option")]
@@ -91,16 +93,17 @@ impl RequestLogRow {
         let extra = serde_json::to_string(&entry.extra)?;
         // 网关归属与 provider 请求检查是两个独立事实。请求体上传中断时只有前者，仍应
         // 写出 Key、用户和分组；鉴权前失败时两者都为空，保持现有匿名错误语义。
-        let (api_key_name, user_id, username, provider_group_id, provider_group_name) =
+        let (api_key_name, tenant_id, user_id, username, provider_group_id, provider_group_name) =
             match entry.gateway_attribution {
                 Some(attribution) => (
                     Some(attribution.api_key_name),
+                    Some(attribution.tenant_id),
                     Some(attribution.user_id),
                     Some(attribution.username),
                     Some(attribution.provider_group_id),
                     Some(attribution.provider_group_name),
                 ),
-                None => (None, None, None, None, None),
+                None => (None, None, None, None, None, None),
             };
         let (model, reasoning, service_tier, fast_mode, is_compaction) = match entry.inspection {
             Some(inspection) => (
@@ -118,6 +121,7 @@ impl RequestLogRow {
             provider: entry.provider,
             route: entry.route,
             api_key_name,
+            tenant_id,
             user_id,
             username,
             provider_group_id,

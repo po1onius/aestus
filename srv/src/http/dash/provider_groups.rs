@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    err::{AdminResult, AppResult},
+    err::{AdminResult, AppError, AppResult},
     http::dash::auth,
     provider::{
         claude::maintenance::ClaudeMaintenance,
@@ -74,7 +74,7 @@ pub fn router() -> Router<AppState> {
 
 async fn list_unassigned_resources(
     State(state): State<AppState>,
-    _admin: auth::AdminUser,
+    auth::AdminUser(owner): auth::AdminUser,
     Query(query): Query<GroupListQuery>,
 ) -> AdminResult<Json<Vec<UnassignedProviderResource>>> {
     let provider = query
@@ -86,24 +86,26 @@ async fn list_unassigned_resources(
             message: "provider 不能为空".to_owned(),
         })?;
     let mut conn = state.db_conn().await?;
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
     Ok(Json(
-        group::list_unassigned_resources(&mut conn, provider).await?,
+        group::list_unassigned_resources(&mut conn, tenant_id, provider).await?,
     ))
 }
 
 /// 分组名称不是凭证信息。普通用户创建网关 Key 时需要读取启用分组，因此这里使用
-/// CurrentUser；管理统计与所有写操作仍严格要求 AdminUser。
+/// CurrentUser；管理统计与所有写操作仍严格要求租户 owner。
 async fn list_group_options(
     State(state): State<AppState>,
-    _current_user: auth::CurrentUser,
+    auth::CurrentUser(current_user): auth::CurrentUser,
 ) -> AppResult<Json<Vec<ProviderGroupWithModels>>> {
+    let tenant_id = current_user.tenant_id.ok_or(AppError::Forbidden)?;
     let mut conn = state.db_conn().await?;
-    Ok(Json(group::list_enabled(&mut conn).await?))
+    Ok(Json(group::list_enabled(&mut conn, tenant_id).await?))
 }
 
 async fn list_groups(
     State(state): State<AppState>,
-    _admin: auth::AdminUser,
+    auth::AdminUser(owner): auth::AdminUser,
     Query(query): Query<GroupListQuery>,
 ) -> AdminResult<Json<Vec<ProviderGroupSummary>>> {
     let provider = query
@@ -112,17 +114,22 @@ async fn list_groups(
         .map(str::trim)
         .filter(|provider| !provider.is_empty());
     let mut conn = state.db_conn().await?;
-    Ok(Json(group::list_summaries(&mut conn, provider).await?))
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
+    Ok(Json(
+        group::list_summaries(&mut conn, tenant_id, provider).await?,
+    ))
 }
 
 async fn create_group(
     State(state): State<AppState>,
-    _admin: auth::AdminUser,
+    auth::AdminUser(owner): auth::AdminUser,
     Json(payload): Json<CreateGroupRequest>,
 ) -> AdminResult<Json<ProviderGroupWithModels>> {
     let mut conn = state.db_conn().await?;
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
     let created = group::create(
         &mut conn,
+        tenant_id,
         payload.provider,
         payload.name,
         payload.models,
@@ -152,45 +159,49 @@ async fn create_group(
 
 async fn rename_group(
     State(state): State<AppState>,
-    _admin: auth::AdminUser,
+    auth::AdminUser(owner): auth::AdminUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<RenameGroupRequest>,
 ) -> AdminResult<Json<ProviderGroupWithModels>> {
     let mut conn = state.db_conn().await?;
-    let group = group::rename(&mut conn, id, payload.name).await?;
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
+    let group = group::rename(&mut conn, tenant_id, id, payload.name).await?;
     Ok(Json(group::with_models(&mut conn, group).await?))
 }
 
 async fn update_group_enabled(
     State(state): State<AppState>,
-    _admin: auth::AdminUser,
+    auth::AdminUser(owner): auth::AdminUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateGroupEnabledRequest>,
 ) -> AdminResult<Json<ProviderGroupWithModels>> {
     let mut conn = state.db_conn().await?;
-    let group = group::update_enabled(&mut conn, id, payload.enabled).await?;
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
+    let group = group::update_enabled(&mut conn, tenant_id, id, payload.enabled).await?;
     Ok(Json(group::with_models(&mut conn, group).await?))
 }
 
 async fn update_group_models(
     State(state): State<AppState>,
-    _admin: auth::AdminUser,
+    auth::AdminUser(owner): auth::AdminUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateGroupModelsRequest>,
 ) -> AdminResult<Json<ProviderGroupWithModels>> {
     let mut conn = state.db_conn().await?;
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
     Ok(Json(
-        group::update_models(&mut conn, id, payload.models).await?,
+        group::update_models(&mut conn, tenant_id, id, payload.models).await?,
     ))
 }
 
 async fn delete_group(
     State(state): State<AppState>,
-    _admin: auth::AdminUser,
+    auth::AdminUser(owner): auth::AdminUser,
     Path(id): Path<Uuid>,
 ) -> AdminResult<Json<DeleteGroupResponse>> {
     let mut conn = state.db_conn().await?;
-    let deleted = group::delete(&mut conn, id).await?;
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
+    let deleted = group::delete(&mut conn, tenant_id, id).await?;
     drop(conn);
 
     let response = DeleteGroupResponse {

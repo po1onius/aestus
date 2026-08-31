@@ -4,6 +4,7 @@ CREATE TABLE IF NOT EXISTS gateway_request_logs
     provider LowCardinality(String),
     route LowCardinality(String),
     api_key_name Nullable(String),
+    tenant_id Nullable(UUID),
     user_id Nullable(UUID),
     username Nullable(String),
     provider_group_id Nullable(UUID),
@@ -26,9 +27,10 @@ CREATE TABLE IF NOT EXISTS gateway_request_logs
     total_tokens Int64,
     status LowCardinality(String),
     extra String,
-    -- 主表继续服务管理员全局时间线；轻量投影只保存 user_id 和 part offset，为普通用户
-    -- 的等值过滤提供独立稀疏索引，不复制 extra 等大字段。
-    PROJECTION by_user INDEX user_id TYPE basic
+    -- 主表继续服务平台管理员全局时间线；两个轻量投影分别为普通用户与租户 owner 的
+    -- 等值过滤提供独立稀疏索引，不复制 extra 等大字段。
+    PROJECTION by_user INDEX user_id TYPE basic,
+    PROJECTION by_tenant INDEX tenant_id TYPE basic
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(request_started_at)
@@ -43,6 +45,7 @@ TTL request_started_at + INTERVAL 30 DAY DELETE;
 CREATE TABLE IF NOT EXISTS gateway_request_usage_daily
 (
     usage_date Date,
+    tenant_id UUID,
     user_id UUID,
     provider LowCardinality(String),
     model LowCardinality(String),
@@ -69,15 +72,16 @@ ENGINE = SummingMergeTree((
     failed_count
 ))
 PARTITION BY toYYYYMM(usage_date)
--- 普通用户是更高频的读取范围，因此先按 user_id 排序；管理员扫描的也是已经大幅压缩的
--- 日聚合结果，不再读取请求级明细。
-ORDER BY (user_id, usage_date, provider, model, api_key_name);
+-- tenant_id 先隔离租户范围，租户内再按 user_id 排序；平台管理员扫描的也是已经大幅
+-- 压缩的日聚合结果，不再读取请求级明细。
+ORDER BY (tenant_id, user_id, usage_date, provider, model, api_key_name);
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS gateway_request_usage_daily_mv
 TO gateway_request_usage_daily
 AS
 SELECT
     usage_date,
+    assumeNotNull(tenant_id) AS tenant_id,
     assumeNotNull(user_id) AS user_id,
     provider,
     ifNull(model, '未记录') AS model,
@@ -93,9 +97,10 @@ SELECT
     countIf(status = 'failed') AS failed_count
 FROM gateway_request_logs
 -- 与现有 Dashboard 统计语义一致：鉴权前失败等未归属请求只保留明细，不进入用户用量。
-WHERE user_id IS NOT NULL
+WHERE tenant_id IS NOT NULL AND user_id IS NOT NULL
 GROUP BY
     usage_date,
+    tenant_id,
     user_id,
     provider,
     model,

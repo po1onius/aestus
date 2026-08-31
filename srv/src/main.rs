@@ -10,6 +10,7 @@ mod provider;
 mod request_body;
 mod request_event;
 mod state;
+mod tenant;
 mod user;
 mod worker;
 

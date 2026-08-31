@@ -91,7 +91,9 @@ export function UsersPage({
                       </div>
                     </td>
                     <td>
-                      <div className={cellMainClass}>{user.role}</div>
+                      <div className={cellMainClass}>
+                        {user.role === "tenant_owner" ? "租户 owner" : "普通用户"}
+                      </div>
                     </td>
                     <td>
                       <div className={cellMainClass}>{user.quota}</div>
@@ -122,7 +124,11 @@ export function UsersPage({
                         </button>
                         <button
                           className={buttonSmall}
-                          disabled={updatingId === user.id || user.id === currentUserId}
+                          disabled={
+                            updatingId === user.id ||
+                            user.id === currentUserId ||
+                            user.role !== "tenant_user"
+                          }
                           onClick={() => onToggleStatus(user)}
                         >
                           {user.enabled ? "禁用" : "启用"}

@@ -3,11 +3,15 @@ import type { DashboardPage, DashboardRoute, DashboardUser } from "../types";
 
 export function routesForUser(user: DashboardUser | null) {
   if (!user) {
-    return dashboardRoutes.filter((route) => !route.adminOnly);
+    return dashboardRoutes.filter((route) => !route.platformOnly && !route.ownerOnly);
   }
-  return user.role === "admin"
-    ? dashboardRoutes.filter((route) => !route.userOnly)
-    : dashboardRoutes.filter((route) => !route.adminOnly);
+  if (user.role === "platform_admin") {
+    return dashboardRoutes.filter((route) => route.platformOnly || (!route.ownerOnly && !route.tenantOnly));
+  }
+  if (user.role === "tenant_owner") {
+    return dashboardRoutes.filter((route) => !route.platformOnly);
+  }
+  return dashboardRoutes.filter((route) => !route.platformOnly && !route.ownerOnly);
 }
 
 export function pageFromPath(pathname: string, routes: DashboardRoute[]): DashboardPage {

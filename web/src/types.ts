@@ -1,6 +1,6 @@
 /** Dashboard 前后端共享响应模型。按领域集中导出，避免页面组件重复声明接口。 */
 export type AccountStatus = "valid" | "unauthorized" | "invalid" | string;
-export type UserRole = "admin" | "user" | string;
+export type UserRole = "platform_admin" | "tenant_owner" | "tenant_user" | string;
 export type RuntimeViewState =
   | "missing"
   | "ready"
@@ -9,6 +9,7 @@ export type RuntimeViewState =
   | "pending_probe"
   | "not_runtime";
 export type DashboardPage =
+  | "tenants"
   | "accounts"
   | "plugins"
   | "users"
@@ -68,12 +69,28 @@ export interface DashboardRoute {
   page: DashboardPage;
   path: string;
   label: string;
-  adminOnly?: boolean;
-  userOnly?: boolean;
+  platformOnly?: boolean;
+  ownerOnly?: boolean;
+  tenantOnly?: boolean;
+}
+
+export interface DashboardTenant {
+  id: string;
+  name: string;
+}
+
+export interface TenantSummary extends DashboardTenant {
+  enabled: boolean;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  disabled_at: string | null;
+  code: string | null;
 }
 
 export interface DashboardUser {
   id: string;
+  tenant_id: string | null;
   username: string;
   email: string;
   role: UserRole;
@@ -88,12 +105,14 @@ export interface DashboardUser {
 export interface AuthResponse {
   token: string;
   user: DashboardUser;
+  tenant: DashboardTenant | null;
   service_timezone: string;
   request_log_retention_days: number;
 }
 
 export interface MeResponse {
   user: DashboardUser;
+  tenant: DashboardTenant | null;
   service_timezone: string;
   request_log_retention_days: number;
 }

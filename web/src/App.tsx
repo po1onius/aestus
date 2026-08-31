@@ -65,6 +65,7 @@ import { AccountsPage } from "./pages/AccountsPage";
 import { ApiKeysPage } from "./pages/ApiKeysPage";
 import { PluginsPage } from "./pages/PluginsPage";
 import { RequestLogsPage } from "./pages/RequestLogsPage";
+import { TenantsPage } from "./pages/TenantsPage";
 import { UsersPage } from "./pages/UsersPage";
 import type {
   AccountImportMode,
@@ -73,6 +74,7 @@ import type {
   AuthResponse,
   ClaudeAccount,
   ConsumeRateLimitResetCreditResponse,
+  DashboardTenant,
   DashboardUser,
   DashboardTheme,
   DeleteApiKeyResponse,
@@ -127,6 +129,7 @@ export function App() {
   const [currentPath, setCurrentPath] = useState(() => normalizeDashboardPath(window.location.pathname));
   const [authToken, setAuthToken] = useState(() => localStorage.getItem(authTokenStorageKey));
   const [currentUser, setCurrentUser] = useState<DashboardUser | null>(null);
+  const [currentTenant, setCurrentTenant] = useState<DashboardTenant | null>(null);
   const [serviceTimezone, setServiceTimezone] = useState("UTC");
   const [requestLogRetentionDays, setRequestLogRetentionDays] = useState(30);
   const [theme, setTheme] = useState<DashboardTheme>(() =>
@@ -138,6 +141,7 @@ export function App() {
   const [loginIdentifier, setLoginIdentifier] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
   const [registerUsername, setRegisterUsername] = useState("");
+  const [registerTenantCode, setRegisterTenantCode] = useState("");
   const [registerEmail, setRegisterEmail] = useState("");
   const [registerPassword, setRegisterPassword] = useState("");
   const [registerCode, setRegisterCode] = useState("");
@@ -245,6 +249,7 @@ export function App() {
   const [selectedProviderGroupId, setSelectedProviderGroupId] = useState("");
   const [confirmationRequest, setConfirmationRequest] = useState<ConfirmationRequest | null>(null);
   const [confirmationSubmitting, setConfirmationSubmitting] = useState(false);
+  const [tenantRefreshSignal, setTenantRefreshSignal] = useState(0);
   const usageAutoLoadedKeyRef = useRef<string | null>(null);
   const usageRequestSequenceRef = useRef(0);
   const unassignedProviderResourcesRequestSequenceRef = useRef(0);
@@ -304,18 +309,24 @@ export function App() {
       return;
     }
 
-    if (currentUser.role === "admin") {
+    if (currentUser.role === "tenant_owner") {
       void loadAccounts({ gpt: 0, claude: 0, gptUpstreamKeys: 0, claudeUpstreamKeys: 0 });
       void loadUsers(0);
       void loadProviderGroups();
       void loadPlugins();
-    } else {
+      void loadApiKeys(0);
+      void loadPluginOptions();
+    } else if (currentUser.role === "tenant_user") {
       setLoading(false);
       setUsersLoading(false);
       void loadProviderGroupOptions();
+      void loadApiKeys(0);
+      void loadPluginOptions();
+    } else {
+      setLoading(false);
+      setUsersLoading(false);
+      setApiKeysLoading(false);
     }
-    void loadApiKeys(0);
-    void loadPluginOptions();
   }, [currentUser, authToken]);
 
   useEffect(() => {
@@ -367,6 +378,7 @@ export function App() {
         return;
       }
       setCurrentUser(data.user);
+      setCurrentTenant(data.tenant);
       setServiceTimezone(data.service_timezone);
       setRequestLogRetentionDays(data.request_log_retention_days);
       setRequestLogDate(todayInputValue(data.service_timezone));
@@ -388,6 +400,7 @@ export function App() {
     localStorage.setItem(authTokenStorageKey, data.token);
     setAuthToken(data.token);
     setCurrentUser(data.user);
+    setCurrentTenant(data.tenant);
     setServiceTimezone(data.service_timezone);
     setRequestLogRetentionDays(data.request_log_retention_days);
     setRequestLogDate(todayInputValue(data.service_timezone));
@@ -467,6 +480,7 @@ export function App() {
         method: "POST",
         body: JSON.stringify({
           username,
+          tenant_code: registerTenantCode.trim(),
           email: registerEmail.trim(),
           password: registerPassword,
           email_code: registerCode.trim(),
@@ -485,6 +499,7 @@ export function App() {
     localStorage.removeItem(authTokenStorageKey);
     setAuthToken(null);
     setCurrentUser(null);
+    setCurrentTenant(null);
     setServiceTimezone("UTC");
     setRequestLogRetentionDays(30);
     setRequestLogDate(todayInputValue("UTC"));
@@ -499,6 +514,7 @@ export function App() {
     localStorage.removeItem(authTokenStorageKey);
     setAuthToken(null);
     setCurrentUser(null);
+    setCurrentTenant(null);
     setServiceTimezone("UTC");
     setRequestLogRetentionDays(30);
     setRequestLogDate(todayInputValue("UTC"));
@@ -514,6 +530,7 @@ export function App() {
     setLoginIdentifier("");
     setLoginPassword("");
     setRegisterUsername("");
+    setRegisterTenantCode("");
     setRegisterEmail("");
     setRegisterPassword("");
     setRegisterCode("");
@@ -817,7 +834,7 @@ export function App() {
 
   async function loadPlugins() {
     const token = authToken;
-    if (!token || currentUser?.role !== "admin") {
+    if (!token || currentUser?.role !== "tenant_owner") {
       setPlugins([]);
       setPluginsLoading(false);
       return;
@@ -931,6 +948,10 @@ export function App() {
   }
 
   async function refreshActiveTab() {
+    if (activePage === "tenants") {
+      setTenantRefreshSignal((value) => value + 1);
+      return;
+    }
     if (activePage === "usage") {
       await loadUsage();
       return;
@@ -950,7 +971,7 @@ export function App() {
       await Promise.all([
         loadApiKeys(),
         loadPluginOptions(),
-        currentUser?.role === "admin" ? loadProviderGroups() : loadProviderGroupOptions(),
+        currentUser?.role === "tenant_owner" ? loadProviderGroups() : loadProviderGroupOptions(),
       ]);
       return;
     }
@@ -960,7 +981,7 @@ export function App() {
       return;
     }
 
-    if (currentUser?.role === "admin") {
+    if (currentUser?.role === "tenant_owner") {
       await Promise.all([loadAccounts(), loadProviderGroups()]);
     }
   }
@@ -1228,7 +1249,7 @@ export function App() {
     apiKeyIds: string[],
   ): Promise<boolean> {
     const token = authToken;
-    if (!token || currentUser?.role !== "admin") {
+    if (!token || currentUser?.role !== "tenant_owner") {
       return false;
     }
     if (utf8ByteLength(name) > 128) {
@@ -1281,7 +1302,7 @@ export function App() {
 
   async function renameProviderGroup(group: ProviderGroupSummary, name: string): Promise<boolean> {
     const token = authToken;
-    if (!token || currentUser?.role !== "admin") {
+    if (!token || currentUser?.role !== "tenant_owner") {
       return false;
     }
     if (utf8ByteLength(name) > 128) {
@@ -1308,7 +1329,7 @@ export function App() {
 
   async function toggleProviderGroupEnabled(group: ProviderGroupSummary): Promise<boolean> {
     const token = authToken;
-    if (!token || currentUser?.role !== "admin") {
+    if (!token || currentUser?.role !== "tenant_owner") {
       return false;
     }
 
@@ -1341,7 +1362,7 @@ export function App() {
 
   async function deleteProviderGroup(group: ProviderGroupSummary) {
     const token = authToken;
-    if (!token || currentUser?.role !== "admin") {
+    if (!token || currentUser?.role !== "tenant_owner") {
       return;
     }
 
@@ -1370,7 +1391,7 @@ export function App() {
     models: string[],
   ): Promise<boolean> {
     const token = authToken;
-    if (!token || currentUser?.role !== "admin") {
+    if (!token || currentUser?.role !== "tenant_owner") {
       return false;
     }
     if (models.length === 0 || models.length > 128) {
@@ -1648,7 +1669,7 @@ export function App() {
       setSelectedPluginReleaseId("");
       setSelectedProviderGroupId("");
       await loadApiKeys(0);
-      if (currentUser?.role === "admin") {
+      if (currentUser?.role === "tenant_owner") {
         await loadProviderGroups();
       }
       toast.success("API Key 已创建");
@@ -1861,7 +1882,7 @@ export function App() {
 
   async function deletePlugin(plugin: PluginReleaseSummary) {
     const token = authToken;
-    if (!token || currentUser?.role !== "admin") {
+    if (!token || currentUser?.role !== "tenant_owner") {
       return;
     }
 
@@ -1904,7 +1925,7 @@ export function App() {
         return;
       }
       setApiKeys((items) => items.map((item) => (item.id === updated.id ? updated : item)));
-      if (currentUser?.role === "admin") {
+      if (currentUser?.role === "tenant_owner") {
         await loadProviderGroups();
       }
       toast.success(apiKey.enabled ? "API Key 已禁用" : "API Key 已启用");
@@ -1948,7 +1969,7 @@ export function App() {
           : apiKeysPage.offset;
       await Promise.all([
         loadApiKeys(nextOffset),
-        currentUser?.role === "admin" ? loadProviderGroups() : Promise.resolve(),
+        currentUser?.role === "tenant_owner" ? loadProviderGroups() : Promise.resolve(),
       ]);
       toast.success("API Key 已删除");
     } catch (error) {
@@ -1995,7 +2016,7 @@ export function App() {
     event.preventDefault();
     const token = authToken;
     const target = requestOverrideTarget;
-    if (!token || currentUser?.role !== "admin" || !target) {
+    if (!token || currentUser?.role !== "tenant_owner" || !target) {
       return;
     }
 
@@ -2578,6 +2599,7 @@ export function App() {
         loginIdentifier={loginIdentifier}
         loginPassword={loginPassword}
         registerUsername={registerUsername}
+        registerTenantCode={registerTenantCode}
         registerEmail={registerEmail}
         registerPassword={registerPassword}
         registerCode={registerCode}
@@ -2585,6 +2607,7 @@ export function App() {
         onLoginIdentifierChange={setLoginIdentifier}
         onLoginPasswordChange={setLoginPassword}
         onRegisterUsernameChange={setRegisterUsername}
+        onRegisterTenantCodeChange={setRegisterTenantCode}
         onRegisterEmailChange={setRegisterEmail}
         onRegisterPasswordChange={setRegisterPassword}
         onRegisterCodeChange={setRegisterCode}
@@ -2601,6 +2624,7 @@ export function App() {
       activeRoute={activeRoute}
       routes={visibleRoutes}
       currentUser={currentUser}
+      tenant={currentTenant}
       theme={theme}
       refreshing={activePageLoading(
         activePage,
@@ -2813,7 +2837,9 @@ export function App() {
       onLogout={logout}
       onToggleTheme={() => setTheme((current) => (current === "light" ? "dark" : "light"))}
     >
-      {activePage === "usage" ? (
+      {activePage === "tenants" ? (
+        <TenantsPage token={authToken ?? ""} refreshSignal={tenantRefreshSignal} />
+      ) : activePage === "usage" ? (
         <Suspense
           fallback={
             <div className="flex min-h-64 items-center justify-center rounded-xl border border-slate-200 bg-white p-8 text-sm text-slate-500 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400">
@@ -2925,7 +2951,7 @@ export function App() {
       ) : (
         <RequestLogsPage
           logs={requestLogs}
-          showUsername={currentUser.role === "admin"}
+          showUsername={currentUser.role !== "tenant_user"}
           loading={requestLogsLoading}
           date={requestLogDate}
           minDate={shiftDateInputValue(

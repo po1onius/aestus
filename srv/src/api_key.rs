@@ -26,6 +26,7 @@ pub struct ApiKeyWithModels {
 /// 标识和名称，避免凭证意外进入日志系统。
 pub async fn create(
     conn: &mut AsyncPgConnection,
+    tenant_id: Uuid,
     user_id: Uuid,
     group_id: Uuid,
     name: String,
@@ -38,10 +39,12 @@ pub async fn create(
 
     let result = conn
         .transaction::<ApiKeyWithModels, AppError, _>(async |conn| {
-            let provider_group = group::require_enabled_for_write(&mut *conn, group_id).await?;
+            let provider_group =
+                group::require_enabled_for_write(&mut *conn, tenant_id, group_id).await?;
             if let Some(plugin_release_id) = plugin_release_id {
                 crate::plugin::sql::require_enabled_release_for_provider_write(
                     &mut *conn,
+                    tenant_id,
                     plugin_release_id,
                     &provider_group.provider,
                 )
@@ -51,6 +54,7 @@ pub async fn create(
             ensure_models_within_group(&allowed_models, &group_models, provider_group.id)?;
 
             let new_api_key = NewApiKey {
+                tenant_id,
                 user_id,
                 group_id,
                 name,
@@ -263,11 +267,11 @@ pub async fn update_models_for_user(
         .transaction::<ApiKey, AppError, _>(async |conn| {
             // 先读取不可变的分组归属，再统一按“分组 -> API Key”顺序加锁。分组删除会
             // 级联删除调用方 Key；固定锁序避免它与白名单更新形成死锁。
-            let group_id = dsl::api_keys
+            let (tenant_id, group_id) = dsl::api_keys
                 .filter(dsl::id.eq(id))
                 .filter(dsl::user_id.eq(user_id))
-                .select(dsl::group_id)
-                .first::<Uuid>(&mut *conn)
+                .select((dsl::tenant_id, dsl::group_id))
+                .first::<(Uuid, Uuid)>(&mut *conn)
                 .await
                 .map_err(|source| match source {
                     diesel::result::Error::NotFound => AppError::BadRequest {
@@ -277,7 +281,7 @@ pub async fn update_models_for_user(
                         message: source.to_string(),
                     },
                 })?;
-            group::require_for_update(&mut *conn, group_id).await?;
+            group::require_for_update_in_tenant(&mut *conn, tenant_id, group_id).await?;
 
             let current = dsl::api_keys
                 .filter(dsl::id.eq(id))
@@ -425,6 +429,7 @@ pub async fn update_plugin_for_user(
                     })?;
                 crate::plugin::sql::require_enabled_release_for_provider_write(
                     &mut *conn,
+                    current.tenant_id,
                     release_id,
                     &provider_group.provider,
                 )

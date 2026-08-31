@@ -28,6 +28,7 @@ interface AuthScreenProps {
   loginIdentifier: string;
   loginPassword: string;
   registerUsername: string;
+  registerTenantCode: string;
   registerEmail: string;
   registerPassword: string;
   registerCode: string;
@@ -35,6 +36,7 @@ interface AuthScreenProps {
   onLoginIdentifierChange: (value: string) => void;
   onLoginPasswordChange: (value: string) => void;
   onRegisterUsernameChange: (value: string) => void;
+  onRegisterTenantCodeChange: (value: string) => void;
   onRegisterEmailChange: (value: string) => void;
   onRegisterPasswordChange: (value: string) => void;
   onRegisterCodeChange: (value: string) => void;
@@ -130,6 +132,18 @@ export function AuthScreen(props: AuthScreenProps) {
           </form>
         ) : (
           <form className="grid gap-4" onSubmit={props.onRegister}>
+            <label className={fieldStack}>
+              <span className={fieldLabel}>租户码</span>
+              <input
+                className={inputClass}
+                value={props.registerTenantCode}
+                onChange={(event) => props.onRegisterTenantCodeChange(event.target.value)}
+                autoComplete="organization"
+                maxLength={128}
+                required
+              />
+              <p className={fieldHelp}>租户内首位注册用户将成为 owner，后续注册用户为普通成员。</p>
+            </label>
             <label className={fieldStack}>
               <span className={fieldLabel}>用户名</span>
               <input

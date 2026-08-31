@@ -93,6 +93,7 @@ async fn create_api_key(
 
     let api_key = api_key::create(
         &mut conn,
+        current_user.tenant_id.ok_or(AppError::Forbidden)?,
         current_user.id,
         payload.group_id,
         name,
@@ -101,7 +102,12 @@ async fn create_api_key(
     )
     .await?;
     let group = load_group(&mut conn, api_key.api_key.group_id).await?;
-    let plugin = load_plugin_summary(&mut conn, api_key.api_key.plugin_release_id).await?;
+    let plugin = load_plugin_summary(
+        &mut conn,
+        api_key.api_key.tenant_id,
+        api_key.api_key.plugin_release_id,
+    )
+    .await?;
 
     info!(api_key_id = %api_key.api_key.id, "管理端创建 API Key 成功");
 
@@ -129,13 +135,15 @@ async fn list_api_keys(
         .iter()
         .map(|item| item.api_key.group_id)
         .collect::<Vec<_>>();
-    let groups = group::find_by_ids(&mut conn, &group_ids).await?;
+    let tenant_id = current_user.tenant_id.ok_or(AppError::Forbidden)?;
+    let groups = group::find_by_ids(&mut conn, tenant_id, &group_ids).await?;
     let group_models = group::load_models_by_group_ids(&mut conn, &group_ids).await?;
     let plugin_release_ids = api_keys
         .iter()
         .filter_map(|item| item.api_key.plugin_release_id)
         .collect::<Vec<_>>();
-    let plugins = plugin::sql::find_summaries_by_ids(&mut conn, &plugin_release_ids).await?;
+    let plugins =
+        plugin::sql::find_summaries_by_ids(&mut conn, tenant_id, &plugin_release_ids).await?;
     let items = api_keys
         .into_iter()
         .map(|api_key| {
@@ -207,7 +215,12 @@ async fn update_api_key_enabled(
     let api_key =
         api_key::update_enabled_for_user(&mut conn, current_user.id, id, payload.enabled).await?;
     let group = load_group(&mut conn, api_key.api_key.group_id).await?;
-    let plugin = load_plugin_summary(&mut conn, api_key.api_key.plugin_release_id).await?;
+    let plugin = load_plugin_summary(
+        &mut conn,
+        api_key.api_key.tenant_id,
+        api_key.api_key.plugin_release_id,
+    )
+    .await?;
     info!(api_key_id = %api_key.api_key.id, user_id = %current_user.id, enabled = api_key.api_key.enabled, "管理端已修改 API Key 启用状态");
     Ok(no_store_json(ApiKeyResponse::from_parts(
         api_key, group, plugin,
@@ -225,7 +238,12 @@ async fn update_api_key_models(
         api_key::update_models_for_user(&mut conn, current_user.id, id, payload.allowed_models)
             .await?;
     let group = load_group(&mut conn, api_key.api_key.group_id).await?;
-    let plugin = load_plugin_summary(&mut conn, api_key.api_key.plugin_release_id).await?;
+    let plugin = load_plugin_summary(
+        &mut conn,
+        api_key.api_key.tenant_id,
+        api_key.api_key.plugin_release_id,
+    )
+    .await?;
     info!(api_key_id = %api_key.api_key.id, user_id = %current_user.id, model_count = api_key.allowed_models.len(), "管理端已修改 API Key 模型白名单");
     Ok(no_store_json(ApiKeyResponse::from_parts(
         api_key, group, plugin,
@@ -243,7 +261,12 @@ async fn update_api_key_plugin(
         api_key::update_plugin_for_user(&mut conn, current_user.id, id, payload.plugin_release_id)
             .await?;
     let group = load_group(&mut conn, api_key.api_key.group_id).await?;
-    let plugin = load_plugin_summary(&mut conn, api_key.api_key.plugin_release_id).await?;
+    let plugin = load_plugin_summary(
+        &mut conn,
+        api_key.api_key.tenant_id,
+        api_key.api_key.plugin_release_id,
+    )
+    .await?;
 
     info!(
         api_key_id = %api_key.api_key.id,
@@ -310,12 +333,13 @@ impl ApiKeyResponse {
 
 async fn load_plugin_summary(
     conn: &mut diesel_async::AsyncPgConnection,
+    tenant_id: Uuid,
     release_id: Option<Uuid>,
 ) -> AppResult<Option<PluginReleaseSummary>> {
     let Some(release_id) = release_id else {
         return Ok(None);
     };
-    plugin::sql::find_summaries_by_ids(conn, &[release_id])
+    plugin::sql::find_summaries_by_ids(conn, tenant_id, &[release_id])
         .await?
         .remove(&release_id)
         .ok_or_else(|| AppError::DbQuery {

@@ -51,8 +51,10 @@ async fn create_user(
     Json(payload): Json<CreateUserRequest>,
 ) -> AdminResult<Json<PublicUser>> {
     let mut conn = state.db_conn().await?;
-    let user = user::create_admin_managed_user(
+    let tenant_id = current_admin.tenant_id.ok_or(AppError::Forbidden)?;
+    let user = user::create_owner_managed_user(
         &mut conn,
+        tenant_id,
         payload.username,
         payload.email,
         payload.password,
@@ -66,7 +68,8 @@ async fn create_user(
         created_user_id = %user.id,
         created_username = %user.username,
         created_email = %user.email,
-        "管理员已通过 Dashboard 创建用户"
+        tenant_id = %tenant_id,
+        "租户 owner 已通过 Dashboard 创建用户"
     );
 
     Ok(Json(user.into()))
@@ -74,12 +77,13 @@ async fn create_user(
 
 async fn list_users(
     State(state): State<AppState>,
-    _admin: auth::AdminUser,
+    auth::AdminUser(owner): auth::AdminUser,
     Query(query): Query<ListPageQuery>,
 ) -> AdminResult<Json<ListPage<PublicUser>>> {
     let page = query.normalize()?;
     let mut conn = state.db_conn().await?;
-    let items = user::list(&mut conn, page.query_limit(), page.offset())
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
+    let items = user::list_by_tenant(&mut conn, tenant_id, page.query_limit(), page.offset())
         .await?
         .into_iter()
         .map(PublicUser::from)
@@ -90,12 +94,13 @@ async fn list_users(
 
 async fn update_user_quota(
     State(state): State<AppState>,
-    _admin: auth::AdminUser,
+    auth::AdminUser(owner): auth::AdminUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateUserQuotaRequest>,
 ) -> AdminResult<Json<PublicUser>> {
     let mut conn = state.db_conn().await?;
-    let user = user::update_quota(&mut conn, id, payload.quota).await?;
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
+    let user = user::update_quota_for_tenant(&mut conn, tenant_id, id, payload.quota).await?;
 
     Ok(Json(user.into()))
 }
@@ -106,15 +111,9 @@ async fn update_user_status(
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateUserStatusRequest>,
 ) -> AdminResult<Json<PublicUser>> {
-    if current_user.id == id && !payload.enabled {
-        return Err(AppError::BadRequest {
-            message: "不能禁用当前登录的 admin 用户".to_owned(),
-        }
-        .into());
-    }
-
     let mut conn = state.db_conn().await?;
-    let user = user::update_status(&mut conn, id, payload.enabled).await?;
+    let tenant_id = current_user.tenant_id.ok_or(AppError::Forbidden)?;
+    let user = user::update_status(&mut conn, tenant_id, id, payload.enabled).await?;
 
     Ok(Json(user.into()))
 }

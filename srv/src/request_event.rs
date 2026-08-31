@@ -51,6 +51,7 @@ pub struct UsageAttribution {
 /// ClickHouse 请求日志仍能保留已经确认的调用方归属。
 #[derive(Debug)]
 pub struct GatewayAuthDetails {
+    pub tenant_id: Uuid,
     pub api_key_id: Uuid,
     pub api_key_name: String,
     pub user_id: Uuid,

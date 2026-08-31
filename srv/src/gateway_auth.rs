@@ -10,6 +10,7 @@ use crate::{
     plugin::{self, model::PluginBinding},
     provider::group::{self, schema::provider_groups},
     state::AppState,
+    tenant,
 };
 
 // 四张表分别定义在不同领域模块中。项目不使用数据库外键，因此这里显式声明鉴权查询
@@ -27,6 +28,7 @@ const BEARER_PREFIX: &str = "Bearer ";
 #[derive(Queryable)]
 struct GatewayAuthRow {
     api_key_id: Uuid,
+    tenant_id: Uuid,
     api_key_name: String,
     api_key_enabled: bool,
     allowed_model: String,
@@ -46,6 +48,7 @@ struct GatewayAuthRow {
 /// 此处刻意不保留原始 API Key、用户密码哈希以及完整数据库模型，既减少热路径中的无效
 /// 数据传递，也避免敏感字段被下游模块误用或写入日志。
 pub struct GatewayAuth {
+    tenant_id: Uuid,
     api_key_id: Uuid,
     api_key_name: String,
     api_key_allowed_models: Vec<String>,
@@ -58,6 +61,10 @@ pub struct GatewayAuth {
 }
 
 impl GatewayAuth {
+    pub fn tenant_id(&self) -> Uuid {
+        self.tenant_id
+    }
+
     pub fn api_key_id(&self) -> Uuid {
         self.api_key_id
     }
@@ -120,11 +127,20 @@ pub async fn authenticate_gateway_key(
     // 启用且 Provider 匹配后再读取，避免无效凭证触发额外查询。
     let rows = api_keys::table
         .inner_join(api_key_models::table.on(api_key_models::api_key_id.eq(api_keys::id)))
-        .left_join(provider_groups::table.on(provider_groups::id.eq(api_keys::group_id)))
-        .left_join(users::table.on(users::id.eq(api_keys::user_id)))
+        .left_join(
+            provider_groups::table.on(provider_groups::id
+                .eq(api_keys::group_id)
+                .and(provider_groups::tenant_id.eq(api_keys::tenant_id))),
+        )
+        .left_join(
+            users::table.on(users::id
+                .eq(api_keys::user_id)
+                .and(users::tenant_id.eq(api_keys::tenant_id.nullable()))),
+        )
         .filter(api_keys::api_key.eq(provided_key))
         .select((
             api_keys::id,
+            api_keys::tenant_id,
             api_keys::name,
             api_keys::enabled,
             api_key_models::model_name,
@@ -163,6 +179,7 @@ pub async fn authenticate_gateway_key(
 
     let GatewayAuthRow {
         api_key_id,
+        tenant_id,
         api_key_name,
         api_key_enabled,
         allowed_model: _,
@@ -180,6 +197,15 @@ pub async fn authenticate_gateway_key(
     if !api_key_enabled {
         warn!(api_key_id = %api_key_id, api_key_name, "API Key 已禁用，拒绝请求");
         return Err(AppError::DisabledApiKey);
+    }
+
+    match tenant::require_enabled(&mut conn, tenant_id).await {
+        Ok(_) => {}
+        Err(AppError::Forbidden) => {
+            warn!(api_key_id = %api_key_id, tenant_id = %tenant_id, "API Key 所属租户不存在或已停用，拒绝请求");
+            return Err(AppError::InvalidApiKey);
+        }
+        Err(source) => return Err(source),
     }
 
     let (Some(group_provider), Some(group_name), Some(group_enabled)) =
@@ -259,7 +285,7 @@ pub async fn authenticate_gateway_key(
         match plugin_release_ref {
             None => None,
             Some(release_id) => Some(
-                plugin::sql::load_binding(&mut conn, release_id, &group_provider)
+                plugin::sql::load_binding(&mut conn, tenant_id, release_id, &group_provider)
                     .await
                     .map_err(|error| {
                         warn!(api_key_id = %api_key_id, plugin_release_id = %release_id, error = %error, "API Key 插件套件绑定不可用，拒绝请求");
@@ -288,6 +314,7 @@ pub async fn authenticate_gateway_key(
     );
 
     Ok(GatewayAuth {
+        tenant_id,
         api_key_id,
         api_key_name,
         api_key_allowed_models,

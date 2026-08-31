@@ -6,7 +6,7 @@ use axum::{
     routing::{delete, get, post, put},
 };
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -116,13 +116,15 @@ pub fn router() -> Router<AppState> {
 
 async fn create_oauth_authorization(
     State(state): State<AppState>,
-    _admin: dash_auth::AdminUser,
+    dash_auth::AdminUser(owner): dash_auth::AdminUser,
 ) -> AdminResult<Json<OauthAuthorizationResponse>> {
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
     let authorization = auth::create_authorization(&state)?;
     // OAuth 握手只在 Redis 保存 PKCE 临时参数；账号分组由 callback 创建请求单独决定。
     provider_oauth::create(
         &state,
         PROVIDER,
+        tenant_id,
         &authorization.state,
         authorization.pkce_verifier,
         authorization.redirect_uri.clone(),
@@ -140,7 +142,7 @@ async fn create_oauth_authorization(
 
 async fn complete_oauth_callback(
     State(state): State<AppState>,
-    _admin: dash_auth::AdminUser,
+    dash_auth::AdminUser(owner): dash_auth::AdminUser,
     Json(payload): Json<CompleteOauthRequest>,
 ) -> AdminResult<Json<ClaudeAccountResponse>> {
     payload.override_.validate()?;
@@ -158,6 +160,11 @@ async fn complete_oauth_callback(
         .ok_or_else(|| AppError::BadRequest {
             message: "Claude OAuth state 无效或已过期，请重新生成授权链接".to_owned(),
         })?;
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
+    if session.tenant_id != tenant_id {
+        warn!(owner_user_id = %owner.id, owner_tenant_id = %tenant_id, oauth_tenant_id = %session.tenant_id, "Claude OAuth 会话租户与当前 owner 不一致，拒绝消费");
+        return Err(AppError::Forbidden.into());
+    }
 
     let token = auth::exchange_code(
         &state,
@@ -172,6 +179,7 @@ async fn complete_oauth_callback(
     let mut conn = state.db_conn().await?;
     let account = account::create(
         &mut conn,
+        tenant_id,
         token.refresh_token,
         token.access_token,
         claude_maintenance::next_token_refresh_at(&state, token.access_token_expires_at),
@@ -194,12 +202,13 @@ async fn complete_oauth_callback(
 
 async fn list_accounts(
     State(state): State<AppState>,
-    _admin: dash_auth::AdminUser,
+    dash_auth::AdminUser(owner): dash_auth::AdminUser,
     Query(query): Query<ListPageQuery>,
 ) -> AdminResult<Json<ListPage<ClaudeAccountResponse>>> {
     let page = query.normalize()?;
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
     let snapshots = ProviderResourceService::<ClaudeMaintenance>::new(&state)
-        .list_accounts(page.query_limit(), page.offset())
+        .list_accounts(tenant_id, page.query_limit(), page.offset())
         .await?;
     let items = snapshots
         .into_iter()
@@ -210,37 +219,40 @@ async fn list_accounts(
 
 async fn update_account_enabled(
     State(state): State<AppState>,
-    _admin: dash_auth::AdminUser,
+    dash_auth::AdminUser(owner): dash_auth::AdminUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateEnabledRequest>,
 ) -> AdminResult<Json<ClaudeAccountResponse>> {
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
     let snapshot = ProviderResourceService::<ClaudeMaintenance>::new(&state)
-        .update_account_enabled(id, payload.enabled)
+        .update_account_enabled(tenant_id, id, payload.enabled)
         .await?;
     Ok(Json(ClaudeAccountResponse::from_snapshot(snapshot)?))
 }
 
 async fn update_account_override(
     State(state): State<AppState>,
-    _admin: dash_auth::AdminUser,
+    dash_auth::AdminUser(owner): dash_auth::AdminUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateOverrideRequest>,
 ) -> AdminResult<Json<ClaudeAccountResponse>> {
     payload.override_.validate()?;
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
     let snapshot = ProviderResourceService::<ClaudeMaintenance>::new(&state)
-        .update_account_override(id, payload.override_)
+        .update_account_override(tenant_id, id, payload.override_)
         .await?;
     Ok(Json(ClaudeAccountResponse::from_snapshot(snapshot)?))
 }
 
 async fn update_account_group(
     State(state): State<AppState>,
-    _admin: dash_auth::AdminUser,
+    dash_auth::AdminUser(owner): dash_auth::AdminUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<ProviderGroupRequest>,
 ) -> AdminResult<Json<ClaudeAccountResponse>> {
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
     let snapshot = ProviderResourceService::<ClaudeMaintenance>::new(&state)
-        .update_account_group(id, payload.group_id)
+        .update_account_group(tenant_id, id, payload.group_id)
         .await?;
     info!(
         claude_account_id = %snapshot.account.id,
@@ -252,11 +264,12 @@ async fn update_account_group(
 
 async fn delete_account(
     State(state): State<AppState>,
-    _admin: dash_auth::AdminUser,
+    dash_auth::AdminUser(owner): dash_auth::AdminUser,
     Path(id): Path<Uuid>,
 ) -> AdminResult<Json<DeleteClaudeAccountResponse>> {
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
     let deleted = ProviderResourceService::<ClaudeMaintenance>::new(&state)
-        .delete_account(id)
+        .delete_account(tenant_id, id)
         .await?;
     info!(
         claude_account_id = %deleted.id,
