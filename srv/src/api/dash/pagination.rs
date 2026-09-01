@@ -30,6 +30,10 @@ pub struct ListPage<T> {
 }
 
 impl ListPageQuery {
+    pub fn new(limit: Option<i64>, offset: Option<i64>) -> Self {
+        Self { limit, offset }
+    }
+
     pub fn normalize(self) -> AppResult<ListPageParams> {
         let limit = self.limit.unwrap_or(DEFAULT_LIST_PAGE_SIZE);
         let offset = self.offset.unwrap_or(0);

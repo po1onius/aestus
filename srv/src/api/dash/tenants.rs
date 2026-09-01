@@ -65,8 +65,8 @@ impl TenantResourceKind {
 #[derive(Debug, Deserialize)]
 struct ListTenantResourcesQuery {
     kind: TenantResourceKind,
-    #[serde(flatten)]
-    page: ListPageQuery,
+    limit: Option<i64>,
+    offset: Option<i64>,
 }
 
 /// 平台视角只返回资源审计所需字段，不复用租户 owner DTO，避免意外暴露凭证和可写配置。
@@ -132,7 +132,7 @@ async fn list_tenant_resources(
     Path(tenant_id): Path<Uuid>,
     Query(query): Query<ListTenantResourcesQuery>,
 ) -> AdminResult<PrivateJson<ListPage<TenantResourceResponse>>> {
-    let page = query.page.normalize()?;
+    let page = ListPageQuery::new(query.limit, query.offset).normalize()?;
     let mut conn = state.db_conn().await?;
     if tenant::find_by_id(&mut conn, tenant_id).await?.is_none() {
         return Err(AppError::BadRequest {
