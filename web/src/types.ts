@@ -88,6 +88,34 @@ export interface TenantSummary extends DashboardTenant {
   code: string | null;
 }
 
+export type TenantResourceKind = "account" | "official_api_key";
+
+interface TenantResourceBase {
+  id: string;
+  provider: string;
+  enabled: boolean;
+  status: AccountStatus;
+  inflight_count: number;
+}
+
+export interface TenantAccountResource extends TenantResourceBase {
+  resource_type: "account";
+  email: string | null;
+  plan: string;
+  status_reason: string | null;
+}
+
+export interface TenantOfficialApiKeyResource extends TenantResourceBase {
+  resource_type: "official_api_key";
+  base_url: string;
+  error: string | null;
+}
+
+export type TenantResource = TenantAccountResource | TenantOfficialApiKeyResource;
+
+export interface ListTenantResourcesResponse extends ListPageResponse<TenantResource> {
+}
+
 export interface DashboardUser {
   id: string;
   tenant_id: string | null;

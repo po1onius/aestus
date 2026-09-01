@@ -138,6 +138,26 @@ pub mod account {
             .map_err(db_error)
     }
 
+    /// 平台管理员按租户查看跨 provider 的账号资源；只读取一页，避免大租户一次加载全部凭证。
+    pub async fn list_page_by_tenant(
+        conn: &mut AsyncPgConnection,
+        tenant_id: Uuid,
+        limit: i64,
+        offset: i64,
+    ) -> AppResult<Vec<ProviderAccount>> {
+        use provider_accounts::dsl;
+
+        dsl::provider_accounts
+            .filter(dsl::tenant_id.eq(tenant_id))
+            .order((dsl::created_at.desc(), dsl::id.desc()))
+            .limit(limit)
+            .offset(offset)
+            .select(ProviderAccount::as_select())
+            .load(conn)
+            .await
+            .map_err(db_error)
+    }
+
     /// ticker 的唯一 token 刷新扫描入口。管理员关闭调度不会停止 OAuth 凭证维护；
     /// `invalid` 是 refresh token 已确认无效的终态，因此不会继续产生上游刷新请求。
     pub async fn list_due_token_refresh_ids_by_provider(
@@ -600,6 +620,26 @@ pub mod api_key {
         dsl::provider_api_keys
             .filter(dsl::tenant_id.eq(tenant_id))
             .filter(dsl::provider.eq(provider))
+            .order((dsl::created_at.desc(), dsl::id.desc()))
+            .limit(limit)
+            .offset(offset)
+            .select(ProviderApiKey::as_select())
+            .load(conn)
+            .await
+            .map_err(db_error)
+    }
+
+    /// 平台管理员按租户查看跨 provider 的官方 API Key；长期 Key 本身不会离开数据库层。
+    pub async fn list_page_by_tenant(
+        conn: &mut AsyncPgConnection,
+        tenant_id: Uuid,
+        limit: i64,
+        offset: i64,
+    ) -> AppResult<Vec<ProviderApiKey>> {
+        use provider_api_keys::dsl;
+
+        dsl::provider_api_keys
+            .filter(dsl::tenant_id.eq(tenant_id))
             .order((dsl::created_at.desc(), dsl::id.desc()))
             .limit(limit)
             .offset(offset)

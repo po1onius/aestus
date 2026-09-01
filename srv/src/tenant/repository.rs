@@ -153,6 +153,17 @@ pub async fn list(conn: &mut AsyncPgConnection) -> AppResult<Vec<TenantSummary>>
         .collect())
 }
 
+/// 平台管理员读取租户关联资源前只确认租户实体存在；停用租户的资源仍应可审计。
+pub async fn find_by_id(conn: &mut AsyncPgConnection, id: Uuid) -> AppResult<Option<Tenant>> {
+    schema::tenants::table
+        .filter(schema::tenants::id.eq(id))
+        .select(Tenant::as_select())
+        .first::<Tenant>(conn)
+        .await
+        .optional()
+        .map_err(db_error)
+}
+
 /// 用量统计只读取租户稳定标识和展示名称，避免平台概览读取租户码等无关字段。
 pub async fn list_usage_names(conn: &mut AsyncPgConnection) -> AppResult<Vec<(Uuid, String)>> {
     schema::tenants::table
