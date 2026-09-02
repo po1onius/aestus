@@ -176,7 +176,6 @@ export function ApiKeysPage({
                           );
                         })}
                       </div>
-                      <p className={cellNoteClass}>实际授权为 Key 与分组白名单的交集</p>
                     </td>
                     <td>
                       {apiKey.plugin ? (
