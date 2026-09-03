@@ -70,6 +70,13 @@ pub enum AppError {
     #[error("用户 token 额度已用尽")]
     UserQuotaExceeded,
 
+    #[error("用户在 {provider} provider 上的并发请求已达到上限: current={current}, limit={limit}")]
+    UserConcurrencyExceeded {
+        provider: String,
+        current: u32,
+        limit: u32,
+    },
+
     #[error("API Key 无权调用模型: {model}")]
     ModelNotAllowed { model: String },
 
@@ -171,7 +178,9 @@ impl AppError {
             AppError::MissingApiKey | AppError::InvalidApiKey | AppError::DisabledApiKey => {
                 StatusCode::UNAUTHORIZED
             }
-            AppError::UserQuotaExceeded => StatusCode::TOO_MANY_REQUESTS,
+            AppError::UserQuotaExceeded | AppError::UserConcurrencyExceeded { .. } => {
+                StatusCode::TOO_MANY_REQUESTS
+            }
             AppError::ModelNotAllowed { .. }
             | AppError::GatewayKeyProviderMismatch { .. }
             | AppError::GatewayKeyGroupUnavailable => StatusCode::FORBIDDEN,
@@ -207,6 +216,7 @@ impl AppError {
             AppError::InvalidApiKey => "invalid_api_key",
             AppError::DisabledApiKey => "disabled_api_key",
             AppError::UserQuotaExceeded => "user_quota_exceeded",
+            AppError::UserConcurrencyExceeded { .. } => "user_concurrency_exceeded",
             AppError::ModelNotAllowed { .. } => "model_not_allowed",
             AppError::GatewayKeyProviderMismatch { .. } => "gateway_key_provider_mismatch",
             AppError::GatewayKeyGroupUnavailable => "gateway_key_group_unavailable",

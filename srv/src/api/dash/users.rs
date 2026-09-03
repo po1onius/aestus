@@ -3,7 +3,7 @@ use axum::{
     extract::{Path, Query, State},
     routing::{get, put},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, Serialize};
 use tracing::info;
 use uuid::Uuid;
 
@@ -13,14 +13,52 @@ use crate::{
         pagination::{ListPage, ListPageQuery},
     },
     err::{AdminResult, AppError},
+    provider::{claude, gpt},
+    request::concurrency,
     state::AppState,
-    user::{self, PublicUser},
+    user::{self, PublicUser, User},
 };
+
+#[derive(Debug, Serialize)]
+struct CurrentConcurrencyResponse {
+    gpt: u32,
+    claude: u32,
+}
+
+/// owner 用户列表专用 DTO。通过 flatten 保持原有用户字段形状，同时不向登录态等复用
+/// `PublicUser` 的响应注入仅管理列表需要的 Redis 运行时状态。
+#[derive(Debug, Serialize)]
+struct UserListItemResponse {
+    #[serde(flatten)]
+    user: PublicUser,
+    current_concurrency: CurrentConcurrencyResponse,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UpdateUserQuotaRequest {
     quota: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateUserMaxConcurrencyRequest {
+    /// `null` 表示不限制并发，非空值必须位于 1..=10000。
+    max_concurrency: NullableMaxConcurrency,
+}
+
+/// 保留“字段必传、值允许为 null”的 API 语义；直接使用 `Option<i32>` 会让空对象也被
+/// 反序列化成“不限”，从而可能因客户端漏传字段而误清除已有上限。
+#[derive(Debug)]
+struct NullableMaxConcurrency(Option<i32>);
+
+impl<'de> Deserialize<'de> for NullableMaxConcurrency {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Option::<i32>::deserialize(deserializer).map(Self)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -42,6 +80,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_users).post(create_user))
         .route("/{id}/quota", put(update_user_quota))
+        .route("/{id}/max-concurrency", put(update_user_max_concurrency))
         .route("/{id}/status", put(update_user_status))
 }
 
@@ -79,17 +118,54 @@ async fn list_users(
     State(state): State<AppState>,
     auth::AdminUser(owner): auth::AdminUser,
     Query(query): Query<ListPageQuery>,
-) -> AdminResult<Json<ListPage<PublicUser>>> {
+) -> AdminResult<Json<ListPage<UserListItemResponse>>> {
     let page = query.normalize()?;
     let mut conn = state.db_conn().await?;
     let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
-    let items = user::list_by_tenant(&mut conn, tenant_id, page.query_limit(), page.offset())
-        .await?
+    let users =
+        user::list_by_tenant(&mut conn, tenant_id, page.query_limit(), page.offset()).await?;
+    drop(conn);
+
+    // 先完成分页截断，避免为仅用于判断 next_offset 的额外一行查询 Redis；随后按原 Vec
+    // 顺序组装 DTO，保持 PostgreSQL 用户列表的稳定排序。
+    let user_page = page.finish(users);
+    let user_ids = user_page
+        .items
+        .iter()
+        .map(|user| user.id)
+        .collect::<Vec<_>>();
+    let providers = [gpt::model::PROVIDER, claude::model::PROVIDER];
+    let current =
+        concurrency::active_counts_for_users(&state, tenant_id, &user_ids, &providers).await?;
+    let items = user_page
+        .items
         .into_iter()
-        .map(PublicUser::from)
+        .map(|user| {
+            let user_id = user.id;
+            UserListItemResponse {
+                user: PublicUser::from(user),
+                current_concurrency: CurrentConcurrencyResponse {
+                    gpt: current.count(user_id, gpt::model::PROVIDER),
+                    claude: current.count(user_id, claude::model::PROVIDER),
+                },
+            }
+        })
         .collect();
 
-    Ok(Json(page.finish(items)))
+    info!(
+        admin_user_id = %owner.id,
+        admin_username = %owner.username,
+        tenant_id = %tenant_id,
+        user_count = user_ids.len(),
+        "租户 owner 用户列表已附加 provider 实时并发"
+    );
+
+    Ok(Json(ListPage {
+        items,
+        offset: user_page.offset,
+        limit: user_page.limit,
+        next_offset: user_page.next_offset,
+    }))
 }
 
 async fn update_user_quota(
@@ -101,6 +177,37 @@ async fn update_user_quota(
     let mut conn = state.db_conn().await?;
     let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
     let user = user::update_quota_for_tenant(&mut conn, tenant_id, id, payload.quota).await?;
+
+    Ok(Json(user.into()))
+}
+
+async fn update_user_max_concurrency(
+    State(state): State<AppState>,
+    auth::AdminUser(owner): auth::AdminUser,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<UpdateUserMaxConcurrencyRequest>,
+) -> AdminResult<Json<PublicUser>> {
+    let mut conn = state.db_conn().await?;
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
+    let requested_max_concurrency = payload.max_concurrency.0;
+    let (user, previous_max_concurrency) = User::update_max_concurrency_for_tenant(
+        &mut conn,
+        tenant_id,
+        id,
+        requested_max_concurrency,
+    )
+    .await?;
+
+    info!(
+        admin_user_id = %owner.id,
+        admin_username = %owner.username,
+        tenant_id = %tenant_id,
+        target_user_id = %user.id,
+        target_username = %user.username,
+        previous_max_concurrency = ?previous_max_concurrency,
+        max_concurrency = ?user.max_concurrency,
+        "租户 owner 已通过 Dashboard 更新用户最大并发数"
+    );
 
     Ok(Json(user.into()))
 }

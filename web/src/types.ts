@@ -123,11 +123,19 @@ export interface DashboardUser {
   email: string;
   role: UserRole;
   quota: number;
+  max_concurrency: number | null;
   email_verified: boolean;
   enabled: boolean;
   created_at: string;
   updated_at: string;
   disabled_at: string | null;
+}
+
+export interface DashboardUserListItem extends DashboardUser {
+  current_concurrency: {
+    gpt: number;
+    claude: number;
+  };
 }
 
 export interface AuthResponse {
@@ -152,7 +160,7 @@ export interface ListPageResponse<T> {
   next_offset: number | null;
 }
 
-export interface ListUsersResponse extends ListPageResponse<DashboardUser> {
+export interface ListUsersResponse extends ListPageResponse<DashboardUserListItem> {
 }
 
 export interface GptAccountRuntime {

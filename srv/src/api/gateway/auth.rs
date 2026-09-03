@@ -43,6 +43,7 @@ struct GatewayAuthRow {
     username: Option<String>,
     user_enabled: Option<bool>,
     user_quota: Option<i64>,
+    user_max_concurrency: Option<i32>,
     plugin_release_ref: Option<Uuid>,
 }
 
@@ -58,6 +59,7 @@ pub struct GatewayAuth {
     group_allowed_models: Vec<String>,
     user_id: Uuid,
     username: String,
+    max_concurrency: Option<i32>,
     group_id: Uuid,
     group_name: String,
     plugin: Option<PluginBinding>,
@@ -82,6 +84,10 @@ impl GatewayAuth {
 
     pub fn username(&self) -> &str {
         &self.username
+    }
+
+    pub fn max_concurrency(&self) -> Option<i32> {
+        self.max_concurrency
     }
 
     pub fn group_id(&self) -> Uuid {
@@ -155,6 +161,7 @@ pub async fn authenticate_gateway_key(
             users::username.nullable(),
             users::enabled.nullable(),
             users::quota.nullable(),
+            users::max_concurrency.nullable(),
             api_keys::plugin_release_id,
         ))
         .load::<GatewayAuthRow>(&mut conn)
@@ -194,6 +201,7 @@ pub async fn authenticate_gateway_key(
         username,
         user_enabled,
         user_quota,
+        user_max_concurrency,
         plugin_release_ref,
     } = first;
 
@@ -309,6 +317,7 @@ pub async fn authenticate_gateway_key(
         provider_group_name = %group_name,
         provider = %group_provider,
         quota = user_quota,
+        max_concurrency = ?user_max_concurrency,
         plugin_release_id = ?plugin.as_ref().map(|binding| binding.release_id),
         plugin_artifact_count = plugin.as_ref().map_or(0, |binding| binding.artifacts.len()),
         api_key_model_count = api_key_allowed_models.len(),
@@ -324,6 +333,7 @@ pub async fn authenticate_gateway_key(
         group_allowed_models,
         user_id,
         username,
+        max_concurrency: user_max_concurrency,
         group_id,
         group_name,
         plugin,

@@ -88,6 +88,10 @@ impl ProviderVisibleError {
             AppError::UserQuotaExceeded => {
                 (ProviderVisibleErrorKind::RateLimit, "user_quota_exceeded")
             }
+            AppError::UserConcurrencyExceeded { .. } => (
+                ProviderVisibleErrorKind::RateLimit,
+                "user_concurrency_exceeded",
+            ),
             AppError::BadRequest { .. } => (
                 ProviderVisibleErrorKind::InvalidRequest,
                 "invalid_request_error",

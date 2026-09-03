@@ -1,5 +1,5 @@
 use diesel::prelude::*;
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 use tracing::info;
 use uuid::Uuid;
 
@@ -223,6 +223,80 @@ pub async fn update_quota_for_tenant(
         Err(source) => Err(AppError::DbQuery {
             message: source.to_string(),
         }),
+    }
+}
+
+impl User {
+    /// 更新租户内用户的并发上限，并返回更新后的用户与修改前的上限。
+    ///
+    /// 目标行在事务内加锁，确保调用方记录的 old/new 审计值与本次更新严格对应。`None`
+    /// 表示不限制并发，非空值必须位于数据库约束一致的 `1..=10000` 区间。
+    pub async fn update_max_concurrency_for_tenant(
+        conn: &mut AsyncPgConnection,
+        tenant_id: Uuid,
+        id: Uuid,
+        max_concurrency: Option<i32>,
+    ) -> AppResult<(Self, Option<i32>)> {
+        use self::users::dsl;
+
+        if max_concurrency.is_some_and(|value| !(1..=10_000).contains(&value)) {
+            return Err(AppError::BadRequest {
+                message: "用户最大并发数必须为 null 或 1 到 10000 之间的整数".to_owned(),
+            });
+        }
+
+        conn.transaction::<(Self, Option<i32>), AppError, _>(async move |conn| {
+            let existing = dsl::users
+                .filter(dsl::id.eq(id))
+                .filter(dsl::tenant_id.eq(tenant_id))
+                .for_update()
+                .select(Self::as_select())
+                .first::<Self>(conn)
+                .await;
+
+            let existing = match existing {
+                Ok(user) => user,
+                Err(diesel::result::Error::NotFound) => {
+                    return Err(AppError::BadRequest {
+                        message: format!("用户不存在: {id}"),
+                    });
+                }
+                Err(source) => {
+                    return Err(AppError::DbQuery {
+                        message: source.to_string(),
+                    });
+                }
+            };
+            let previous_max_concurrency = existing.max_concurrency;
+
+            let user = diesel::update(
+                dsl::users
+                    .filter(dsl::id.eq(id))
+                    .filter(dsl::tenant_id.eq(tenant_id)),
+            )
+            .set((
+                dsl::max_concurrency.eq(max_concurrency),
+                dsl::updated_at.eq(chrono::Utc::now()),
+            ))
+            .returning(Self::as_returning())
+            .get_result::<Self>(conn)
+            .await
+            .map_err(|source| AppError::DbQuery {
+                message: source.to_string(),
+            })?;
+
+            info!(
+                tenant_id = %tenant_id,
+                user_id = %user.id,
+                username = %user.username,
+                previous_max_concurrency = ?previous_max_concurrency,
+                max_concurrency = ?user.max_concurrency,
+                "用户最大并发数已更新"
+            );
+
+            Ok((user, previous_max_concurrency))
+        })
+        .await
     }
 }
 

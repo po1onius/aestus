@@ -36,6 +36,7 @@ CREATE TABLE users (
     role TEXT NOT NULL DEFAULT 'tenant_user',
     quota BIGINT NOT NULL DEFAULT 0 CHECK (quota >= 0 AND quota <= 9007199254740991),
     consumed_tokens BIGINT NOT NULL DEFAULT 0 CHECK (consumed_tokens >= 0),
+    max_concurrency INTEGER CHECK (max_concurrency IS NULL OR max_concurrency BETWEEN 1 AND 10000),
     email_verified BOOLEAN NOT NULL DEFAULT FALSE,
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),

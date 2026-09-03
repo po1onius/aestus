@@ -13,6 +13,7 @@ use crate::{
     },
     request::{
         body_cache,
+        concurrency::{self, AcquireResult},
         events::{
             GatewayAuthDetails, RequestEndResult, RequestEvent, RequestInspectionDetails,
             UsageAttribution,
@@ -25,10 +26,10 @@ use super::{auth, endpoint::EndpointDescriptor};
 
 /// 执行 provider 共用的请求生命周期。
 ///
-/// 固定顺序为：调用方 header 鉴权并发布网关归属、缓存原始 body、provider 检查元数据并
-/// 发布协议字段、model 授权、通用调度和重试、provider 响应处理、日志收尾。资源请求
-/// override 与认证注入位于 provider 的单次 attempt 内，且每次重试都从此处保存的原始
-/// 请求重新构造。
+/// 固定顺序为：调用方 header 鉴权并发布网关归属、按用户和 provider 做并发准入、缓存
+/// 原始 body、provider 检查元数据并发布协议字段、model 授权、通用调度和重试、provider
+/// 响应处理、日志收尾。资源请求 override 与认证注入位于 provider 的单次 attempt 内，
+/// 且每次重试都从此处保存的原始请求重新构造。
 pub(super) async fn execute_pipeline<P>(
     state: &AppState,
     endpoint: EndpointDescriptor,
@@ -78,99 +79,145 @@ where
                 provider_group_name: auth.group_name().to_owned(),
             },
         });
-    let (body, inspection_bytes) =
-        body_cache::cache_request_body(request, request_id, state.config().body_memory_limit_bytes)
-            .await?;
-
-    // 无论是否绑定插件，inspection 始终描述调用方提交的原始 provider 请求，并在资源
-    // 调度之前完成。插件是 admin 控制的上游请求改造能力，可以在后续 attempt 中静默
-    // 修改最终 header/body，但不接管用户模型授权、请求日志字段或会话粘性语义。
-    // Bytes clone 只增加引用计数；multipart adapter 可直接持有同一块完整请求体，避免
-    // 图片上传在调度前检查时额外复制几十 MiB。
-    let inspection = P::inspect_request(&headers, inspection_bytes.clone()).await?;
-    let model = inspection.requested_model;
-    let sticky_key = inspection.sticky_key;
-    let log_fields = inspection.log_fields;
-    state.request_events().emit(RequestEvent::RequestInspected {
-        request_id,
-        details: RequestInspectionDetails {
-            model: model.clone(),
-            log_fields: log_fields.clone(),
-        },
-    });
-    auth::authorize_gateway_payload(&auth, Some(&model))?;
-
-    // 只有插件 attempt 需要完整原始字节作为 Component 输入；原生路径在 inspection 完成
-    // 后立即释放这份额外 Bytes 句柄，后续继续通过 CachedBody 进行零污染重放。
-    let plugin_binding = auth.plugin().cloned();
-    let plugin_original_body = if plugin_binding.as_ref().is_some_and(|binding| {
-        binding
-            .artifact(crate::plugin::model::PluginSlot::Request)
-            .is_some()
-    }) {
-        Some(inspection_bytes)
-    } else {
-        drop(inspection_bytes);
-        None
-    };
-    info!(
-        request_id = %request_id,
-        provider = P::provider_name(),
-        method = "POST",
-        uri = %uri,
-        api_key_id = %auth.api_key_id(),
-        api_key_name = auth.api_key_name(),
-        user_id = %auth.user_id(),
-        username = auth.username(),
-        provider_group_id = %auth.group_id(),
-        provider_group_name = %auth.group_name(),
-        requested_model = %model,
-        request_header_count = headers.len(),
-        has_sticky_key = sticky_key.is_some(),
-        has_reasoning = log_fields.reasoning.is_some(),
-        service_tier = log_fields.service_tier.as_deref().unwrap_or("<none>"),
-        fast_mode = ?log_fields.fast_mode,
-        is_compaction = ?log_fields.is_compaction,
-        plugin_release_id = ?plugin_binding.as_ref().map(|binding| binding.release_id),
-        body_cache_request_id = %body.request_id(),
-        body_cache_storage = body.storage_kind(),
-        body_bytes = body.len(),
-        body_memory_limit_bytes = state.config().body_memory_limit_bytes,
-        "通用 gateway 预处理完成：原始请求已检查、模型已授权、请求体可重放"
-    );
-    let group_id = auth.group_id();
-    let usage_attribution = UsageAttribution {
-        user_id: auth.user_id(),
-        api_key_id: auth.api_key_id(),
-    };
-    proxy::execute::<P>(
+    // 用户并发槽位按 provider 独立登记，并覆盖从请求体上传到最终响应 body 结束的完整
+    // 生命周期。同一请求内部的上游重试发生在该 lease 内，不会重复占用用户并发。
+    let concurrency_lease = match concurrency::acquire(
         state,
-        ReplayableRequest {
-            request_id,
-            uri,
-            headers,
-            body,
-        },
-        group_id,
-        sticky_key,
-        usage_attribution,
-        plugin_binding,
-        plugin_original_body,
+        request_id,
+        auth.tenant_id(),
+        auth.user_id(),
+        P::provider_name(),
+        auth.max_concurrency(),
     )
-    .await
-    .map_err(|error| {
-        // `BadRequest` 在进入 proxy 之前只表示调用方 payload 校验失败；一旦已经完成
-        // inspect/authorize，后续同名错误只可能来自资源运行态、override 或 credential
-        // 构造。这里按阶段把这类歧义错误收口为内部 provider 故障，避免把资源配置细节
-        // 当成调用方参数错误返回。完整诊断仍会由 finish_pipeline 写入 tracing。
-        if let AppError::BadRequest { message } = error {
-            return AppError::ProviderUpstream {
+    .await?
+    {
+        AcquireResult::Acquired(lease) => lease,
+        AcquireResult::LimitExceeded { current, limit } => {
+            return Err(AppError::UserConcurrencyExceeded {
                 provider: P::provider_name().to_owned(),
-                message: format!("provider pipeline 内部请求构造失败: {message}"),
-            };
+                current,
+                limit,
+            });
         }
-        error
-    })
+    };
+    let execution: AppResult<Response<Body>> = async {
+        let (body, inspection_bytes) = body_cache::cache_request_body(
+            request,
+            request_id,
+            state.config().body_memory_limit_bytes,
+        )
+        .await?;
+
+        // 无论是否绑定插件，inspection 始终描述调用方提交的原始 provider 请求，并在资源
+        // 调度之前完成。插件是 admin 控制的上游请求改造能力，可以在后续 attempt 中静默
+        // 修改最终 header/body，但不接管用户模型授权、请求日志字段或会话粘性语义。
+        // Bytes clone 只增加引用计数；multipart adapter 可直接持有同一块完整请求体，避免
+        // 图片上传在调度前检查时额外复制几十 MiB。
+        let inspection = P::inspect_request(&headers, inspection_bytes.clone()).await?;
+        let model = inspection.requested_model;
+        let sticky_key = inspection.sticky_key;
+        let log_fields = inspection.log_fields;
+        state.request_events().emit(RequestEvent::RequestInspected {
+            request_id,
+            details: RequestInspectionDetails {
+                model: model.clone(),
+                log_fields: log_fields.clone(),
+            },
+        });
+        auth::authorize_gateway_payload(&auth, Some(&model))?;
+
+        // 只有插件 attempt 需要完整原始字节作为 Component 输入；原生路径在 inspection 完成
+        // 后立即释放这份额外 Bytes 句柄，后续继续通过 CachedBody 进行零污染重放。
+        let plugin_binding = auth.plugin().cloned();
+        let plugin_original_body = if plugin_binding.as_ref().is_some_and(|binding| {
+            binding
+                .artifact(crate::plugin::model::PluginSlot::Request)
+                .is_some()
+        }) {
+            Some(inspection_bytes)
+        } else {
+            drop(inspection_bytes);
+            None
+        };
+        info!(
+            request_id = %request_id,
+            provider = P::provider_name(),
+            method = "POST",
+            uri = %uri,
+            api_key_id = %auth.api_key_id(),
+            api_key_name = auth.api_key_name(),
+            user_id = %auth.user_id(),
+            username = auth.username(),
+            provider_group_id = %auth.group_id(),
+            provider_group_name = %auth.group_name(),
+            requested_model = %model,
+            request_header_count = headers.len(),
+            has_sticky_key = sticky_key.is_some(),
+            has_reasoning = log_fields.reasoning.is_some(),
+            service_tier = log_fields.service_tier.as_deref().unwrap_or("<none>"),
+            fast_mode = ?log_fields.fast_mode,
+            is_compaction = ?log_fields.is_compaction,
+            plugin_release_id = ?plugin_binding.as_ref().map(|binding| binding.release_id),
+            body_cache_request_id = %body.request_id(),
+            body_cache_storage = body.storage_kind(),
+            body_bytes = body.len(),
+            body_memory_limit_bytes = state.config().body_memory_limit_bytes,
+            "通用 gateway 预处理完成：原始请求已检查、模型已授权、请求体可重放"
+        );
+        let group_id = auth.group_id();
+        let usage_attribution = UsageAttribution {
+            user_id: auth.user_id(),
+            api_key_id: auth.api_key_id(),
+        };
+        let response = proxy::execute::<P>(
+            state,
+            ReplayableRequest {
+                request_id,
+                uri,
+                headers,
+                body,
+            },
+            group_id,
+            sticky_key,
+            usage_attribution,
+            plugin_binding,
+            plugin_original_body,
+        )
+        .await
+        .map_err(|error| {
+            // `BadRequest` 在进入 proxy 之前只表示调用方 payload 校验失败；一旦已经完成
+            // inspect/authorize，后续同名错误只可能来自资源运行态、override 或 credential
+            // 构造。这里按阶段把这类歧义错误收口为内部 provider 故障，避免把资源配置细节
+            // 当成调用方参数错误返回。完整诊断仍会由 finish_pipeline 写入 tracing。
+            if let AppError::BadRequest { message } = error {
+                return AppError::ProviderUpstream {
+                    provider: P::provider_name().to_owned(),
+                    message: format!("provider pipeline 内部请求构造失败: {message}"),
+                };
+            }
+            error
+        })?;
+
+        Ok(response)
+    }
+    .await;
+
+    match execution {
+        Ok(response) => Ok(concurrency::hold_response(response, concurrency_lease)),
+        Err(request_error) => {
+            if let Err(release_error) = concurrency_lease.release().await {
+                error!(
+                    request_id = %request_id,
+                    provider = P::provider_name(),
+                    request_error_code = request_error.code(),
+                    request_error = %request_error,
+                    release_error = %release_error,
+                    "provider pipeline 失败后同步释放用户并发 lease 失败；RAII guard 已提交兜底释放"
+                );
+            }
+            Err(request_error)
+        }
+    }
 }
 
 async fn finish_pipeline<P: ProviderProtocol>(

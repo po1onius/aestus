@@ -22,6 +22,7 @@ import {
   defaultGptClientId,
   gptAccountsPath,
   gptUpstreamApiKeysPath,
+  maxUserConcurrency,
   maxUserQuota,
   pluginsPath,
   providerGroupsPath,
@@ -51,6 +52,7 @@ import {
 } from "./features/plugins/PluginCreateDialog";
 import { PluginReleaseDialog } from "./features/plugins/PluginReleaseDialog";
 import { requestLogAutoLoadKey } from "./features/request-logs/utils";
+import { UserConcurrencyDialog } from "./features/users/UserConcurrencyDialog";
 import { UserCreateDialog } from "./features/users/UserCreateDialog";
 import { UserQuotaDialog } from "./features/users/UserQuotaDialog";
 import { errorMessageFrom, showErrorToast } from "./lib/errors";
@@ -76,6 +78,7 @@ import type {
   ConsumeRateLimitResetCreditResponse,
   DashboardTenant,
   DashboardUser,
+  DashboardUserListItem,
   DashboardTheme,
   DeleteApiKeyResponse,
   DeleteClaudeAccountResponse,
@@ -155,7 +158,7 @@ export function App() {
     useState<ProviderCredentialTab>("accounts");
   const [providerGroupsVisible, setProviderGroupsVisible] = useState(false);
   const [activeAccountProvider, setActiveAccountProvider] = useState<AccountProviderKey>("gpt");
-  const [users, setUsers] = useState<DashboardUser[]>([]);
+  const [users, setUsers] = useState<DashboardUserListItem[]>([]);
   const [accountQuotas, setAccountQuotas] = useState<Record<string, GptAccountQuotaResponse>>({});
   const [rateLimitResetTarget, setRateLimitResetTarget] = useState<GptAccount | null>(null);
   const [rateLimitResetResponse, setRateLimitResetResponse] =
@@ -231,6 +234,9 @@ export function App() {
   const [pluginReleaseTarget, setPluginReleaseTarget] = useState<PluginReleaseSummary | null>(null);
   const [userQuotaDialogUser, setUserQuotaDialogUser] = useState<DashboardUser | null>(null);
   const [userQuotaValue, setUserQuotaValue] = useState("");
+  const [userConcurrencyDialogUser, setUserConcurrencyDialogUser] =
+    useState<DashboardUser | null>(null);
+  const [userConcurrencyValue, setUserConcurrencyValue] = useState("");
   const [userCreateOpen, setUserCreateOpen] = useState(false);
   const [userCreateUsername, setUserCreateUsername] = useState("");
   const [userCreateEmail, setUserCreateEmail] = useState("");
@@ -1206,6 +1212,19 @@ export function App() {
     }
     setUserQuotaDialogUser(null);
     setUserQuotaValue("");
+  }
+
+  function openUserConcurrencyDialog(user: DashboardUser) {
+    setUserConcurrencyDialogUser(user);
+    setUserConcurrencyValue(user.max_concurrency?.toString() ?? "");
+  }
+
+  function closeUserConcurrencyDialog() {
+    if (userConcurrencyDialogUser && userUpdatingId === userConcurrencyDialogUser.id) {
+      return;
+    }
+    setUserConcurrencyDialogUser(null);
+    setUserConcurrencyValue("");
   }
 
   function closeUserCreateDialog() {
@@ -2485,7 +2504,9 @@ export function App() {
         method: "PUT",
         body: JSON.stringify({ quota }),
       }, authToken);
-      setUsers((items) => items.map((item) => (item.id === updated.id ? updated : item)));
+      setUsers((items) =>
+        items.map((item) => (item.id === updated.id ? { ...item, ...updated } : item)),
+      );
       if (currentUser?.id === updated.id) {
         setCurrentUser(updated);
       }
@@ -2494,6 +2515,50 @@ export function App() {
       toast.success("用户额度已更新");
     } catch (error) {
       showErrorToast("用户额度更新失败", error);
+    } finally {
+      setUserUpdatingId(null);
+    }
+  }
+
+  async function submitUserConcurrency(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!userConcurrencyDialogUser) {
+      return;
+    }
+
+    const normalizedValue = userConcurrencyValue.trim();
+    const maxConcurrency = normalizedValue === "" ? null : Number(normalizedValue);
+    if (
+      maxConcurrency !== null &&
+      (!Number.isSafeInteger(maxConcurrency) || maxConcurrency < 1 || maxConcurrency > maxUserConcurrency)
+    ) {
+      toast.error("用户并发上限更新失败", {
+        description: `并发上限必须留空，或填写 1 到 ${maxUserConcurrency} 之间的整数。`,
+      });
+      return;
+    }
+
+    setUserUpdatingId(userConcurrencyDialogUser.id);
+    try {
+      const updated = await requestJson<DashboardUser>(
+        `${usersPath}/${userConcurrencyDialogUser.id}/max-concurrency`,
+        {
+          method: "PUT",
+          body: JSON.stringify({ max_concurrency: maxConcurrency }),
+        },
+        authToken,
+      );
+      setUsers((items) =>
+        items.map((item) => (item.id === updated.id ? { ...item, ...updated } : item)),
+      );
+      if (currentUser?.id === updated.id) {
+        setCurrentUser(updated);
+      }
+      setUserConcurrencyDialogUser(null);
+      setUserConcurrencyValue("");
+      toast.success("用户并发上限已更新");
+    } catch (error) {
+      showErrorToast("用户并发上限更新失败", error);
     } finally {
       setUserUpdatingId(null);
     }
@@ -2553,7 +2618,9 @@ export function App() {
         method: "PUT",
         body: JSON.stringify({ enabled: !user.enabled }),
       }, authToken);
-      setUsers((items) => items.map((item) => (item.id === updated.id ? updated : item)));
+      setUsers((items) =>
+        items.map((item) => (item.id === updated.id ? { ...item, ...updated } : item)),
+      );
       toast.success(updated.enabled ? "用户已启用" : "用户已禁用");
     } catch (error) {
       showErrorToast("用户状态更新失败", error);
@@ -2804,6 +2871,18 @@ export function App() {
               onClose={closeUserQuotaDialog}
             />
           )}
+          {userConcurrencyDialogUser && activePage === "users" && (
+            <UserConcurrencyDialog
+              key="user-concurrency"
+              user={userConcurrencyDialogUser}
+              value={userConcurrencyValue}
+              maxValue={maxUserConcurrency}
+              saving={userUpdatingId === userConcurrencyDialogUser.id}
+              onValueChange={setUserConcurrencyValue}
+              onSubmit={submitUserConcurrency}
+              onClose={closeUserConcurrencyDialog}
+            />
+          )}
           {userCreateOpen && activePage === "users" && (
             <UserCreateDialog
               key="user-create"
@@ -2929,6 +3008,7 @@ export function App() {
           nextOffset={usersPage.nextOffset}
           onAdd={() => setUserCreateOpen(true)}
           onOpenQuota={openUserQuotaDialog}
+          onOpenConcurrency={openUserConcurrencyDialog}
           onToggleStatus={updateUserStatus}
           onPageChange={loadUsers}
         />

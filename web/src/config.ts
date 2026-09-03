@@ -35,6 +35,7 @@ export const themeStorageKey = "aestus_dashboard_theme";
 export const requestLogPageSize = 100;
 export const dashboardListPageSize = 100;
 export const maxUserQuota = Number.MAX_SAFE_INTEGER;
+export const maxUserConcurrency = 10_000;
 export const defaultGptClientId = "app_EMoamEEZ73f0CkXaXp7hrann";
 
 export const dashboardRoutes: DashboardRoute[] = [

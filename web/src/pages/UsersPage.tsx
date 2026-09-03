@@ -1,4 +1,4 @@
-import { Gauge, Loader2, Plus, UserCog } from "lucide-react";
+import { Activity, Gauge, Loader2, Plus, UserCog } from "lucide-react";
 import { ListPager } from "../components/ListPager";
 import { StatusBadge } from "../components/StatusBadge";
 import { formatDateTime } from "../lib/format";
@@ -19,10 +19,10 @@ import {
   tableClass,
   tableScrollClass,
 } from "../lib/ui";
-import type { DashboardUser } from "../types";
+import type { DashboardUser, DashboardUserListItem } from "../types";
 
 interface UsersPageProps {
-  users: DashboardUser[];
+  users: DashboardUserListItem[];
   loading: boolean;
   updatingId: string | null;
   currentUserId: string;
@@ -31,6 +31,7 @@ interface UsersPageProps {
   nextOffset: number | null;
   onAdd: () => void;
   onOpenQuota: (user: DashboardUser) => void;
+  onOpenConcurrency: (user: DashboardUser) => void;
   onToggleStatus: (user: DashboardUser) => void;
   onPageChange: (offset: number) => void;
 }
@@ -45,6 +46,7 @@ export function UsersPage({
   nextOffset,
   onAdd,
   onOpenQuota,
+  onOpenConcurrency,
   onToggleStatus,
   onPageChange,
 }: UsersPageProps) {
@@ -70,12 +72,13 @@ export function UsersPage({
           </div>
         ) : (
           <div className={tableScrollClass}>
-            <table className={`${tableClass} min-w-[64rem]`}>
+            <table className={`${tableClass} min-w-[72rem]`}>
               <thead>
                 <tr>
                   <th>用户</th>
                   <th>角色</th>
                   <th>Token 额度</th>
+                  <th>Provider 并发</th>
                   <th>状态</th>
                   <th>更新</th>
                   <th>操作</th>
@@ -97,6 +100,16 @@ export function UsersPage({
                     </td>
                     <td>
                       <div className={cellMainClass}>{user.quota}</div>
+                    </td>
+                    <td>
+                      <div className={entryStackClass}>
+                        <span className={cellMainClass}>
+                          GPT：{user.current_concurrency.gpt} / {user.max_concurrency ?? "不限"}
+                        </span>
+                        <span className={cellNoteClass}>
+                          Claude：{user.current_concurrency.claude} / {user.max_concurrency ?? "不限"}
+                        </span>
+                      </div>
                     </td>
                     <td>
                       <StatusBadge status={user.enabled ? "active" : "disabled"} />
@@ -121,6 +134,18 @@ export function UsersPage({
                             <Gauge size={14} />
                           )}
                           改额度
+                        </button>
+                        <button
+                          className={buttonSmall}
+                          disabled={updatingId === user.id}
+                          onClick={() => onOpenConcurrency(user)}
+                        >
+                          {updatingId === user.id ? (
+                            <Loader2 className={spinnerClass} size={14} />
+                          ) : (
+                            <Activity size={14} />
+                          )}
+                          改并发
                         </button>
                         <button
                           className={buttonSmall}
