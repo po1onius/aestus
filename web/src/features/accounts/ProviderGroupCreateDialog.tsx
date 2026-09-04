@@ -92,12 +92,7 @@ export function ProviderGroupCreateDialog({
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const normalizedName = name.trim();
-    if (
-      !normalizedName ||
-      confirmedModels.length === 0 ||
-      selectedResourceIds.length === 0 ||
-      saving
-    ) {
+    if (!normalizedName || confirmedModels.length === 0 || saving) {
       return;
     }
     const accountIds = accountResources
@@ -115,7 +110,7 @@ export function ProviderGroupCreateDialog({
     <Modal
       titleId="providerGroupCreateTitle"
       title={`添加 ${providerLabel} 分组`}
-      description="配置限制模型，并选择至少一个当前尚未分组的账号或官方 API Key。"
+      description="配置限制模型；也可以选择当前尚未分组的账号或官方 API Key 作为初始资源。"
       closeDisabled={saving}
       onClose={onClose}
     >
@@ -195,9 +190,9 @@ export function ProviderGroupCreateDialog({
         </div>
         <div className={fieldStack}>
           <span className={fieldLabel}>
-            初始资源<span className={requiredMark}>*</span>
+            初始资源
             <span className="ml-2 font-normal text-slate-500 dark:text-slate-400">
-              已选 {selectedResourceIds.length}
+              可选 · 已选 {selectedResourceIds.length}
             </span>
           </span>
           {resourcesLoading ? (
@@ -207,7 +202,7 @@ export function ProviderGroupCreateDialog({
             </div>
           ) : resources.length === 0 ? (
             <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300">
-              当前没有未分组资源，请先导入账号或官方 API Key。
+              当前没有未分组资源，可以先创建空分组，之后再分配账号或官方 API Key。
             </div>
           ) : (
             <div className="grid max-h-64 gap-3 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-slate-950/70">
@@ -230,17 +225,15 @@ export function ProviderGroupCreateDialog({
             </div>
           )}
           <span className={fieldHelp}>
-            资源一次只能属于一个分组；已分组资源可在资源列表中迁移或设为未分组。
+            可以不选择初始资源；资源一次只能属于一个分组，之后可在资源列表中迁移或设为未分组。
           </span>
         </div>
         <button
           className={`${buttonPrimary} w-full`}
           disabled={
             saving ||
-            resourcesLoading ||
             !name.trim() ||
-            confirmedModels.length === 0 ||
-            selectedResourceIds.length === 0
+            confirmedModels.length === 0
           }
         >
           {saving ? <Loader2 className={spinnerClass} size={18} /> : <Plus size={18} />}

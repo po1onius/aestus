@@ -60,7 +60,7 @@ export function requestLogErrorKind(log: RequestLogRecord) {
 export function requestLogDetail(log: RequestLogRecord) {
   const errorResponse = requestLogErrorResponse(log);
   if (errorResponse) {
-    return errorBodySummary(errorResponse) || "错误响应已记录";
+    return fullErrorBody(errorResponse) || "错误响应已记录";
   }
 
   const terminationKind = requestLogTerminationKind(log);
@@ -83,8 +83,8 @@ export function requestLogDetail(log: RequestLogRecord) {
     return `请求生命周期终止：${terminationKind}`;
   }
 
-  const extraSummary = compactExtra(log.extra);
-  return extraSummary || "无扩展信息";
+  const extraDetail = fullExtra(log.extra);
+  return extraDetail || "无扩展信息";
 }
 
 /**
@@ -113,29 +113,20 @@ export function requestLogEffort(log: RequestLogRecord): string | null {
   return normalized || null;
 }
 
-function errorBodySummary(errorResponse: RequestLogErrorResponse) {
+function fullErrorBody(errorResponse: RequestLogErrorResponse) {
   const body = stringFromUnknown(errorResponse.body).trim();
   if (!body) {
     return "";
   }
 
-  const parsed = parseJsonRecord(body);
-  if (parsed) {
-    const error = isRecord(parsed.error) ? parsed.error : parsed;
-    const code = stringFromUnknown(error.code);
-    const message = stringFromUnknown(error.message);
-    if (code && message) {
-      return truncateText(`${code}: ${message}`, 220);
-    }
-    if (message) {
-      return truncateText(message, 220);
-    }
+  try {
+    return JSON.stringify(JSON.parse(body), null, 2);
+  } catch {
+    return body;
   }
-
-  return truncateText(body, 220);
 }
 
-function compactExtra(extra: Record<string, unknown>) {
+function fullExtra(extra: Record<string, unknown>) {
   const payload = Object.fromEntries(
     Object.entries(extra).filter(
       ([key, value]) =>
@@ -146,7 +137,7 @@ function compactExtra(extra: Record<string, unknown>) {
     return "";
   }
 
-  return truncateText(JSON.stringify(payload), 220);
+  return JSON.stringify(payload, null, 2);
 }
 
 function parseJsonRecord(value: string): Record<string, unknown> | null {
@@ -184,8 +175,4 @@ function numberFromUnknown(value: unknown) {
     return Number.isFinite(parsed) ? parsed : null;
   }
   return null;
-}
-
-function truncateText(value: string, maxLength: number) {
-  return value.length > maxLength ? `${value.slice(0, maxLength - 1)}...` : value;
 }

@@ -1303,10 +1303,6 @@ export function App() {
       toast.error("Provider 分组创建失败", { description: "至少需要配置一个限制模型。" });
       return false;
     }
-    if (accountIds.length === 0 && apiKeyIds.length === 0) {
-      toast.error("Provider 分组创建失败", { description: "至少需要选择一个未分组资源。" });
-      return false;
-    }
     if (models.length > 128 || models.some((model) => utf8ByteLength(model) > 256)) {
       toast.error("Provider 分组创建失败", {
         description: "限制模型最多 128 项，每个模型名最多 256 字节。",

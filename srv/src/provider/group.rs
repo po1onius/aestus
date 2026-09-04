@@ -130,8 +130,8 @@ pub struct UnassignedProviderResource {
     pub detail: String,
 }
 
-/// 分组和资源归属在同一 PostgreSQL 事务中提交；HTTP 层随后使用返回的完整资源快照
-/// 更新 Redis runtime，不需要再次查询或猜测本次实际占用了哪些记录。
+/// 分组和可选的初始资源归属在同一 PostgreSQL 事务中提交；HTTP 层随后使用返回的完整
+/// 资源快照更新 Redis runtime，不需要再次查询或猜测本次实际占用了哪些记录。
 pub struct CreatedProviderGroup {
     pub group: ProviderGroupWithModels,
     pub accounts: Vec<ProviderAccount>,
@@ -524,11 +524,6 @@ pub async fn create(
     let models = normalize_models(models)?;
     let account_ids = account_ids.into_iter().collect::<BTreeSet<_>>();
     let api_key_ids = api_key_ids.into_iter().collect::<BTreeSet<_>>();
-    if account_ids.is_empty() && api_key_ids.is_empty() {
-        return Err(AppError::BadRequest {
-            message: "创建 Provider 分组时至少要选择一个未分组账号或官方 API Key".to_owned(),
-        });
-    }
 
     let (group, accounts, api_keys) = conn
         .transaction::<
@@ -626,7 +621,7 @@ pub async fn create(
             Ok((group, accounts, api_keys))
         })
         .await?;
-    info!(provider, provider_group_id = %group.id, provider_group_name = %group.name, model_count = models.len(), allowed_models = ?models, account_count = accounts.len(), upstream_api_key_count = api_keys.len(), "Provider 分组、模型映射及初始资源归属创建成功");
+    info!(provider, provider_group_id = %group.id, provider_group_name = %group.name, model_count = models.len(), allowed_models = ?models, account_count = accounts.len(), upstream_api_key_count = api_keys.len(), empty_group = accounts.is_empty() && api_keys.is_empty(), "Provider 分组、模型映射及可选初始资源归属创建成功");
     Ok(CreatedProviderGroup {
         group: ProviderGroupWithModels {
             group,

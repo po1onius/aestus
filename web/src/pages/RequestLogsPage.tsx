@@ -1,26 +1,15 @@
 import { ChevronLeft, ChevronRight, Loader2, ScrollText } from "lucide-react";
+import { AnimatePresence } from "motion/react";
+import { useState, type KeyboardEvent } from "react";
 import { DatePickerInput } from "../components/DatePickerInput";
 import { StatusBadge } from "../components/StatusBadge";
-import {
-  requestLogDetail,
-  requestLogEffort,
-  requestLogErrorKind,
-  requestLogFastMode,
-  statusLabel,
-  statusTone,
-} from "../features/request-logs/utils";
-import {
-  firstTokenDurationMs,
-  formatDateTimeWithMilliseconds,
-  formatDuration,
-} from "../lib/format";
+import { RequestLogDetailDialog } from "../features/request-logs/RequestLogDetailDialog";
+import { requestLogEffort, requestLogFastMode, statusTone } from "../features/request-logs/utils";
+import { firstTokenDurationMs, formatDuration } from "../lib/format";
 import {
   cellMainClass,
-  cellNoteClass,
-  cellWrapClass,
   cx,
   emptyStateClass,
-  entryStackClass,
   entryTitleClass,
   iconButton,
   panelClass,
@@ -62,6 +51,16 @@ export function RequestLogsPage({
   onPreviousPage,
   onNextPage,
 }: RequestLogsPageProps) {
+  const [selectedLog, setSelectedLog] = useState<RequestLogRecord | null>(null);
+
+  function handleLogKeyDown(event: KeyboardEvent<HTMLTableRowElement>, log: RequestLogRecord) {
+    if (event.key !== "Enter" && event.key !== " ") {
+      return;
+    }
+    event.preventDefault();
+    setSelectedLog(log);
+  }
+
   return (
     <section className="min-h-0 min-w-0 flex-1">
       <div className={`${panelClass} flex min-h-0 flex-col overflow-hidden lg:h-full`}>
@@ -124,75 +123,65 @@ export function RequestLogsPage({
           </div>
         ) : (
           <div className="min-h-0 w-full flex-1 overflow-auto overscroll-contain">
-            <table className={`${tableClass} min-w-[90rem] [&_th]:sticky [&_th]:top-0 [&_th]:z-10`}>
+            <table className={`${tableClass} min-w-[76rem] [&_th]:sticky [&_th]:top-0 [&_th]:z-10`}>
+              <colgroup>
+                <col className="w-[20%]" />
+                <col className="w-[18%]" />
+                <col className="w-[13%]" />
+                <col className="w-[10%]" />
+                <col className="w-[10%]" />
+                <col className="w-[18%]" />
+                <col className="w-[11%]" />
+              </colgroup>
               <thead>
                 <tr>
                   <th>请求</th>
                   <th>模型</th>
                   <th>请求参数</th>
+                  <th>强度</th>
                   <th>状态</th>
-                  <th>时间</th>
+                  <th>首/总</th>
                   <th>Token</th>
-                  <th>详情</th>
                 </tr>
               </thead>
               <tbody>
                 {logs.map((log) => (
-                  <tr key={log.request_id}>
+                  <tr
+                    key={log.request_id}
+                    className="cursor-pointer transition-colors hover:[&>td]:bg-indigo-50/60 focus-visible:outline-none focus-visible:[&>td]:bg-indigo-50 focus-visible:[&>td]:ring-2 focus-visible:[&>td]:ring-inset focus-visible:[&>td]:ring-indigo-600/30 dark:hover:[&>td]:bg-indigo-950/25 dark:focus-visible:[&>td]:bg-indigo-950/40 dark:focus-visible:[&>td]:ring-indigo-400/35"
+                    role="button"
+                    tabIndex={0}
+                    title="点击查看请求详情"
+                    aria-label={`查看请求 ${log.request_id} 的详情`}
+                    onClick={() => setSelectedLog(log)}
+                    onKeyDown={(event) => handleLogKeyDown(event, log)}
+                  >
                     <td>
-                      <div className={entryStackClass}>
-                        <strong className={entryTitleClass}>{log.route}</strong>
-                        <span className={cellNoteClass}>provider: {log.provider}</span>
-                        {showUsername && <span className={cellNoteClass}>user: {log.username || "未记录"}</span>}
-                        {log.provider_group_name && (
-                          <span className={cellNoteClass} title={log.provider_group_id || undefined}>
-                            group: {log.provider_group_name}
-                          </span>
-                        )}
-                        <span className={cellNoteClass}>{log.request_id}</span>
-                        {log.api_key_name && <span className={cellNoteClass}>key : {log.api_key_name}</span>}
-                      </div>
+                      <strong className={`${entryTitleClass} block`} title={log.route}>
+                        {log.route}
+                      </strong>
                     </td>
                     <td>
-                      <div className={cellMainClass}>{log.model || "未记录"}</div>
+                      <div className={cellMainClass} title={log.model || undefined}>
+                        {log.model || "未记录"}
+                      </div>
                     </td>
                     <td>
                       <div className={cellMainClass}>
                         fast mode: {formatFastMode(requestLogFastMode(log))}
                       </div>
-                      <p className={cellNoteClass}>
-                        effort: {requestLogEffort(log) || "未记录"}
-                      </p>
-                      {/* false 表示普通请求、null 表示该协议没有压缩分类，两者都不占用展示空间。 */}
-                      {log.is_compaction === true && (
-                        <p className="truncate text-xs font-medium leading-5 text-orange-600 dark:text-orange-400">
-                          压缩
-                        </p>
-                      )}
+                    </td>
+                    <td>
+                      <div className={cellMainClass}>{requestLogEffort(log) || "未记录"}</div>
                     </td>
                     <td>
                       <StatusBadge status={statusTone(log)} />
-                      <p className={cellNoteClass}>{statusLabel(log)}</p>
-                      {requestLogErrorKind(log) && (
-                        <p className={cellNoteClass}>kind: {requestLogErrorKind(log)}</p>
-                      )}
                     </td>
                     <td>
-                      <RequestTimeCell log={log} timezone={timezone} />
+                      <RequestTimeCell log={log} />
                     </td>
                     <td>
                       <div className={cellMainClass}>{log.total_tokens}</div>
-                      <p className={cellNoteClass}>in {log.input_tokens}</p>
-                      <p className={cellNoteClass}>out {log.output_tokens}</p>
-                      {log.cached_input_tokens > 0 && (
-                        <p className={cellNoteClass}>cached {log.cached_input_tokens}</p>
-                      )}
-                      {log.reasoning_output_tokens > 0 && (
-                        <p className={cellNoteClass}>reasoning {log.reasoning_output_tokens}</p>
-                      )}
-                    </td>
-                    <td>
-                      <div className={cellWrapClass}>{requestLogDetail(log)}</div>
                     </td>
                   </tr>
                 ))}
@@ -201,6 +190,16 @@ export function RequestLogsPage({
           </div>
         )}
       </div>
+      <AnimatePresence>
+        {selectedLog && (
+          <RequestLogDetailDialog
+            log={selectedLog}
+            showUsername={showUsername}
+            timezone={timezone}
+            onClose={() => setSelectedLog(null)}
+          />
+        )}
+      </AnimatePresence>
     </section>
   );
 }
@@ -212,7 +211,7 @@ function formatFastMode(fastMode: boolean | null) {
   return fastMode ? "开启" : "关闭";
 }
 
-function RequestTimeCell({ log, timezone }: { log: RequestLogRecord; timezone: string }) {
+function RequestTimeCell({ log }: { log: RequestLogRecord }) {
   const firstTokenMs = firstTokenDurationMs(log);
   const tone = firstTokenDurationTone(firstTokenMs);
   const firstTokenClassName = cx(
@@ -227,13 +226,11 @@ function RequestTimeCell({ log, timezone }: { log: RequestLogRecord; timezone: s
   );
 
   return (
-    <>
-      <div className={firstTokenClassName}>首字：{formatDuration(firstTokenMs)}</div>
-      <p className={cellNoteClass}>总耗时：{formatDuration(log.duration_ms)}</p>
-      <p className={cellNoteClass}>
-        开始：{formatDateTimeWithMilliseconds(log.request_started_at, timezone)}
-      </p>
-    </>
+    <div className="truncate whitespace-nowrap text-sm font-medium leading-5 text-slate-800 dark:text-slate-200">
+      <span className={firstTokenClassName}>{formatDuration(firstTokenMs)}</span>
+      <span className="text-slate-400 dark:text-slate-500"> / </span>
+      <span>{formatDuration(log.duration_ms)}</span>
+    </div>
   );
 }
 
