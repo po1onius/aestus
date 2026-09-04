@@ -1,26 +1,17 @@
 use axum::http::{HeaderMap, header::AUTHORIZATION};
-use diesel::prelude::*;
+use diesel::{
+    OptionalExtension,
+    sql_types::{Array, BigInt, Bool, Integer, Nullable, Text, Uuid as SqlUuid},
+};
 use diesel_async::RunQueryDsl;
 use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
     err::{AppError, AppResult},
-    gateway_key::schema::{api_key_models, api_keys},
     plugin::{self, model::PluginBinding},
-    provider::group::{self, schema::provider_groups},
     state::AppState,
-    tenant,
-    user::{group_access::schema::tenant_user_group_grants, schema::users},
 };
-
-// 四张表分别定义在不同领域模块中。项目不使用数据库外键，因此这里显式声明鉴权查询
-// 需要组合的表；关联条件则全部写在下方查询的 `ON` 子句里。
-diesel::allow_tables_to_appear_in_same_query!(api_keys, provider_groups);
-diesel::allow_tables_to_appear_in_same_query!(api_key_models, provider_groups);
-diesel::allow_tables_to_appear_in_same_query!(users, provider_groups);
-diesel::allow_tables_to_appear_in_same_query!(api_keys, users);
-diesel::allow_tables_to_appear_in_same_query!(api_key_models, users);
 
 const BEARER_PREFIX: &str = "Bearer ";
 
@@ -28,23 +19,45 @@ const BEARER_PREFIX: &str = "Bearer ";
 ///
 /// Provider 分组和用户使用可空列承接 `LEFT JOIN` 结果。由于数据库不建立外键，API Key
 /// 可能因异常数据指向不存在的记录；保留空值能让鉴权逻辑明确记录是哪一段关系失效。
-#[derive(Queryable)]
+#[derive(diesel::QueryableByName)]
 struct GatewayAuthRow {
+    #[diesel(sql_type = SqlUuid)]
     api_key_id: Uuid,
+    #[diesel(sql_type = SqlUuid)]
     tenant_id: Uuid,
+    #[diesel(sql_type = Text)]
     api_key_name: String,
+    #[diesel(sql_type = Bool)]
     api_key_enabled: bool,
-    allowed_model: String,
+    #[diesel(sql_type = Array<Text>)]
+    api_key_allowed_models: Vec<String>,
+    #[diesel(sql_type = SqlUuid)]
     group_id: Uuid,
+    #[diesel(sql_type = SqlUuid)]
     user_id: Uuid,
+    #[diesel(sql_type = Nullable<Bool>)]
+    tenant_enabled: Option<bool>,
+    #[diesel(sql_type = Nullable<Text>)]
     group_provider: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
     group_name: Option<String>,
+    #[diesel(sql_type = Nullable<Bool>)]
     group_enabled: Option<bool>,
+    #[diesel(sql_type = Array<Text>)]
+    group_allowed_models: Vec<String>,
+    #[diesel(sql_type = Nullable<Text>)]
     username: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
     user_role: Option<String>,
+    #[diesel(sql_type = Nullable<Bool>)]
     user_enabled: Option<bool>,
+    #[diesel(sql_type = Nullable<BigInt>)]
     user_quota: Option<i64>,
+    #[diesel(sql_type = Nullable<Integer>)]
     user_max_concurrency: Option<i32>,
+    #[diesel(sql_type = Bool)]
+    group_granted: bool,
+    #[diesel(sql_type = Nullable<SqlUuid>)]
     plugin_release_ref: Option<Uuid>,
 }
 
@@ -131,95 +144,102 @@ pub async fn authenticate_gateway_key(
     let provided_key = extract_gateway_key(headers)?;
     let mut conn = state.db_conn().await?;
 
-    // 分组和用户使用 LEFT JOIN：没有数据库外键兜底时，可以区分“Key 不存在”和
-    // “Key 存在但分组/用户关联丢失”，便于从日志定位数据一致性问题。
-    // API Key 模型白名单逐行存储，随基础身份查询一次读出；分组模型在确认分组存在、
-    // 启用且 Provider 匹配后再读取，避免无效凭证触发额外查询。
-    let rows = api_keys::table
-        .inner_join(api_key_models::table.on(api_key_models::api_key_id.eq(api_keys::id)))
-        .left_join(
-            provider_groups::table.on(provider_groups::id
-                .eq(api_keys::group_id)
-                .and(provider_groups::tenant_id.eq(api_keys::tenant_id))),
-        )
-        .left_join(
-            users::table.on(users::id
-                .eq(api_keys::user_id)
-                .and(users::tenant_id.eq(api_keys::tenant_id.nullable()))),
-        )
-        .filter(api_keys::api_key.eq(provided_key))
-        .select((
-            api_keys::id,
-            api_keys::tenant_id,
-            api_keys::name,
-            api_keys::enabled,
-            api_key_models::model_name,
-            api_keys::group_id,
-            api_keys::user_id,
-            provider_groups::provider.nullable(),
-            provider_groups::name.nullable(),
-            provider_groups::enabled.nullable(),
-            users::username.nullable(),
-            users::role.nullable(),
-            users::enabled.nullable(),
-            users::quota.nullable(),
-            users::max_concurrency.nullable(),
-            api_keys::plugin_release_id,
-        ))
-        .load::<GatewayAuthRow>(&mut conn)
-        .await;
-
-    let mut rows = match rows {
-        Ok(rows) if !rows.is_empty() => rows,
-        Ok(_) | Err(diesel::result::Error::NotFound) => {
-            warn!("API Key 未匹配到记录，拒绝请求");
-            return Err(AppError::InvalidApiKey);
-        }
-        Err(source) => {
-            return Err(AppError::DbQuery {
-                message: source.to_string(),
-            });
-        }
+    // 两层模型白名单使用相关 ARRAY 子查询，避免直接连接两张逐行映射表产生最多
+    // 128×128 行笛卡尔积。租户状态和普通用户分组授权也进入同一个 statement snapshot，
+    // 使一次请求的全部基础鉴权事实通过单次 PostgreSQL 往返读取。
+    let row = diesel::sql_query(
+        "SELECT \
+             gateway_key.id AS api_key_id, \
+             gateway_key.tenant_id, \
+             gateway_key.name AS api_key_name, \
+             gateway_key.enabled AS api_key_enabled, \
+             ARRAY( \
+                 SELECT key_model.model_name \
+                 FROM api_key_models AS key_model \
+                 WHERE key_model.api_key_id = gateway_key.id \
+                 ORDER BY key_model.model_name \
+             ) AS api_key_allowed_models, \
+             gateway_key.group_id, \
+             gateway_key.user_id, \
+             tenant.enabled AS tenant_enabled, \
+             provider_group.provider AS group_provider, \
+             provider_group.name AS group_name, \
+             provider_group.enabled AS group_enabled, \
+             ARRAY( \
+                 SELECT group_model.model_name \
+                 FROM provider_group_models AS group_model \
+                 WHERE group_model.group_id = gateway_key.group_id \
+                 ORDER BY group_model.model_name \
+             ) AS group_allowed_models, \
+             gateway_user.username, \
+             gateway_user.role AS user_role, \
+             gateway_user.enabled AS user_enabled, \
+             gateway_user.quota AS user_quota, \
+             gateway_user.max_concurrency AS user_max_concurrency, \
+             EXISTS ( \
+                 SELECT 1 \
+                 FROM tenant_user_group_grants AS group_grant \
+                 WHERE group_grant.tenant_id = gateway_key.tenant_id \
+                   AND group_grant.user_id = gateway_key.user_id \
+                   AND group_grant.group_id = gateway_key.group_id \
+             ) AS group_granted, \
+             gateway_key.plugin_release_id AS plugin_release_ref \
+         FROM api_keys AS gateway_key \
+         LEFT JOIN tenants AS tenant \
+           ON tenant.id = gateway_key.tenant_id \
+         LEFT JOIN provider_groups AS provider_group \
+           ON provider_group.id = gateway_key.group_id \
+          AND provider_group.tenant_id = gateway_key.tenant_id \
+         LEFT JOIN users AS gateway_user \
+           ON gateway_user.id = gateway_key.user_id \
+          AND gateway_user.tenant_id = gateway_key.tenant_id \
+         WHERE gateway_key.api_key = $1 \
+         LIMIT 1",
+    )
+    .bind::<Text, _>(provided_key)
+    .get_result::<GatewayAuthRow>(&mut conn)
+    .await
+    .optional()
+    .map_err(|source| AppError::DbQuery {
+        message: source.to_string(),
+    })?;
+    let Some(row) = row else {
+        warn!("API Key 未匹配到记录，拒绝请求");
+        return Err(AppError::InvalidApiKey);
     };
-    let first = rows.swap_remove(0);
-    let mut api_key_allowed_models = rows
-        .into_iter()
-        .map(|row| row.allowed_model)
-        .collect::<Vec<_>>();
-    api_key_allowed_models.push(first.allowed_model.clone());
-    api_key_allowed_models.sort_unstable();
-
     let GatewayAuthRow {
         api_key_id,
         tenant_id,
         api_key_name,
         api_key_enabled,
-        allowed_model: _,
+        api_key_allowed_models,
         group_id,
         user_id,
+        tenant_enabled,
         group_provider,
         group_name,
         group_enabled,
+        group_allowed_models,
         username,
         user_role,
         user_enabled,
         user_quota,
         user_max_concurrency,
+        group_granted,
         plugin_release_ref,
-    } = first;
+    } = row;
 
     if !api_key_enabled {
         warn!(api_key_id = %api_key_id, api_key_name, "API Key 已禁用，拒绝请求");
         return Err(AppError::DisabledApiKey);
     }
-
-    match tenant::require_enabled(&mut conn, tenant_id).await {
-        Ok(_) => {}
-        Err(AppError::Forbidden) => {
-            warn!(api_key_id = %api_key_id, tenant_id = %tenant_id, "API Key 所属租户不存在或已停用，拒绝请求");
-            return Err(AppError::InvalidApiKey);
-        }
-        Err(source) => return Err(source),
+    if api_key_allowed_models.is_empty() {
+        warn!(api_key_id = %api_key_id, api_key_name, "API Key 模型白名单为空，拒绝请求");
+        return Err(AppError::InvalidApiKey);
+    }
+    if tenant_enabled != Some(true) {
+        warn!(api_key_id = %api_key_id, tenant_id = %tenant_id, "API Key 所属租户不存在或已停用，拒绝请求");
+        return Err(AppError::InvalidApiKey);
     }
 
     let (Some(group_provider), Some(group_name), Some(group_enabled)) =
@@ -252,10 +272,6 @@ pub async fn authenticate_gateway_key(
         });
     }
 
-    // 分组模型独立逐行存储。若直接与 Key 模型连接，最多会产生 128×128 行笛卡尔积；
-    // 因此在基础身份与分组状态通过后追加一次小查询，以有界成本取得第二层授权集合。
-    let group_allowed_models = group::load_model_names(&mut conn, group_id).await?;
-
     let (Some(username), Some(user_role), Some(user_enabled), Some(user_quota)) =
         (username, user_role, user_enabled, user_quota)
     else {
@@ -279,18 +295,6 @@ pub async fn authenticate_gateway_key(
     }
 
     if user_role == crate::user::USER_ROLE_TENANT_USER {
-        let group_granted = tenant_user_group_grants::table
-            .filter(tenant_user_group_grants::tenant_id.eq(tenant_id))
-            .filter(tenant_user_group_grants::user_id.eq(user_id))
-            .filter(tenant_user_group_grants::group_id.eq(group_id))
-            .select(tenant_user_group_grants::group_id)
-            .first::<Uuid>(&mut conn)
-            .await
-            .optional()
-            .map_err(|source| AppError::DbQuery {
-                message: source.to_string(),
-            })?
-            .is_some();
         if !group_granted {
             warn!(
                 api_key_id = %api_key_id,

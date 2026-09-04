@@ -360,8 +360,46 @@ pub async fn load_binding(
     release_id: Uuid,
     provider: &str,
 ) -> AppResult<PluginBinding> {
-    let summary =
-        require_enabled_release_for_provider(conn, tenant_id, release_id, provider).await?;
+    // 网关热路径只需要不可变 release 与 artifact 元数据，不读取 WASM BYTEA。这里把原来
+    // 的 release/suite 查询和 artifact 元数据查询合并成一次 JOIN；每个 release 最多三个
+    // artifact，重复少量 release 列比额外一次数据库往返更便宜。
+    let rows = plugin_suite_releases::table
+        .inner_join(plugin_suites::table.on(plugin_suites::id.eq(plugin_suite_releases::suite_id)))
+        .inner_join(
+            plugin_suite_artifacts::table
+                .on(plugin_suite_artifacts::release_id.eq(plugin_suite_releases::id)),
+        )
+        .filter(plugin_suite_releases::id.eq(release_id))
+        .filter(plugin_suites::enabled.eq(true))
+        .filter(plugin_suites::tenant_id.eq(tenant_id))
+        .filter(plugin_suites::provider.eq(provider))
+        .order(plugin_suite_artifacts::slot.asc())
+        .select((
+            release_select!(),
+            (
+                plugin_suite_artifacts::id,
+                plugin_suite_artifacts::release_id,
+                plugin_suite_artifacts::slot,
+                plugin_suite_artifacts::abi_version,
+                plugin_suite_artifacts::wasm_sha256,
+                plugin_suite_artifacts::wasm_size,
+            ),
+        ))
+        .load::<(ReleaseRow, ArtifactSummaryRow)>(conn)
+        .await?;
+    let mut rows = rows.into_iter();
+    let Some((release, first_artifact)) = rows.next() else {
+        return Err(AppError::BadRequest {
+            message: format!(
+                "插件套件发布版本不存在、已停用、不属于 {provider} 或缺少 artifact: {release_id}"
+            ),
+        });
+    };
+    let artifacts = std::iter::once(first_artifact)
+        .chain(rows.map(|(_, artifact)| artifact))
+        .map(artifact_summary_from_row)
+        .collect::<AppResult<Vec<_>>>()?;
+    let summary = summary_from_parts(release, artifacts);
     binding_from_summary(summary)
 }
 
@@ -623,26 +661,11 @@ async fn attach_artifacts(
     };
     let mut artifacts_by_release = HashMap::<Uuid, Vec<PluginArtifactSummary>>::new();
     for row in artifact_rows {
-        let slot = PluginSlot::parse(&row.2).ok_or_else(|| AppError::DbQuery {
-            message: format!("插件 artifact slot 非法: {}", row.2),
-        })?;
-        if row.3 != ABI_VERSION {
-            return Err(AppError::DbQuery {
-                message: format!("插件 artifact ABI 不受支持: id={}, abi={}", row.0, row.3),
-            });
-        }
+        let release_id = row.1;
         artifacts_by_release
-            .entry(row.1)
+            .entry(release_id)
             .or_default()
-            .push(PluginArtifactSummary {
-                id: row.0,
-                slot,
-                abi_version: row.3,
-                wasm_sha256: row.4,
-                wasm_size: usize::try_from(row.5).map_err(|_| AppError::DbQuery {
-                    message: format!("插件 artifact 大小非法: {}", row.5),
-                })?,
-            });
+            .push(artifact_summary_from_row(row)?);
     }
     rows.into_iter()
         .map(|row| {
@@ -655,6 +678,26 @@ async fn attach_artifacts(
             Ok(summary_from_parts(row, artifacts))
         })
         .collect()
+}
+
+fn artifact_summary_from_row(row: ArtifactSummaryRow) -> AppResult<PluginArtifactSummary> {
+    let slot = PluginSlot::parse(&row.2).ok_or_else(|| AppError::DbQuery {
+        message: format!("插件 artifact slot 非法: {}", row.2),
+    })?;
+    if row.3 != ABI_VERSION {
+        return Err(AppError::DbQuery {
+            message: format!("插件 artifact ABI 不受支持: id={}, abi={}", row.0, row.3),
+        });
+    }
+    Ok(PluginArtifactSummary {
+        id: row.0,
+        slot,
+        abi_version: row.3,
+        wasm_sha256: row.4,
+        wasm_size: usize::try_from(row.5).map_err(|_| AppError::DbQuery {
+            message: format!("插件 artifact 大小非法: {}", row.5),
+        })?,
+    })
 }
 
 async fn load_summary_from_row(
