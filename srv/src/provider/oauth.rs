@@ -1,7 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
-use uuid::Uuid;
 
 use crate::{
     err::{AppError, AppResult},
@@ -19,7 +18,7 @@ const OAUTH_SESSION_KEY_PREFIX: &str = "aestus:provider:oauth_session";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderOauthSession {
     pub provider: String,
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub pkce_verifier: String,
     pub redirect_uri: String,
     pub expires_at: DateTime<Utc>,
@@ -32,7 +31,7 @@ pub struct ProviderOauthSession {
 pub async fn create(
     app_state: &AppState,
     provider: &str,
-    tenant_id: Uuid,
+    tenant_id: String,
     oauth_state: &str,
     pkce_verifier: String,
     redirect_uri: String,
@@ -54,7 +53,7 @@ pub async fn create(
 
     let session = ProviderOauthSession {
         provider: provider.clone(),
-        tenant_id,
+        tenant_id: tenant_id.clone(),
         pkce_verifier,
         redirect_uri,
         expires_at,

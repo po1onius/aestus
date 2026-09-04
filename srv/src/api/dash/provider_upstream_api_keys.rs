@@ -106,7 +106,7 @@ async fn create_provider_upstream_api_key<P: MaintenanceProvider>(
     let api_key = normalize_api_key(payload.api_key)?;
     let base_url = normalize_base_url(payload.base_url)?;
     payload.override_.validate()?;
-    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
+    let tenant_id = owner.tenant_id.clone().ok_or(AppError::Forbidden)?;
     let snapshot = ProviderResourceService::<P>::new(&state)
         .create_api_key(tenant_id, api_key, base_url, payload.override_)
         .await?;
@@ -127,7 +127,7 @@ async fn list_provider_upstream_api_keys<P: MaintenanceProvider>(
     Query(query): Query<ListPageQuery>,
 ) -> AppResult<Json<ListPage<ProviderUpstreamApiKeyResponse>>> {
     let page = query.normalize()?;
-    let tenant_id = current_user.tenant_id.ok_or(AppError::Forbidden)?;
+    let tenant_id = current_user.tenant_id.clone().ok_or(AppError::Forbidden)?;
     let mut conn = state.db_conn().await?;
     let visible_group_ids = group_access::group_ids_with_permission(
         &mut conn,
@@ -178,10 +178,10 @@ async fn update_provider_upstream_api_key_override<P: MaintenanceProvider>(
     Json(payload): Json<UpdateRequestOverrideRequest>,
 ) -> AppResult<Json<ProviderUpstreamApiKeyResponse>> {
     payload.override_.validate()?;
-    let tenant_id = current_user.tenant_id.ok_or(AppError::Forbidden)?;
+    let tenant_id = current_user.tenant_id.clone().ok_or(AppError::Forbidden)?;
     let service = ProviderResourceService::<P>::new(&state);
     let api_key = service
-        .find_api_key(tenant_id, id)
+        .find_api_key(tenant_id.clone(), id)
         .await?
         .ok_or(AppError::Forbidden)?;
     let mut conn = state.db_conn().await?;
@@ -224,7 +224,7 @@ async fn update_provider_upstream_api_key_enabled<P: MaintenanceProvider>(
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateProviderUpstreamApiKeyEnabledRequest>,
 ) -> AdminResult<Json<ProviderUpstreamApiKeyResponse>> {
-    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
+    let tenant_id = owner.tenant_id.clone().ok_or(AppError::Forbidden)?;
     let snapshot = ProviderResourceService::<P>::new(&state)
         .update_api_key_enabled(tenant_id, id, payload.enabled)
         .await?;
@@ -246,7 +246,7 @@ async fn update_provider_upstream_api_key_group<P: MaintenanceProvider>(
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateProviderGroupRequest>,
 ) -> AdminResult<Json<ProviderUpstreamApiKeyResponse>> {
-    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
+    let tenant_id = owner.tenant_id.clone().ok_or(AppError::Forbidden)?;
     let snapshot = ProviderResourceService::<P>::new(&state)
         .update_api_key_group(tenant_id, id, payload.group_id)
         .await?;
@@ -266,7 +266,7 @@ async fn delete_provider_upstream_api_key<P: MaintenanceProvider>(
     dash_auth::AdminUser(owner): dash_auth::AdminUser,
     Path(id): Path<Uuid>,
 ) -> AdminResult<Json<DeleteProviderUpstreamApiKeyResponse>> {
-    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
+    let tenant_id = owner.tenant_id.clone().ok_or(AppError::Forbidden)?;
     let deleted = ProviderResourceService::<P>::new(&state)
         .delete_api_key(tenant_id, id)
         .await?;

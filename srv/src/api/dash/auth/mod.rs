@@ -64,16 +64,12 @@ struct SendRegisterEmailCodeResponse<'a> {
 
 #[derive(Debug, Serialize)]
 struct PublicTenant {
-    id: uuid::Uuid,
-    name: String,
+    id: String,
 }
 
 impl From<Tenant> for PublicTenant {
     fn from(tenant: Tenant) -> Self {
-        Self {
-            id: tenant.id,
-            name: tenant.name,
-        }
+        Self { id: tenant.id }
     }
 }
 
@@ -200,7 +196,7 @@ async fn load_public_tenant(
     conn: &mut diesel_async::AsyncPgConnection,
     user: &User,
 ) -> AppResult<Option<PublicTenant>> {
-    let Some(tenant_id) = user.tenant_id else {
+    let Some(tenant_id) = user.tenant_id.as_deref() else {
         return Ok(None);
     };
     tenant::require_enabled(conn, tenant_id)

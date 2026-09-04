@@ -1,15 +1,16 @@
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 CREATE TABLE tenants (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name TEXT NOT NULL UNIQUE,
+    -- 租户名就是稳定租户标识。租户规模很小，直接使用可读名称能让所有隔离字段和
+    -- 运维查询保持直观；名称创建后不可修改。
+    id TEXT PRIMARY KEY,
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
     created_by UUID NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     disabled_at TIMESTAMPTZ,
-    CHECK (char_length(name) BETWEEN 1 AND 128),
-    CHECK (octet_length(name) <= 512),
+    CHECK (char_length(id) BETWEEN 1 AND 128),
+    CHECK (octet_length(id) <= 512),
     CHECK ((enabled AND disabled_at IS NULL) OR (NOT enabled AND disabled_at IS NOT NULL))
 );
 
@@ -20,7 +21,7 @@ CREATE INDEX idx_tenants_created_at_id ON tenants (created_at DESC, id DESC);
 -- owner 产生后继续注册普通成员。项目禁止数据库外键，tenant_id 关联由应用事务维护。
 CREATE TABLE tenant_codes (
     code TEXT PRIMARY KEY,
-    tenant_id UUID NOT NULL UNIQUE,
+    tenant_id TEXT NOT NULL UNIQUE,
     created_by UUID NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK (code <> ''),
@@ -29,7 +30,7 @@ CREATE TABLE tenant_codes (
 
 CREATE TABLE users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID,
+    tenant_id TEXT,
     username TEXT NOT NULL,
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
@@ -61,7 +62,7 @@ CREATE INDEX idx_users_created_at_id ON users (created_at DESC, id DESC);
 
 CREATE TABLE provider_groups (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL,
+    tenant_id TEXT NOT NULL,
     provider TEXT NOT NULL,
     name TEXT NOT NULL,
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
@@ -93,7 +94,7 @@ CREATE INDEX idx_provider_group_models_model_name ON provider_group_models (mode
 -- 上游资源查看和操作能力逐行保存在权限表中；tenant owner 始终由应用层隐式获得全部
 -- 权限，不写入这里。项目禁止数据库外键，用户、租户和分组一致性由应用事务维护。
 CREATE TABLE tenant_user_group_grants (
-    tenant_id UUID NOT NULL,
+    tenant_id TEXT NOT NULL,
     user_id UUID NOT NULL,
     group_id UUID NOT NULL,
     granted_by UUID NOT NULL,
@@ -108,7 +109,7 @@ CREATE INDEX idx_tenant_user_group_grants_group
     ON tenant_user_group_grants (group_id);
 
 CREATE TABLE tenant_user_group_permissions (
-    tenant_id UUID NOT NULL,
+    tenant_id TEXT NOT NULL,
     user_id UUID NOT NULL,
     group_id UUID NOT NULL,
     permission TEXT NOT NULL,
@@ -139,7 +140,7 @@ CREATE INDEX idx_tenant_user_group_permissions_group
 -- 项目统一不使用数据库外键，关联完整性由发布、绑定和请求鉴权路径显式校验。
 CREATE TABLE plugin_suites (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL,
+    tenant_id TEXT NOT NULL,
     name TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     provider TEXT NOT NULL,
@@ -194,7 +195,7 @@ CREATE INDEX idx_plugin_suite_artifacts_release_id
 
 CREATE TABLE api_keys (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL,
+    tenant_id TEXT NOT NULL,
     user_id UUID NOT NULL,
     group_id UUID NOT NULL,
     name TEXT NOT NULL,
@@ -230,7 +231,7 @@ CREATE INDEX idx_api_key_models_model_name ON api_key_models (model_name);
 
 CREATE TABLE provider_accounts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL,
+    tenant_id TEXT NOT NULL,
     provider TEXT NOT NULL,
     -- 上游资源可以先独立导入，之后再由创建分组或资源迁移操作绑定到至多一个分组。
     -- NULL 资源继续接受 maintenance 刷新，但不会发布到 Redis 可调度池。
@@ -280,7 +281,7 @@ CREATE UNIQUE INDEX uq_provider_accounts_claude_account_uuid
 
 CREATE TABLE provider_api_keys (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL,
+    tenant_id TEXT NOT NULL,
     provider TEXT NOT NULL,
     -- 官方 Key 与 OAuth 账号使用相同的可选单分组归属语义。
     group_id UUID,

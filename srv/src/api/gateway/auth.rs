@@ -23,8 +23,8 @@ const BEARER_PREFIX: &str = "Bearer ";
 struct GatewayAuthRow {
     #[diesel(sql_type = SqlUuid)]
     api_key_id: Uuid,
-    #[diesel(sql_type = SqlUuid)]
-    tenant_id: Uuid,
+    #[diesel(sql_type = Text)]
+    tenant_id: String,
     #[diesel(sql_type = Text)]
     api_key_name: String,
     #[diesel(sql_type = Bool)]
@@ -66,7 +66,7 @@ struct GatewayAuthRow {
 /// 此处刻意不保留原始 API Key、用户密码哈希以及完整数据库模型，既减少热路径中的无效
 /// 数据传递，也避免敏感字段被下游模块误用或写入日志。
 pub struct GatewayAuth {
-    tenant_id: Uuid,
+    tenant_id: String,
     api_key_id: Uuid,
     api_key_name: String,
     api_key_allowed_models: Vec<String>,
@@ -80,8 +80,8 @@ pub struct GatewayAuth {
 }
 
 impl GatewayAuth {
-    pub fn tenant_id(&self) -> Uuid {
-        self.tenant_id
+    pub fn tenant_id(&self) -> &str {
+        &self.tenant_id
     }
 
     pub fn api_key_id(&self) -> Uuid {
@@ -330,7 +330,7 @@ pub async fn authenticate_gateway_key(
         match plugin_release_ref {
             None => None,
             Some(release_id) => Some(
-                plugin::sql::load_binding(&mut conn, tenant_id, release_id, &group_provider)
+                plugin::sql::load_binding(&mut conn, tenant_id.clone(), release_id, &group_provider)
                     .await
                     .map_err(|error| {
                         warn!(api_key_id = %api_key_id, plugin_release_id = %release_id, error = %error, "API Key 插件套件绑定不可用，拒绝请求");

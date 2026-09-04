@@ -55,7 +55,7 @@ export function TenantResourcesDialog({ tenant, token, onClose }: TenantResource
       offset: String(offset),
     });
     void requestJson<ListTenantResourcesResponse>(
-      `${tenantsPath}/${tenant.id}/resources?${query.toString()}`,
+      `${tenantsPath}/${encodeURIComponent(tenant.id)}/resources?${query.toString()}`,
       { signal: controller.signal },
       token,
     )
@@ -98,7 +98,7 @@ export function TenantResourcesDialog({ tenant, token, onClose }: TenantResource
   return (
     <Modal
       titleId="tenantResourcesTitle"
-      title={`${tenant.name} · 租户资源`}
+      title={`${tenant.id} · 租户资源`}
       description="平台只读视图仅展示资源身份、当前并发和健康状态，不包含账号凭证或官方 API Key。"
       className="max-w-5xl"
       onClose={onClose}

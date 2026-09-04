@@ -138,7 +138,7 @@ pub enum AcquireResult {
 struct LeaseIdentity {
     request_id: Uuid,
     lease_id: Uuid,
-    tenant_id: Uuid,
+    tenant_id: String,
     user_id: Uuid,
     provider: &'static str,
     redis_key: String,
@@ -337,7 +337,7 @@ impl Drop for UserConcurrencyLease {
 pub async fn acquire(
     state: &AppState,
     request_id: Uuid,
-    tenant_id: Uuid,
+    tenant_id: String,
     user_id: Uuid,
     provider: &'static str,
     max_concurrency: Option<i32>,
@@ -345,10 +345,10 @@ pub async fn acquire(
     let identity = LeaseIdentity {
         request_id,
         lease_id: Uuid::now_v7(),
-        tenant_id,
+        tenant_id: tenant_id.clone(),
         user_id,
         provider,
-        redis_key: lease_key(tenant_id, user_id, provider),
+        redis_key: lease_key(&tenant_id, user_id, provider),
     };
     // guard 在 Redis await 前就进入 armed 状态。即使命令已经执行、但等待响应的 future
     // 随后被取消，Drop 仍会用相同 token 补发幂等释放。
@@ -419,7 +419,7 @@ pub async fn acquire(
 /// 不用不准确的本地值降级 Dashboard 展示。
 pub async fn active_counts_for_users(
     state: &AppState,
-    tenant_id: Uuid,
+    tenant_id: String,
     user_ids: &[Uuid],
     providers: &[&str],
 ) -> AppResult<ActiveConcurrencyByUser> {
@@ -430,6 +430,7 @@ pub async fn active_counts_for_users(
             .map(|user_id| (user_id, HashMap::with_capacity(providers.len())))
             .collect(),
     };
+    let tenant_key_prefix = tenant_id.as_str();
     let requested_keys = user_ids
         .iter()
         .flat_map(|user_id| {
@@ -437,7 +438,7 @@ pub async fn active_counts_for_users(
                 (
                     *user_id,
                     *provider,
-                    lease_key(tenant_id, *user_id, provider),
+                    lease_key(tenant_key_prefix, *user_id, provider),
                 )
             })
         })
@@ -695,7 +696,7 @@ impl Drop for UserConcurrencyBody {
     }
 }
 
-fn lease_key(tenant_id: Uuid, user_id: Uuid, provider: &str) -> String {
+fn lease_key(tenant_id: &str, user_id: Uuid, provider: &str) -> String {
     format!("gateway:user-concurrency:{tenant_id}:{user_id}:{provider}:leases")
 }
 

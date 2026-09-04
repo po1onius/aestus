@@ -20,7 +20,7 @@ const MAX_GENERATED_CODE_NAME_BYTES: usize =
 #[derive(Insertable)]
 #[diesel(table_name = schema::tenants)]
 struct NewTenant {
-    name: String,
+    id: String,
     created_by: Uuid,
 }
 
@@ -28,7 +28,7 @@ struct NewTenant {
 #[diesel(table_name = schema::tenant_codes)]
 struct NewTenantCode {
     code: String,
-    tenant_id: Uuid,
+    tenant_id: String,
     created_by: Uuid,
 }
 
@@ -66,17 +66,17 @@ pub async fn create(
     password: Option<String>,
     actor_id: Uuid,
 ) -> AppResult<TenantSummary> {
-    let name = normalize_name(name)?;
-    let code = generate_code(&name)?;
+    let id = normalize_name(name)?;
+    let code = generate_code(&id)?;
     let prepared_owner = match password.filter(|password| !password.is_empty()) {
-        Some(password) => Some(user::prepare_tenant_owner(&name, password).await?),
+        Some(password) => Some(user::prepare_tenant_owner(&id, password).await?),
         None => None,
     };
     let (summary, owner) = conn
         .transaction::<(TenantSummary, Option<user::User>), AppError, _>(async |conn| {
             let tenant = diesel::insert_into(schema::tenants::table)
                 .values(NewTenant {
-                    name,
+                    id,
                     created_by: actor_id,
                 })
                 .returning(Tenant::as_returning())
@@ -86,7 +86,7 @@ pub async fn create(
             diesel::insert_into(schema::tenant_codes::table)
                 .values(NewTenantCode {
                     code: code.clone(),
-                    tenant_id: tenant.id,
+                    tenant_id: tenant.id.clone(),
                     created_by: actor_id,
                 })
                 .execute(&mut *conn)
@@ -94,7 +94,7 @@ pub async fn create(
                 .map_err(map_create_error)?;
             let owner = match prepared_owner {
                 Some(owner) => {
-                    let tenant_id = tenant.id;
+                    let tenant_id = tenant.id.clone();
                     Some(user::create_prepared_tenant_owner(&mut *conn, tenant_id, owner).await?)
                 }
                 None => None,
@@ -111,7 +111,6 @@ pub async fn create(
     info!(
         platform_admin_id = %actor_id,
         tenant_id = %summary.tenant.id,
-        tenant_name = %summary.tenant.name,
         owner_created = owner.is_some(),
         owner_id = ?owner.as_ref().map(|owner| owner.id),
         owner_username = ?owner.as_ref().map(|owner| owner.username.as_str()),
@@ -154,22 +153,13 @@ pub async fn list(conn: &mut AsyncPgConnection) -> AppResult<Vec<TenantSummary>>
 }
 
 /// 平台管理员读取租户关联资源前只确认租户实体存在；停用租户的资源仍应可审计。
-pub async fn find_by_id(conn: &mut AsyncPgConnection, id: Uuid) -> AppResult<Option<Tenant>> {
+pub async fn find_by_id(conn: &mut AsyncPgConnection, id: &str) -> AppResult<Option<Tenant>> {
     schema::tenants::table
         .filter(schema::tenants::id.eq(id))
         .select(Tenant::as_select())
         .first::<Tenant>(conn)
         .await
         .optional()
-        .map_err(db_error)
-}
-
-/// 用量统计只读取租户稳定标识和展示名称，避免平台概览读取租户码等无关字段。
-pub async fn list_usage_names(conn: &mut AsyncPgConnection) -> AppResult<Vec<(Uuid, String)>> {
-    schema::tenants::table
-        .select((schema::tenants::id, schema::tenants::name))
-        .load::<(Uuid, String)>(conn)
-        .await
         .map_err(db_error)
 }
 
@@ -180,7 +170,7 @@ pub async fn find_enabled_by_code_for_update(
     let Some(tenant_id) = schema::tenant_codes::table
         .filter(schema::tenant_codes::code.eq(code))
         .select(schema::tenant_codes::tenant_id)
-        .first::<Uuid>(&mut *conn)
+        .first::<String>(&mut *conn)
         .await
         .optional()
         .map_err(db_error)?
@@ -191,7 +181,7 @@ pub async fn find_enabled_by_code_for_update(
     // tenant 行是注册、换码、撤码和停用的统一并发锁。拿锁后重新确认 code 映射，避免
     // 注册与平台操作交错时使用已经被撤销或替换的旧码，也避免多表 FOR UPDATE 锁序不明。
     let tenant = schema::tenants::table
-        .filter(schema::tenants::id.eq(tenant_id))
+        .filter(schema::tenants::id.eq(&tenant_id))
         .for_update()
         .select(Tenant::as_select())
         .first::<Tenant>(&mut *conn)
@@ -203,7 +193,7 @@ pub async fn find_enabled_by_code_for_update(
     };
     let code_still_valid = schema::tenant_codes::table
         .filter(schema::tenant_codes::code.eq(code))
-        .filter(schema::tenant_codes::tenant_id.eq(tenant.id))
+        .filter(schema::tenant_codes::tenant_id.eq(&tenant.id))
         .select(schema::tenant_codes::code)
         .first::<String>(&mut *conn)
         .await
@@ -230,7 +220,7 @@ pub async fn find_enabled_by_code(
         .map_err(db_error)
 }
 
-pub async fn require_enabled(conn: &mut AsyncPgConnection, id: Uuid) -> AppResult<Tenant> {
+pub async fn require_enabled(conn: &mut AsyncPgConnection, id: &str) -> AppResult<Tenant> {
     schema::tenants::table
         .filter(schema::tenants::id.eq(id))
         .filter(schema::tenants::enabled.eq(true))
@@ -245,7 +235,7 @@ pub async fn require_enabled(conn: &mut AsyncPgConnection, id: Uuid) -> AppResul
 
 pub async fn set_enabled(
     conn: &mut AsyncPgConnection,
-    id: Uuid,
+    id: &str,
     enabled: bool,
     actor_id: Uuid,
 ) -> AppResult<Tenant> {
@@ -271,7 +261,7 @@ pub async fn set_enabled(
 
 pub async fn regenerate_code(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: &str,
     actor_id: Uuid,
 ) -> AppResult<TenantSummary> {
     let summary = conn
@@ -288,7 +278,7 @@ pub async fn regenerate_code(
                     },
                     source => db_error(source),
                 })?;
-            let code = generate_code(&tenant.name)?;
+            let code = generate_code(&tenant.id)?;
             diesel::delete(
                 schema::tenant_codes::table.filter(schema::tenant_codes::tenant_id.eq(tenant_id)),
             )
@@ -298,7 +288,7 @@ pub async fn regenerate_code(
             diesel::insert_into(schema::tenant_codes::table)
                 .values(NewTenantCode {
                     code: code.clone(),
-                    tenant_id,
+                    tenant_id: tenant_id.to_owned(),
                     created_by: actor_id,
                 })
                 .execute(&mut *conn)
@@ -313,7 +303,6 @@ pub async fn regenerate_code(
     info!(
         platform_admin_id = %actor_id,
         tenant_id = %tenant_id,
-        tenant_name = %summary.tenant.name,
         "平台管理员已自动生成并替换租户码"
     );
     Ok(summary)
@@ -321,7 +310,7 @@ pub async fn regenerate_code(
 
 pub async fn revoke_code(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: &str,
     actor_id: Uuid,
 ) -> AppResult<()> {
     let deleted = conn
@@ -330,7 +319,7 @@ pub async fn revoke_code(
                 .filter(schema::tenants::id.eq(tenant_id))
                 .for_update()
                 .select(schema::tenants::id)
-                .first::<Uuid>(&mut *conn)
+                .first::<String>(&mut *conn)
                 .await
                 .map_err(|source| match source {
                     diesel::result::Error::NotFound => AppError::BadRequest {

@@ -19,7 +19,7 @@ use super::{
 pub mod schema {
     diesel::table! {
         tenant_user_group_grants (user_id, group_id) {
-            tenant_id -> Uuid,
+            tenant_id -> Text,
             user_id -> Uuid,
             group_id -> Uuid,
             granted_by -> Uuid,
@@ -30,7 +30,7 @@ pub mod schema {
 
     diesel::table! {
         tenant_user_group_permissions (user_id, group_id, permission) {
-            tenant_id -> Uuid,
+            tenant_id -> Text,
             user_id -> Uuid,
             group_id -> Uuid,
             permission -> Text,
@@ -131,7 +131,7 @@ pub struct GroupGrantInput {
 #[derive(Insertable)]
 #[diesel(table_name = schema::tenant_user_group_grants)]
 struct NewGroupGrant {
-    tenant_id: Uuid,
+    tenant_id: String,
     user_id: Uuid,
     group_id: Uuid,
     granted_by: Uuid,
@@ -140,7 +140,7 @@ struct NewGroupGrant {
 #[derive(Insertable)]
 #[diesel(table_name = schema::tenant_user_group_permissions)]
 struct NewGroupPermission {
-    tenant_id: Uuid,
+    tenant_id: String,
     user_id: Uuid,
     group_id: Uuid,
     permission: String,
@@ -154,22 +154,22 @@ pub async fn list_for_current_user(
     if user.is_tenant_owner() {
         return Ok(Vec::new());
     }
-    let tenant_id = user.tenant_id.ok_or(AppError::Forbidden)?;
+    let tenant_id = user.tenant_id.clone().ok_or(AppError::Forbidden)?;
     list_for_user(conn, tenant_id, user.id).await
 }
 
 pub async fn list_for_managed_user(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
     user_id: Uuid,
 ) -> AppResult<Vec<UserGroupGrant>> {
-    require_managed_user(conn, tenant_id, user_id).await?;
+    require_managed_user(conn, tenant_id.clone(), user_id).await?;
     list_for_user(conn, tenant_id, user_id).await
 }
 
 async fn list_for_user(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
     user_id: Uuid,
 ) -> AppResult<Vec<UserGroupGrant>> {
     use schema::{
@@ -177,7 +177,7 @@ async fn list_for_user(
     };
 
     let group_ids = grants::table
-        .filter(grants::tenant_id.eq(tenant_id))
+        .filter(grants::tenant_id.eq(tenant_id.clone()))
         .filter(grants::user_id.eq(user_id))
         .order(grants::group_id.asc())
         .select(grants::group_id)
@@ -185,7 +185,7 @@ async fn list_for_user(
         .await
         .map_err(db_error)?;
     let permission_rows = permissions::table
-        .filter(permissions::tenant_id.eq(tenant_id))
+        .filter(permissions::tenant_id.eq(tenant_id.clone()))
         .filter(permissions::user_id.eq(user_id))
         .order((permissions::group_id.asc(), permissions::permission.asc()))
         .select((permissions::group_id, permissions::permission))
@@ -207,7 +207,7 @@ async fn list_for_user(
 
 pub async fn replace_for_managed_user(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
     user_id: Uuid,
     actor_id: Uuid,
     inputs: Vec<GroupGrantInput>,
@@ -218,7 +218,7 @@ pub async fn replace_for_managed_user(
     conn.transaction::<(), AppError, _>(async |conn| {
         let target = users::table
             .filter(users::id.eq(user_id))
-            .filter(users::tenant_id.eq(Some(tenant_id)))
+            .filter(users::tenant_id.eq(Some(tenant_id.clone())))
             .for_update()
             .select(User::as_select())
             .first::<User>(&mut *conn)
@@ -237,7 +237,7 @@ pub async fn replace_for_managed_user(
 
         if !requested_group_ids.is_empty() {
             let groups = provider_groups::table
-                .filter(provider_groups::tenant_id.eq(tenant_id))
+                .filter(provider_groups::tenant_id.eq(tenant_id.clone()))
                 .filter(provider_groups::id.eq_any(&requested_group_ids))
                 .order(provider_groups::id.asc())
                 .for_update()
@@ -257,7 +257,7 @@ pub async fn replace_for_managed_user(
         };
         diesel::delete(
             permissions::table
-                .filter(permissions::tenant_id.eq(tenant_id))
+                .filter(permissions::tenant_id.eq(tenant_id.clone()))
                 .filter(permissions::user_id.eq(user_id)),
         )
         .execute(&mut *conn)
@@ -265,7 +265,7 @@ pub async fn replace_for_managed_user(
         .map_err(db_error)?;
         diesel::delete(
             grants::table
-                .filter(grants::tenant_id.eq(tenant_id))
+                .filter(grants::tenant_id.eq(tenant_id.clone()))
                 .filter(grants::user_id.eq(user_id)),
         )
         .execute(&mut *conn)
@@ -275,7 +275,7 @@ pub async fn replace_for_managed_user(
         let grant_rows = requested_group_ids
             .iter()
             .map(|group_id| NewGroupGrant {
-                tenant_id,
+                tenant_id: tenant_id.clone(),
                 user_id,
                 group_id: *group_id,
                 granted_by: actor_id,
@@ -294,7 +294,7 @@ pub async fn replace_for_managed_user(
                 group_permissions
                     .iter()
                     .map(|permission| NewGroupPermission {
-                        tenant_id,
+                        tenant_id: tenant_id.clone(),
                         user_id,
                         group_id: *group_id,
                         permission: permission.as_str().to_owned(),
@@ -313,7 +313,7 @@ pub async fn replace_for_managed_user(
     })
     .await?;
 
-    let after = list_for_user(conn, tenant_id, user_id).await?;
+    let after = list_for_user(conn, tenant_id.clone(), user_id).await?;
     info!(
         actor_user_id = %actor_id,
         target_user_id = %user_id,
@@ -332,10 +332,10 @@ pub async fn require_group_grant(
     if user.is_tenant_owner() {
         return Ok(());
     }
-    let tenant_id = user.tenant_id.ok_or(AppError::Forbidden)?;
+    let tenant_id = user.tenant_id.clone().ok_or(AppError::Forbidden)?;
     use schema::tenant_user_group_grants as grants;
     let granted = grants::table
-        .filter(grants::tenant_id.eq(tenant_id))
+        .filter(grants::tenant_id.eq(tenant_id.clone()))
         .filter(grants::user_id.eq(user.id))
         .filter(grants::group_id.eq(group_id))
         .select(grants::group_id)
@@ -360,7 +360,7 @@ pub async fn require_permission(
     if user.is_tenant_owner() {
         return Ok(());
     }
-    let tenant_id = user.tenant_id.ok_or(AppError::Forbidden)?;
+    let tenant_id = user.tenant_id.clone().ok_or(AppError::Forbidden)?;
     let Some(group_id) = group_id else {
         return Err(AppError::Forbidden);
     };
@@ -373,7 +373,7 @@ pub async fn require_permission(
         .collect::<Vec<_>>();
     use schema::tenant_user_group_permissions as permissions;
     let granted_count = permissions::table
-        .filter(permissions::tenant_id.eq(tenant_id))
+        .filter(permissions::tenant_id.eq(tenant_id.clone()))
         .filter(permissions::user_id.eq(user.id))
         .filter(permissions::group_id.eq(group_id))
         .filter(permissions::permission.eq_any(&required_names))
@@ -405,7 +405,7 @@ pub async fn group_ids_with_permission(
     if user.is_tenant_owner() {
         return Ok(None);
     }
-    let tenant_id = user.tenant_id.ok_or(AppError::Forbidden)?;
+    let tenant_id = user.tenant_id.clone().ok_or(AppError::Forbidden)?;
     use schema::{
         tenant_user_group_grants as grants, tenant_user_group_permissions as permissions,
     };
@@ -416,7 +416,7 @@ pub async fn group_ids_with_permission(
                 .and(grants::user_id.eq(permissions::user_id))
                 .and(grants::group_id.eq(permissions::group_id))),
         )
-        .filter(permissions::tenant_id.eq(tenant_id))
+        .filter(permissions::tenant_id.eq(tenant_id.clone()))
         .filter(permissions::user_id.eq(user.id))
         .filter(permissions::permission.eq(permission.as_str()))
         .order(permissions::group_id.asc())
@@ -434,10 +434,10 @@ pub async fn granted_group_ids(
     if user.is_tenant_owner() {
         return Ok(None);
     }
-    let tenant_id = user.tenant_id.ok_or(AppError::Forbidden)?;
+    let tenant_id = user.tenant_id.clone().ok_or(AppError::Forbidden)?;
     use schema::tenant_user_group_grants as grants;
     let group_ids = grants::table
-        .filter(grants::tenant_id.eq(tenant_id))
+        .filter(grants::tenant_id.eq(tenant_id.clone()))
         .filter(grants::user_id.eq(user.id))
         .order(grants::group_id.asc())
         .select(grants::group_id)
@@ -480,12 +480,12 @@ fn normalize_inputs(
 
 async fn require_managed_user(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
     user_id: Uuid,
 ) -> AppResult<User> {
     let target = users::table
         .filter(users::id.eq(user_id))
-        .filter(users::tenant_id.eq(Some(tenant_id)))
+        .filter(users::tenant_id.eq(Some(tenant_id.clone())))
         .select(User::as_select())
         .first::<User>(conn)
         .await

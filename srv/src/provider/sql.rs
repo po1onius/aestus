@@ -119,7 +119,7 @@ pub mod account {
 
     pub async fn list_page_by_provider(
         conn: &mut AsyncPgConnection,
-        tenant_id: Uuid,
+        tenant_id: String,
         provider: &str,
         limit: i64,
         offset: i64,
@@ -127,7 +127,7 @@ pub mod account {
         use provider_accounts::dsl;
 
         dsl::provider_accounts
-            .filter(dsl::tenant_id.eq(tenant_id))
+            .filter(dsl::tenant_id.eq(tenant_id.clone()))
             .filter(dsl::provider.eq(provider))
             .order((dsl::created_at.desc(), dsl::id.desc()))
             .limit(limit)
@@ -141,7 +141,7 @@ pub mod account {
     /// 普通用户的资源列表必须先在 PostgreSQL 中按授权分组裁剪，再执行分页。
     pub async fn list_page_by_provider_and_groups(
         conn: &mut AsyncPgConnection,
-        tenant_id: Uuid,
+        tenant_id: String,
         provider: &str,
         group_ids: &[Uuid],
         limit: i64,
@@ -150,7 +150,7 @@ pub mod account {
         use provider_accounts::dsl;
 
         dsl::provider_accounts
-            .filter(dsl::tenant_id.eq(tenant_id))
+            .filter(dsl::tenant_id.eq(tenant_id.clone()))
             .filter(dsl::provider.eq(provider))
             .filter(dsl::group_id.eq_any(group_ids))
             .order((dsl::created_at.desc(), dsl::id.desc()))
@@ -165,14 +165,14 @@ pub mod account {
     /// 平台管理员按租户查看跨 provider 的账号资源；只读取一页，避免大租户一次加载全部凭证。
     pub async fn list_page_by_tenant(
         conn: &mut AsyncPgConnection,
-        tenant_id: Uuid,
+        tenant_id: String,
         limit: i64,
         offset: i64,
     ) -> AppResult<Vec<ProviderAccount>> {
         use provider_accounts::dsl;
 
         dsl::provider_accounts
-            .filter(dsl::tenant_id.eq(tenant_id))
+            .filter(dsl::tenant_id.eq(tenant_id.clone()))
             .order((dsl::created_at.desc(), dsl::id.desc()))
             .limit(limit)
             .offset(offset)
@@ -239,7 +239,7 @@ pub mod account {
     /// 管理员只控制是否参与调度，不允许通过管理接口伪造 credential status。
     pub async fn update_enabled(
         conn: &mut AsyncPgConnection,
-        tenant_id: Uuid,
+        tenant_id: String,
         provider: &str,
         id: Uuid,
         enabled: bool,
@@ -249,7 +249,7 @@ pub mod account {
         required_account(
             diesel::update(
                 dsl::provider_accounts
-                    .filter(dsl::tenant_id.eq(tenant_id))
+                    .filter(dsl::tenant_id.eq(tenant_id.clone()))
                     .filter(dsl::provider.eq(provider))
                     .filter(dsl::id.eq(id)),
             )
@@ -267,7 +267,7 @@ pub mod account {
 
     pub async fn update_group(
         conn: &mut AsyncPgConnection,
-        tenant_id: Uuid,
+        tenant_id: String,
         provider: &str,
         id: Uuid,
         group_id: Option<Uuid>,
@@ -277,14 +277,17 @@ pub mod account {
         conn.transaction::<ProviderAccount, AppError, _>(async |conn| {
             if let Some(group_id) = group_id {
                 group::require_enabled_for_provider_write(
-                    &mut *conn, tenant_id, group_id, provider,
+                    &mut *conn,
+                    tenant_id.clone(),
+                    group_id,
+                    provider,
                 )
                 .await?;
             }
             required_account(
                 diesel::update(
                     dsl::provider_accounts
-                        .filter(dsl::tenant_id.eq(tenant_id))
+                        .filter(dsl::tenant_id.eq(tenant_id.clone()))
                         .filter(dsl::provider.eq(provider))
                         .filter(dsl::id.eq(id)),
                 )
@@ -304,7 +307,7 @@ pub mod account {
 
     pub async fn delete_by_id(
         conn: &mut AsyncPgConnection,
-        tenant_id: Uuid,
+        tenant_id: String,
         provider: &str,
         id: Uuid,
     ) -> AppResult<ProviderAccount> {
@@ -313,7 +316,7 @@ pub mod account {
         required_account(
             diesel::delete(
                 dsl::provider_accounts
-                    .filter(dsl::tenant_id.eq(tenant_id))
+                    .filter(dsl::tenant_id.eq(tenant_id.clone()))
                     .filter(dsl::provider.eq(provider))
                     .filter(dsl::id.eq(id)),
             )
@@ -556,7 +559,7 @@ pub mod account {
 
     pub async fn update_override(
         conn: &mut AsyncPgConnection,
-        tenant_id: Uuid,
+        tenant_id: String,
         provider: &str,
         id: Uuid,
         request_override: RequestOverride,
@@ -567,7 +570,7 @@ pub mod account {
         required_account(
             diesel::update(
                 dsl::provider_accounts
-                    .filter(dsl::tenant_id.eq(tenant_id))
+                    .filter(dsl::tenant_id.eq(tenant_id.clone()))
                     .filter(dsl::provider.eq(provider))
                     .filter(dsl::id.eq(id)),
             )
@@ -587,7 +590,7 @@ pub mod account {
     /// 仍把旧分组权限应用到资源的新安全边界。
     pub async fn update_override_in_group(
         conn: &mut AsyncPgConnection,
-        tenant_id: Uuid,
+        tenant_id: String,
         provider: &str,
         id: Uuid,
         group_id: Uuid,
@@ -599,7 +602,7 @@ pub mod account {
         required_account(
             diesel::update(
                 dsl::provider_accounts
-                    .filter(dsl::tenant_id.eq(tenant_id))
+                    .filter(dsl::tenant_id.eq(tenant_id.clone()))
                     .filter(dsl::provider.eq(provider))
                     .filter(dsl::id.eq(id))
                     .filter(dsl::group_id.eq(group_id)),
@@ -667,7 +670,7 @@ pub mod api_key {
 
     pub async fn list_page_by_provider(
         conn: &mut AsyncPgConnection,
-        tenant_id: Uuid,
+        tenant_id: String,
         provider: &str,
         limit: i64,
         offset: i64,
@@ -675,7 +678,7 @@ pub mod api_key {
         use provider_api_keys::dsl;
 
         dsl::provider_api_keys
-            .filter(dsl::tenant_id.eq(tenant_id))
+            .filter(dsl::tenant_id.eq(tenant_id.clone()))
             .filter(dsl::provider.eq(provider))
             .order((dsl::created_at.desc(), dsl::id.desc()))
             .limit(limit)
@@ -689,7 +692,7 @@ pub mod api_key {
     /// 普通用户的官方 Key 列表只查询其拥有可视权限的分组，未分组资源始终不可见。
     pub async fn list_page_by_provider_and_groups(
         conn: &mut AsyncPgConnection,
-        tenant_id: Uuid,
+        tenant_id: String,
         provider: &str,
         group_ids: &[Uuid],
         limit: i64,
@@ -698,7 +701,7 @@ pub mod api_key {
         use provider_api_keys::dsl;
 
         dsl::provider_api_keys
-            .filter(dsl::tenant_id.eq(tenant_id))
+            .filter(dsl::tenant_id.eq(tenant_id.clone()))
             .filter(dsl::provider.eq(provider))
             .filter(dsl::group_id.eq_any(group_ids))
             .order((dsl::created_at.desc(), dsl::id.desc()))
@@ -713,14 +716,14 @@ pub mod api_key {
     /// 平台管理员按租户查看跨 provider 的官方 API Key；长期 Key 本身不会离开数据库层。
     pub async fn list_page_by_tenant(
         conn: &mut AsyncPgConnection,
-        tenant_id: Uuid,
+        tenant_id: String,
         limit: i64,
         offset: i64,
     ) -> AppResult<Vec<ProviderApiKey>> {
         use provider_api_keys::dsl;
 
         dsl::provider_api_keys
-            .filter(dsl::tenant_id.eq(tenant_id))
+            .filter(dsl::tenant_id.eq(tenant_id.clone()))
             .order((dsl::created_at.desc(), dsl::id.desc()))
             .limit(limit)
             .offset(offset)
@@ -767,7 +770,7 @@ pub mod api_key {
 
     pub async fn update_enabled(
         conn: &mut AsyncPgConnection,
-        tenant_id: Uuid,
+        tenant_id: String,
         provider: &str,
         id: Uuid,
         enabled: bool,
@@ -781,7 +784,7 @@ pub mod api_key {
         required_api_key(
             diesel::update(
                 dsl::provider_api_keys
-                    .filter(dsl::tenant_id.eq(tenant_id))
+                    .filter(dsl::tenant_id.eq(tenant_id.clone()))
                     .filter(dsl::provider.eq(provider))
                     .filter(dsl::id.eq(id)),
             )
@@ -811,7 +814,7 @@ pub mod api_key {
 
     pub async fn update_group(
         conn: &mut AsyncPgConnection,
-        tenant_id: Uuid,
+        tenant_id: String,
         provider: &str,
         id: Uuid,
         group_id: Option<Uuid>,
@@ -821,14 +824,17 @@ pub mod api_key {
         conn.transaction::<ProviderApiKey, AppError, _>(async |conn| {
             if let Some(group_id) = group_id {
                 group::require_enabled_for_provider_write(
-                    &mut *conn, tenant_id, group_id, provider,
+                    &mut *conn,
+                    tenant_id.clone(),
+                    group_id,
+                    provider,
                 )
                 .await?;
             }
             required_api_key(
                 diesel::update(
                     dsl::provider_api_keys
-                        .filter(dsl::tenant_id.eq(tenant_id))
+                        .filter(dsl::tenant_id.eq(tenant_id.clone()))
                         .filter(dsl::provider.eq(provider))
                         .filter(dsl::id.eq(id)),
                 )
@@ -929,7 +935,7 @@ pub mod api_key {
 
     pub async fn update_override(
         conn: &mut AsyncPgConnection,
-        tenant_id: Uuid,
+        tenant_id: String,
         provider: &str,
         id: Uuid,
         request_override: RequestOverride,
@@ -940,7 +946,7 @@ pub mod api_key {
         required_api_key(
             diesel::update(
                 dsl::provider_api_keys
-                    .filter(dsl::tenant_id.eq(tenant_id))
+                    .filter(dsl::tenant_id.eq(tenant_id.clone()))
                     .filter(dsl::provider.eq(provider))
                     .filter(dsl::id.eq(id)),
             )
@@ -958,7 +964,7 @@ pub mod api_key {
 
     pub async fn update_override_in_group(
         conn: &mut AsyncPgConnection,
-        tenant_id: Uuid,
+        tenant_id: String,
         provider: &str,
         id: Uuid,
         group_id: Uuid,
@@ -970,7 +976,7 @@ pub mod api_key {
         required_api_key(
             diesel::update(
                 dsl::provider_api_keys
-                    .filter(dsl::tenant_id.eq(tenant_id))
+                    .filter(dsl::tenant_id.eq(tenant_id.clone()))
                     .filter(dsl::provider.eq(provider))
                     .filter(dsl::id.eq(id))
                     .filter(dsl::group_id.eq(group_id)),
@@ -989,7 +995,7 @@ pub mod api_key {
 
     pub async fn delete_by_id(
         conn: &mut AsyncPgConnection,
-        tenant_id: Uuid,
+        tenant_id: String,
         provider: &str,
         id: Uuid,
     ) -> AppResult<ProviderApiKey> {
@@ -998,7 +1004,7 @@ pub mod api_key {
         required_api_key(
             diesel::delete(
                 dsl::provider_api_keys
-                    .filter(dsl::tenant_id.eq(tenant_id))
+                    .filter(dsl::tenant_id.eq(tenant_id.clone()))
                     .filter(dsl::provider.eq(provider))
                     .filter(dsl::id.eq(id)),
             )

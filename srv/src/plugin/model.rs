@@ -7,7 +7,7 @@ pub mod schema {
     diesel::table! {
         plugin_suites (id) {
             id -> Uuid,
-            tenant_id -> Uuid,
+            tenant_id -> Text,
             name -> Text,
             description -> Text,
             provider -> Text,
@@ -86,7 +86,7 @@ impl PluginSlot {
 #[derive(Debug, Clone, Queryable)]
 pub struct PluginSuite {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub name: String,
     pub description: String,
     pub provider: String,
@@ -96,7 +96,7 @@ pub struct PluginSuite {
 #[derive(Insertable)]
 #[diesel(table_name = schema::plugin_suites)]
 pub struct NewPluginSuite {
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub name: String,
     pub description: String,
     pub provider: String,
@@ -137,7 +137,7 @@ pub struct PluginArtifactSummary {
 pub struct PluginReleaseSummary {
     pub id: Uuid,
     pub suite_id: Uuid,
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub suite_name: String,
     pub description: String,
     pub provider: String,
@@ -162,7 +162,7 @@ pub struct PluginArtifactBinding {
 pub struct PluginBinding {
     pub release_id: Uuid,
     pub suite_id: Uuid,
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub suite_name: String,
     pub provider: String,
     pub version: i64,

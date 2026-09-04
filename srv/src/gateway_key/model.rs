@@ -8,7 +8,7 @@ pub mod schema {
     diesel::table! {
         api_keys (id) {
             id -> Uuid,
-            tenant_id -> Uuid,
+            tenant_id -> Text,
             user_id -> Uuid,
             group_id -> Uuid,
             name -> Text,
@@ -41,7 +41,7 @@ pub mod schema {
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct GatewayApiKey {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub user_id: Uuid,
     pub group_id: Uuid,
     pub name: String,
@@ -57,7 +57,7 @@ pub struct GatewayApiKey {
 #[derive(Insertable)]
 #[diesel(table_name = schema::api_keys)]
 pub(super) struct NewGatewayApiKey {
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub user_id: Uuid,
     pub group_id: Uuid,
     pub name: String,

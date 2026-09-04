@@ -36,19 +36,19 @@ pub async fn create(
 ) -> AppResult<GatewayApiKeyWithModels> {
     use self::api_keys::dsl;
 
-    let tenant_id = user.tenant_id.ok_or(AppError::Forbidden)?;
+    let tenant_id = user.tenant_id.clone().ok_or(AppError::Forbidden)?;
     let user_id = user.id;
     let allowed_models = group::normalize_models(allowed_models)?;
 
     let result = conn
         .transaction::<GatewayApiKeyWithModels, AppError, _>(async |conn| {
             let provider_group =
-                group::require_enabled_for_write(&mut *conn, tenant_id, group_id).await?;
+                group::require_enabled_for_write(&mut *conn, tenant_id.clone(), group_id).await?;
             group_access::require_group_grant(&mut *conn, user, group_id).await?;
             if let Some(plugin_release_id) = plugin_release_id {
                 crate::plugin::sql::require_enabled_release_for_provider_write(
                     &mut *conn,
-                    tenant_id,
+                    tenant_id.clone(),
                     plugin_release_id,
                     &provider_group.provider,
                 )
@@ -58,7 +58,7 @@ pub async fn create(
             ensure_models_within_group(&allowed_models, &group_models, provider_group.id)?;
 
             let new_api_key = NewGatewayApiKey {
-                tenant_id,
+                tenant_id: tenant_id.clone(),
                 user_id,
                 group_id,
                 name,
@@ -294,7 +294,7 @@ pub async fn update_models_for_user(
                 .filter(dsl::id.eq(id))
                 .filter(dsl::user_id.eq(user_id))
                 .select((dsl::tenant_id, dsl::group_id))
-                .first::<(Uuid, Uuid)>(&mut *conn)
+                .first::<(String, Uuid)>(&mut *conn)
                 .await
                 .map_err(|source| match source {
                     diesel::result::Error::NotFound => AppError::BadRequest {

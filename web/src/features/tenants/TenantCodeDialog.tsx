@@ -33,10 +33,10 @@ export function TenantCodeDialog(props: TenantCodeDialogProps) {
       ? "当前租户码将立即失效"
       : "系统将自动生成租户码";
   const description = revoking
-    ? `确认撤销租户“${props.tenant.name}”的租户码？已注册用户不受影响。`
+    ? `确认撤销租户“${props.tenant.id}”的租户码？已注册用户不受影响。`
     : replacing
-      ? `系统将为租户“${props.tenant.name}”生成新的租户码，无需手动输入。`
-      : `系统将为租户“${props.tenant.name}”生成可用于注册的租户码，无需手动输入。`;
+      ? `系统将为租户“${props.tenant.id}”生成新的租户码，无需手动输入。`
+      : `系统将为租户“${props.tenant.id}”生成可用于注册的租户码，无需手动输入。`;
   const pendingLabel = revoking ? "正在撤销" : "正在生成";
   const confirmLabel = revoking ? "确认撤销" : replacing ? "生成新租户码" : "生成租户码";
   const toneClass = revoking

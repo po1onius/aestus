@@ -169,7 +169,7 @@ export function DashboardShell({
               title={tenant?.id ?? "平台管理员"}
             >
               <Building2 size={15} className="shrink-0" />
-              <span className="truncate">{tenant?.name ?? "平台管理"}</span>
+              <span className="truncate">{tenant?.id ?? "平台管理"}</span>
             </div>
             <div
               className="inline-flex h-9 max-w-48 items-center rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"

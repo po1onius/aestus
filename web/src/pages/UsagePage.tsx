@@ -112,7 +112,7 @@ export function UsagePage({
       allUsers
         ? buildRankOption(
             tenantRankPoints.map((point) => ({
-              name: point.tenant_name,
+              name: point.tenant_id,
               total_tokens: point.total_tokens,
             })),
             CONSUMER_COLORS,

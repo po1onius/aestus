@@ -27,7 +27,7 @@ pub struct UserUsageSnapshot {
 
 pub async fn create_user(
     conn: &mut AsyncPgConnection,
-    tenant_id: Option<Uuid>,
+    tenant_id: Option<String>,
     username: String,
     email: String,
     password_hash: String,
@@ -144,14 +144,14 @@ pub async fn find_by_id(conn: &mut AsyncPgConnection, id: Uuid) -> AppResult<Opt
 
 pub async fn list_by_tenant(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
     limit: i64,
     offset: i64,
 ) -> AppResult<Vec<User>> {
     use self::users::dsl;
 
     dsl::users
-        .filter(dsl::tenant_id.eq(tenant_id))
+        .filter(dsl::tenant_id.eq(tenant_id.clone()))
         .order((dsl::created_at.desc(), dsl::id.desc()))
         .limit(limit)
         .offset(offset)
@@ -165,7 +165,7 @@ pub async fn list_by_tenant(
 
 pub async fn list_usage_snapshots(
     conn: &mut AsyncPgConnection,
-    tenant_id: Option<Uuid>,
+    tenant_id: Option<&str>,
 ) -> AppResult<Vec<UserUsageSnapshot>> {
     use self::users::dsl;
 
@@ -194,7 +194,7 @@ pub async fn list_usage_snapshots(
 
 pub async fn update_quota_for_tenant(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
     id: Uuid,
     quota: i64,
 ) -> AppResult<User> {
@@ -205,7 +205,7 @@ pub async fn update_quota_for_tenant(
     let result = diesel::update(
         dsl::users
             .filter(dsl::id.eq(id))
-            .filter(dsl::tenant_id.eq(tenant_id)),
+            .filter(dsl::tenant_id.eq(tenant_id.clone())),
     )
     .set((dsl::quota.eq(quota), dsl::updated_at.eq(chrono::Utc::now())))
     .returning(User::as_returning())
@@ -233,7 +233,7 @@ impl User {
     /// 表示不限制并发，非空值必须位于数据库约束一致的 `1..=10000` 区间。
     pub async fn update_max_concurrency_for_tenant(
         conn: &mut AsyncPgConnection,
-        tenant_id: Uuid,
+        tenant_id: String,
         id: Uuid,
         max_concurrency: Option<i32>,
     ) -> AppResult<(Self, Option<i32>)> {
@@ -248,7 +248,7 @@ impl User {
         conn.transaction::<(Self, Option<i32>), AppError, _>(async move |conn| {
             let existing = dsl::users
                 .filter(dsl::id.eq(id))
-                .filter(dsl::tenant_id.eq(tenant_id))
+                .filter(dsl::tenant_id.eq(tenant_id.clone()))
                 .for_update()
                 .select(Self::as_select())
                 .first::<Self>(conn)
@@ -272,7 +272,7 @@ impl User {
             let user = diesel::update(
                 dsl::users
                     .filter(dsl::id.eq(id))
-                    .filter(dsl::tenant_id.eq(tenant_id)),
+                    .filter(dsl::tenant_id.eq(tenant_id.clone())),
             )
             .set((
                 dsl::max_concurrency.eq(max_concurrency),
@@ -302,7 +302,7 @@ impl User {
 
 pub async fn update_status(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
     id: Uuid,
     enabled: bool,
 ) -> AppResult<User> {
@@ -321,7 +321,7 @@ pub async fn update_status(
     let result = diesel::update(
         dsl::users
             .filter(dsl::id.eq(id))
-            .filter(dsl::tenant_id.eq(tenant_id))
+            .filter(dsl::tenant_id.eq(tenant_id.clone()))
             .filter(dsl::role.eq(USER_ROLE_TENANT_USER)),
     )
     .set(&patch)

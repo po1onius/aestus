@@ -107,7 +107,7 @@ async fn create_api_key(
     let group = load_group(&mut conn, api_key.api_key.group_id).await?;
     let plugin = load_plugin_summary(
         &mut conn,
-        api_key.api_key.tenant_id,
+        api_key.api_key.tenant_id.clone(),
         api_key.api_key.plugin_release_id,
     )
     .await?;
@@ -138,8 +138,8 @@ async fn list_api_keys(
         .iter()
         .map(|item| item.api_key.group_id)
         .collect::<Vec<_>>();
-    let tenant_id = current_user.tenant_id.ok_or(AppError::Forbidden)?;
-    let groups = group::find_by_ids(&mut conn, tenant_id, &group_ids).await?;
+    let tenant_id = current_user.tenant_id.clone().ok_or(AppError::Forbidden)?;
+    let groups = group::find_by_ids(&mut conn, tenant_id.clone(), &group_ids).await?;
     let group_models = group::load_models_by_group_ids(&mut conn, &group_ids).await?;
     let plugin_release_ids = api_keys
         .iter()
@@ -229,7 +229,7 @@ async fn update_api_key_enabled(
     let group = load_group(&mut conn, api_key.api_key.group_id).await?;
     let plugin = load_plugin_summary(
         &mut conn,
-        api_key.api_key.tenant_id,
+        api_key.api_key.tenant_id.clone(),
         api_key.api_key.plugin_release_id,
     )
     .await?;
@@ -253,7 +253,7 @@ async fn update_api_key_models(
     let group = load_group(&mut conn, api_key.api_key.group_id).await?;
     let plugin = load_plugin_summary(
         &mut conn,
-        api_key.api_key.tenant_id,
+        api_key.api_key.tenant_id.clone(),
         api_key.api_key.plugin_release_id,
     )
     .await?;
@@ -281,7 +281,7 @@ async fn update_api_key_plugin(
     let group = load_group(&mut conn, api_key.api_key.group_id).await?;
     let plugin = load_plugin_summary(
         &mut conn,
-        api_key.api_key.tenant_id,
+        api_key.api_key.tenant_id.clone(),
         api_key.api_key.plugin_release_id,
     )
     .await?;
@@ -366,7 +366,7 @@ async fn require_api_key_group_grant(
 
 async fn load_plugin_summary(
     conn: &mut diesel_async::AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
     release_id: Option<Uuid>,
 ) -> AppResult<Option<PluginReleaseSummary>> {
     let Some(release_id) = release_id else {

@@ -110,9 +110,9 @@ async fn list_user_group_grants(
     auth::AdminUser(owner): auth::AdminUser,
     Path(id): Path<Uuid>,
 ) -> AdminResult<Json<Vec<UserGroupGrant>>> {
-    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
+    let tenant_id = owner.tenant_id.clone().ok_or(AppError::Forbidden)?;
     let mut conn = state.db_conn().await?;
-    let grants = group_access::list_for_managed_user(&mut conn, tenant_id, id).await?;
+    let grants = group_access::list_for_managed_user(&mut conn, tenant_id.clone(), id).await?;
     info!(
         admin_user_id = %owner.id,
         target_user_id = %id,
@@ -129,7 +129,7 @@ async fn replace_user_group_grants(
     Path(id): Path<Uuid>,
     Json(payload): Json<ReplaceUserGroupGrantsRequest>,
 ) -> AdminResult<Json<Vec<UserGroupGrant>>> {
-    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
+    let tenant_id = owner.tenant_id.clone().ok_or(AppError::Forbidden)?;
     let inputs = payload
         .grants
         .into_iter()
@@ -150,10 +150,10 @@ async fn create_user(
     Json(payload): Json<CreateUserRequest>,
 ) -> AdminResult<Json<PublicUser>> {
     let mut conn = state.db_conn().await?;
-    let tenant_id = current_admin.tenant_id.ok_or(AppError::Forbidden)?;
+    let tenant_id = current_admin.tenant_id.clone().ok_or(AppError::Forbidden)?;
     let user = user::create_owner_managed_user(
         &mut conn,
-        tenant_id,
+        tenant_id.clone(),
         payload.username,
         payload.email,
         payload.password,
@@ -181,9 +181,14 @@ async fn list_users(
 ) -> AdminResult<Json<ListPage<UserListItemResponse>>> {
     let page = query.normalize()?;
     let mut conn = state.db_conn().await?;
-    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
-    let users =
-        user::list_by_tenant(&mut conn, tenant_id, page.query_limit(), page.offset()).await?;
+    let tenant_id = owner.tenant_id.clone().ok_or(AppError::Forbidden)?;
+    let users = user::list_by_tenant(
+        &mut conn,
+        tenant_id.clone(),
+        page.query_limit(),
+        page.offset(),
+    )
+    .await?;
     drop(conn);
 
     // 先完成分页截断，避免为仅用于判断 next_offset 的额外一行查询 Redis；随后按原 Vec
@@ -196,7 +201,8 @@ async fn list_users(
         .collect::<Vec<_>>();
     let providers = [gpt::model::PROVIDER, claude::model::PROVIDER];
     let current =
-        concurrency::active_counts_for_users(&state, tenant_id, &user_ids, &providers).await?;
+        concurrency::active_counts_for_users(&state, tenant_id.clone(), &user_ids, &providers)
+            .await?;
     let items = user_page
         .items
         .into_iter()
@@ -235,7 +241,7 @@ async fn update_user_quota(
     Json(payload): Json<UpdateUserQuotaRequest>,
 ) -> AdminResult<Json<PublicUser>> {
     let mut conn = state.db_conn().await?;
-    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
+    let tenant_id = owner.tenant_id.clone().ok_or(AppError::Forbidden)?;
     let user = user::update_quota_for_tenant(&mut conn, tenant_id, id, payload.quota).await?;
 
     Ok(Json(user.into()))
@@ -248,11 +254,11 @@ async fn update_user_max_concurrency(
     Json(payload): Json<UpdateUserMaxConcurrencyRequest>,
 ) -> AdminResult<Json<PublicUser>> {
     let mut conn = state.db_conn().await?;
-    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
+    let tenant_id = owner.tenant_id.clone().ok_or(AppError::Forbidden)?;
     let requested_max_concurrency = payload.max_concurrency.0;
     let (user, previous_max_concurrency) = User::update_max_concurrency_for_tenant(
         &mut conn,
-        tenant_id,
+        tenant_id.clone(),
         id,
         requested_max_concurrency,
     )
@@ -279,7 +285,7 @@ async fn update_user_status(
     Json(payload): Json<UpdateUserStatusRequest>,
 ) -> AdminResult<Json<PublicUser>> {
     let mut conn = state.db_conn().await?;
-    let tenant_id = current_user.tenant_id.ok_or(AppError::Forbidden)?;
+    let tenant_id = current_user.tenant_id.clone().ok_or(AppError::Forbidden)?;
     let user = user::update_status(&mut conn, tenant_id, id, payload.enabled).await?;
 
     Ok(Json(user.into()))

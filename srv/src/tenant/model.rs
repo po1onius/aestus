@@ -6,8 +6,7 @@ use uuid::Uuid;
 pub mod schema {
     diesel::table! {
         tenants (id) {
-            id -> Uuid,
-            name -> Text,
+            id -> Text,
             enabled -> Bool,
             created_by -> Uuid,
             created_at -> Timestamptz,
@@ -19,7 +18,7 @@ pub mod schema {
     diesel::table! {
         tenant_codes (code) {
             code -> Text,
-            tenant_id -> Uuid,
+            tenant_id -> Text,
             created_by -> Uuid,
             created_at -> Timestamptz,
         }
@@ -32,8 +31,7 @@ pub mod schema {
 #[diesel(table_name = schema::tenants)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Tenant {
-    pub id: Uuid,
-    pub name: String,
+    pub id: String,
     pub enabled: bool,
     pub created_by: Uuid,
     pub created_at: DateTime<Utc>,

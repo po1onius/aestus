@@ -63,7 +63,7 @@ export function TenantsPage({ token, refreshSignal }: TenantsPageProps) {
     try {
       await requestJson<TenantSummary>(tenantsPath, {
         method: "POST",
-        body: JSON.stringify({ name: name.trim(), password: password || null }),
+        body: JSON.stringify({ id: name.trim(), password: password || null }),
       }, token);
       setName("");
       setPassword("");
@@ -93,7 +93,7 @@ export function TenantsPage({ token, refreshSignal }: TenantsPageProps) {
   async function toggleTenant(tenant: TenantSummary) {
     setUpdatingId(tenant.id);
     try {
-      await requestJson(`${tenantsPath}/${tenant.id}/status`, {
+      await requestJson(`${tenantsPath}/${encodeURIComponent(tenant.id)}/status`, {
         method: "PUT",
         body: JSON.stringify({ enabled: !tenant.enabled }),
       }, token);
@@ -120,7 +120,7 @@ export function TenantsPage({ token, refreshSignal }: TenantsPageProps) {
     const { tenant } = codeDialog;
     setUpdatingId(tenant.id);
     try {
-      await requestJson<TenantSummary>(`${tenantsPath}/${tenant.id}/code`, {
+      await requestJson<TenantSummary>(`${tenantsPath}/${encodeURIComponent(tenant.id)}/code`, {
         method: "POST",
       }, token);
       toast.success(tenant.code ? "新租户码已生成" : "租户码已生成");
@@ -138,7 +138,7 @@ export function TenantsPage({ token, refreshSignal }: TenantsPageProps) {
     const { tenant } = codeDialog;
     setUpdatingId(tenant.id);
     try {
-      await requestJson(`${tenantsPath}/${tenant.id}/code`, { method: "DELETE" }, token);
+      await requestJson(`${tenantsPath}/${encodeURIComponent(tenant.id)}/code`, { method: "DELETE" }, token);
       toast.success("租户码已撤销");
       await loadTenants();
       setCodeDialog(null);
@@ -176,7 +176,7 @@ export function TenantsPage({ token, refreshSignal }: TenantsPageProps) {
                   const updating = updatingId === tenant.id;
                   return (
                     <tr key={tenant.id}>
-                      <td className="px-4 py-3"><div className="font-medium">{tenant.name}</div><div className="text-xs text-slate-400">{tenant.id}</div></td>
+                      <td className="px-4 py-3 font-medium">{tenant.id}</td>
                       <td className="px-4 py-3 font-mono">{tenant.code ?? <span className="font-sans text-slate-400">已撤销</span>}</td>
                       <td className="px-4 py-3"><span className={tenant.enabled ? "text-emerald-600" : "text-slate-400"}>{tenant.enabled ? "启用" : "停用"}</span></td>
                       <td className="px-4 py-3"><div className="flex justify-end gap-2">

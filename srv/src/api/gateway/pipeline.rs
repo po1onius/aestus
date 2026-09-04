@@ -70,7 +70,7 @@ where
         .emit(RequestEvent::GatewayAuthenticated {
             request_id,
             details: GatewayAuthDetails {
-                tenant_id: auth.tenant_id(),
+                tenant_id: auth.tenant_id().to_owned(),
                 api_key_id: auth.api_key_id(),
                 api_key_name: auth.api_key_name().to_owned(),
                 user_id: auth.user_id(),
@@ -84,7 +84,7 @@ where
     let concurrency_lease = match concurrency::acquire(
         state,
         request_id,
-        auth.tenant_id(),
+        auth.tenant_id().to_owned(),
         auth.user_id(),
         P::provider_name(),
         auth.max_concurrency(),

@@ -4,7 +4,7 @@ CREATE TABLE IF NOT EXISTS gateway_request_logs
     provider LowCardinality(String),
     route LowCardinality(String),
     api_key_name Nullable(String),
-    tenant_id Nullable(UUID),
+    tenant_id Nullable(String),
     user_id Nullable(UUID),
     username Nullable(String),
     provider_group_id Nullable(UUID),
@@ -45,7 +45,7 @@ TTL request_started_at + INTERVAL 30 DAY DELETE;
 CREATE TABLE IF NOT EXISTS gateway_request_usage_daily
 (
     usage_date Date,
-    tenant_id UUID,
+    tenant_id String,
     user_id UUID,
     provider LowCardinality(String),
     model LowCardinality(String),

@@ -91,7 +91,6 @@ export interface DashboardRoute {
 
 export interface DashboardTenant {
   id: string;
-  name: string;
 }
 
 export interface TenantSummary extends DashboardTenant {
@@ -502,7 +501,6 @@ export interface UsageUserPoint {
 
 export interface UsageTenantPoint {
   tenant_id: string;
-  tenant_name: string;
   total_tokens: string;
   request_count: string;
   percentage: number;

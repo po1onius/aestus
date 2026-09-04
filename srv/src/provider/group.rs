@@ -38,7 +38,7 @@ pub mod schema {
     diesel::table! {
         provider_groups (id) {
             id -> Uuid,
-            tenant_id -> Uuid,
+            tenant_id -> Text,
             provider -> Text,
             name -> Text,
             enabled -> Bool,
@@ -64,7 +64,7 @@ pub mod schema {
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct ProviderGroup {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub provider: String,
     pub name: String,
     pub enabled: bool,
@@ -76,7 +76,7 @@ pub struct ProviderGroup {
 #[derive(Debug, Insertable)]
 #[diesel(table_name = schema::provider_groups)]
 struct NewProviderGroup {
-    tenant_id: Uuid,
+    tenant_id: String,
     provider: String,
     name: String,
 }
@@ -210,13 +210,13 @@ pub fn ensure_supported_provider(provider: &str) -> AppResult<()> {
 
 pub async fn list_enabled(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
 ) -> AppResult<Vec<ProviderGroupWithModels>> {
     use schema::provider_groups::dsl;
 
     let groups = dsl::provider_groups
         .filter(dsl::enabled.eq(true))
-        .filter(dsl::tenant_id.eq(tenant_id))
+        .filter(dsl::tenant_id.eq(tenant_id.clone()))
         .order((dsl::provider.asc(), dsl::name.asc(), dsl::id.asc()))
         .select(ProviderGroup::as_select())
         .load(conn)
@@ -227,7 +227,7 @@ pub async fn list_enabled(
 
 pub async fn list_summaries(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
     provider: Option<&str>,
 ) -> AppResult<Vec<ProviderGroupSummary>> {
     use schema::provider_groups::dsl;
@@ -237,7 +237,7 @@ pub async fn list_summaries(
     }
     let groups = match provider {
         Some(provider) => dsl::provider_groups
-            .filter(dsl::tenant_id.eq(tenant_id))
+            .filter(dsl::tenant_id.eq(tenant_id.clone()))
             .filter(dsl::provider.eq(provider))
             .order((dsl::created_at.asc(), dsl::id.asc()))
             .select(ProviderGroup::as_select())
@@ -245,7 +245,7 @@ pub async fn list_summaries(
             .await
             .map_err(db_error)?,
         None => dsl::provider_groups
-            .filter(dsl::tenant_id.eq(tenant_id))
+            .filter(dsl::tenant_id.eq(tenant_id.clone()))
             .order((dsl::provider.asc(), dsl::created_at.asc(), dsl::id.asc()))
             .select(ProviderGroup::as_select())
             .load(conn)
@@ -270,13 +270,13 @@ pub async fn list_summaries(
 
 pub async fn list_unassigned_resources(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
     provider: &str,
 ) -> AppResult<Vec<UnassignedProviderResource>> {
     ensure_supported_provider(provider)?;
 
     let accounts = provider_accounts::table
-        .filter(provider_accounts::tenant_id.eq(tenant_id))
+        .filter(provider_accounts::tenant_id.eq(tenant_id.clone()))
         .filter(provider_accounts::provider.eq(provider))
         .filter(provider_accounts::group_id.is_null())
         .order((
@@ -288,7 +288,7 @@ pub async fn list_unassigned_resources(
         .await
         .map_err(db_error)?;
     let api_keys = provider_api_keys::table
-        .filter(provider_api_keys::tenant_id.eq(tenant_id))
+        .filter(provider_api_keys::tenant_id.eq(tenant_id.clone()))
         .filter(provider_api_keys::provider.eq(provider))
         .filter(provider_api_keys::group_id.is_null())
         .order((
@@ -344,7 +344,7 @@ pub async fn find_by_id(
 
 pub async fn find_by_ids(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
     ids: &[Uuid],
 ) -> AppResult<HashMap<Uuid, ProviderGroup>> {
     use schema::provider_groups::dsl;
@@ -353,7 +353,7 @@ pub async fn find_by_ids(
         return Ok(HashMap::new());
     }
     let groups = dsl::provider_groups
-        .filter(dsl::tenant_id.eq(tenant_id))
+        .filter(dsl::tenant_id.eq(tenant_id.clone()))
         .filter(dsl::id.eq_any(ids))
         .select(ProviderGroup::as_select())
         .load::<ProviderGroup>(conn)
@@ -444,14 +444,14 @@ fn take_required_models(
 
 pub async fn require_for_update_in_tenant(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
     id: Uuid,
 ) -> AppResult<ProviderGroup> {
     use schema::provider_groups::dsl;
 
     dsl::provider_groups
         .filter(dsl::id.eq(id))
-        .filter(dsl::tenant_id.eq(tenant_id))
+        .filter(dsl::tenant_id.eq(tenant_id.clone()))
         .for_update()
         .select(ProviderGroup::as_select())
         .first::<ProviderGroup>(conn)
@@ -466,7 +466,7 @@ pub async fn require_for_update_in_tenant(
 
 pub async fn require_enabled_for_write(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
     id: Uuid,
 ) -> AppResult<ProviderGroup> {
     let group = require_for_update_in_tenant(conn, tenant_id, id).await?;
@@ -486,7 +486,7 @@ pub async fn require_enabled_for_write(
 
 pub async fn require_enabled_for_provider_write(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
     id: Uuid,
     provider: &str,
 ) -> AppResult<ProviderGroup> {
@@ -511,7 +511,7 @@ pub async fn require_enabled_for_provider_write(
 
 pub async fn create(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
     provider: String,
     name: String,
     models: Vec<String>,
@@ -535,7 +535,7 @@ pub async fn create(
 
             let result = diesel::insert_into(provider_groups::table)
                 .values(&NewProviderGroup {
-                    tenant_id,
+                    tenant_id: tenant_id.clone(),
                     provider: provider.clone(),
                     name: name.clone(),
                 })
@@ -563,7 +563,7 @@ pub async fn create(
             } else {
                 diesel::update(
                     provider_accounts::table
-                        .filter(provider_accounts::tenant_id.eq(tenant_id))
+                        .filter(provider_accounts::tenant_id.eq(tenant_id.clone()))
                         .filter(provider_accounts::provider.eq(&provider))
                         .filter(provider_accounts::id.eq_any(&account_ids))
                         .filter(provider_accounts::group_id.is_null()),
@@ -594,7 +594,7 @@ pub async fn create(
             } else {
                 diesel::update(
                     provider_api_keys::table
-                        .filter(provider_api_keys::tenant_id.eq(tenant_id))
+                        .filter(provider_api_keys::tenant_id.eq(tenant_id.clone()))
                         .filter(provider_api_keys::provider.eq(&provider))
                         .filter(provider_api_keys::id.eq_any(&api_key_ids))
                         .filter(provider_api_keys::group_id.is_null()),
@@ -634,7 +634,7 @@ pub async fn create(
 
 pub async fn rename(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
     id: Uuid,
     name: String,
 ) -> AppResult<ProviderGroup> {
@@ -654,7 +654,7 @@ pub async fn rename(
     let result = diesel::update(
         dsl::provider_groups
             .filter(dsl::id.eq(id))
-            .filter(dsl::tenant_id.eq(tenant_id)),
+            .filter(dsl::tenant_id.eq(tenant_id.clone())),
     )
     .set((dsl::name.eq(&name), dsl::updated_at.eq(Utc::now())))
     .returning(ProviderGroup::as_returning())
@@ -672,7 +672,7 @@ pub async fn rename(
 /// `api_key_models`，也无需通知 maintenance。
 pub async fn update_models(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
     id: Uuid,
     models: Vec<String>,
 ) -> AppResult<ProviderGroupWithModels> {
@@ -685,7 +685,7 @@ pub async fn update_models(
             // 落库。项目不使用外键，因此还必须先显式确认分组存在再改逐行映射。
             let current = provider_groups::table
                 .filter(provider_groups::id.eq(id))
-                .filter(provider_groups::tenant_id.eq(tenant_id))
+                .filter(provider_groups::tenant_id.eq(tenant_id.clone()))
                 .for_update()
                 .select(ProviderGroup::as_select())
                 .first::<ProviderGroup>(&mut *conn)
@@ -741,7 +741,7 @@ pub async fn update_models(
 
 pub async fn update_enabled(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
     id: Uuid,
     enabled: bool,
 ) -> AppResult<ProviderGroup> {
@@ -750,7 +750,7 @@ pub async fn update_enabled(
 
             let group = dsl::provider_groups
                 .filter(dsl::id.eq(id))
-                .filter(dsl::tenant_id.eq(tenant_id))
+                .filter(dsl::tenant_id.eq(tenant_id.clone()))
                 .for_update()
                 .select(ProviderGroup::as_select())
                 .first::<ProviderGroup>(&mut *conn)
@@ -791,7 +791,7 @@ pub async fn update_enabled(
 /// 显式处理并校验受影响行数。
 pub async fn delete(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
     id: Uuid,
 ) -> AppResult<DeletedProviderGroup> {
     let deleted = conn

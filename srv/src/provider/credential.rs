@@ -17,7 +17,7 @@ pub mod schema {
     diesel::table! {
         provider_accounts (id) {
             id -> Uuid,
-            tenant_id -> Uuid,
+            tenant_id -> Text,
             provider -> Text,
             group_id -> Nullable<Uuid>,
             refresh_token -> Text,
@@ -40,7 +40,7 @@ pub mod schema {
     diesel::table! {
         provider_api_keys (id) {
             id -> Uuid,
-            tenant_id -> Uuid,
+            tenant_id -> Text,
             provider -> Text,
             group_id -> Nullable<Uuid>,
             api_key -> Text,
@@ -71,7 +71,7 @@ pub const ACCOUNT_STATUS_INVALID: &str = "invalid";
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct ProviderAccount {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub provider: String,
     /// 未分组资源仍由 maintenance 维护，但不会进入 Redis 调度池。
     pub group_id: Option<Uuid>,
@@ -123,7 +123,7 @@ impl ProviderAccount {
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct ProviderApiKey {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub provider: String,
     /// 官方 Key 可以先导入再由分组创建或迁移操作绑定。
     pub group_id: Option<Uuid>,
@@ -171,7 +171,7 @@ fn parse_provider_json<T: DeserializeOwned>(
 #[derive(Debug, Clone, Insertable)]
 #[diesel(table_name = schema::provider_accounts)]
 pub struct NewProviderAccount {
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub provider: String,
     pub refresh_token: String,
     pub access_token: String,
@@ -189,7 +189,7 @@ pub struct NewProviderAccount {
 #[derive(Debug, Clone, Insertable)]
 #[diesel(table_name = schema::provider_api_keys)]
 pub struct NewProviderApiKey {
-    pub tenant_id: Uuid,
+    pub tenant_id: String,
     pub provider: String,
     pub api_key: String,
     pub base_url: String,

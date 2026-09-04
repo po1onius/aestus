@@ -20,7 +20,7 @@ pub mod account {
     #[allow(clippy::too_many_arguments)]
     pub async fn create_with_override(
         conn: &mut AsyncPgConnection,
-        tenant_id: uuid::Uuid,
+        tenant_id: String,
         chatgpt_account_id: Option<String>,
         email: Option<String>,
         plan_type: String,

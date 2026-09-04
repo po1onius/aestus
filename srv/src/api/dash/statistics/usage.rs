@@ -18,7 +18,6 @@ use crate::{
     api::dash::auth,
     err::{AppError, AppResult},
     state::AppState,
-    tenant,
     user::{self, User},
 };
 
@@ -36,10 +35,10 @@ struct NormalizedUsageRange {
 }
 
 /// 用量查询的数据边界由已认证用户角色唯一决定，不接受调用方通过 query 参数自行扩大。
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum UsageScope {
-    CurrentUser(Uuid, Uuid),
-    Tenant(Uuid),
+    CurrentUser(String, Uuid),
+    Tenant(String),
     AllUsers,
 }
 
@@ -48,13 +47,16 @@ impl UsageScope {
         if user.is_platform_admin() {
             Self::AllUsers
         } else if user.is_tenant_owner() {
-            Self::Tenant(user.tenant_id.expect("tenant owner 必须归属租户"))
+            Self::Tenant(user.tenant_id.clone().expect("tenant owner 必须归属租户"))
         } else {
-            Self::CurrentUser(user.tenant_id.expect("tenant user 必须归属租户"), user.id)
+            Self::CurrentUser(
+                user.tenant_id.clone().expect("tenant user 必须归属租户"),
+                user.id,
+            )
         }
     }
 
-    fn as_str(self) -> &'static str {
+    fn as_str(&self) -> &'static str {
         match self {
             Self::CurrentUser(_, _) => "current_user",
             Self::Tenant(_) => "tenant",
@@ -62,14 +64,14 @@ impl UsageScope {
         }
     }
 
-    fn user_id(self) -> Option<Uuid> {
+    fn user_id(&self) -> Option<Uuid> {
         match self {
-            Self::CurrentUser(_, user_id) => Some(user_id),
+            Self::CurrentUser(_, user_id) => Some(*user_id),
             Self::Tenant(_) | Self::AllUsers => None,
         }
     }
 
-    fn tenant_id(self) -> Option<Uuid> {
+    fn tenant_id(&self) -> Option<&str> {
         match self {
             Self::CurrentUser(tenant_id, _) | Self::Tenant(tenant_id) => Some(tenant_id),
             Self::AllUsers => None,
@@ -82,7 +84,6 @@ struct UsageDirectory {
     remaining_tokens: String,
     consumed_tokens: String,
     usernames_by_id: HashMap<Uuid, String>,
-    tenant_names_by_id: HashMap<Uuid, String>,
 }
 
 #[derive(Debug, Deserialize, Row)]
@@ -124,8 +125,7 @@ struct UsageUserRow {
 
 #[derive(Debug, Deserialize, Row)]
 struct UsageTenantRow {
-    #[serde(with = "clickhouse::serde::uuid")]
-    tenant_id: Uuid,
+    tenant_id: String,
     total_tokens_text: String,
     request_count: u64,
 }
@@ -195,8 +195,7 @@ struct UsageUserPoint {
 
 #[derive(Debug, Serialize)]
 struct UsageTenantPoint {
-    tenant_id: Uuid,
-    tenant_name: String,
+    tenant_id: String,
     total_tokens: String,
     request_count: String,
     percentage: f64,
@@ -216,11 +215,11 @@ async fn get_usage(
     // 只有 daily 使用固定年度窗口；总量、模型和消费方分布均查询长期日聚合。各查询
     // 彼此独立且数据量已经受控，并行执行可以降低 Dashboard 首屏延迟。
     let (directory, totals, daily_rows, model_rows, breakdown_rows) = tokio::try_join!(
-        load_usage_directory(&state, &current_user, scope),
-        query_usage_totals(&state, scope),
-        query_usage_daily(&state, scope, &query),
-        query_usage_models(&state, scope),
-        query_usage_breakdown(&state, scope),
+        load_usage_directory(&state, &current_user, &scope),
+        query_usage_totals(&state, &scope),
+        query_usage_daily(&state, &scope, &query),
+        query_usage_models(&state, &scope),
+        query_usage_breakdown(&state, &scope),
     )?;
     let daily = build_daily_usage(daily_rows, &query)?;
 
@@ -265,11 +264,6 @@ async fn get_usage(
         .into_iter()
         .map(|row| UsageTenantPoint {
             percentage: token_percentage(&row.total_tokens_text, lifetime_total),
-            tenant_name: directory
-                .tenant_names_by_id
-                .get(&row.tenant_id)
-                .cloned()
-                .unwrap_or_else(|| format!("未知租户 ({})", row.tenant_id)),
             tenant_id: row.tenant_id,
             total_tokens: row.total_tokens_text,
             request_count: row.request_count.to_string(),
@@ -340,14 +334,13 @@ fn normalize_usage_range(timezone: chrono_tz::Tz) -> AppResult<NormalizedUsageRa
 async fn load_usage_directory(
     state: &AppState,
     current_user: &User,
-    scope: UsageScope,
+    scope: &UsageScope,
 ) -> AppResult<UsageDirectory> {
     if matches!(scope, UsageScope::CurrentUser(_, _)) {
         return Ok(UsageDirectory {
             remaining_tokens: current_user.quota.to_string(),
             consumed_tokens: current_user.consumed_tokens.to_string(),
             usernames_by_id: HashMap::from([(current_user.id, current_user.username.clone())]),
-            tenant_names_by_id: HashMap::new(),
         });
     }
 
@@ -371,18 +364,8 @@ async fn load_usage_directory(
         usernames_by_id.insert(snapshot.id, snapshot.username);
     }
 
-    let tenant_names_by_id = if matches!(scope, UsageScope::AllUsers) {
-        tenant::list_usage_names(&mut conn)
-            .await?
-            .into_iter()
-            .collect::<HashMap<_, _>>()
-    } else {
-        HashMap::new()
-    };
-
     info!(
         user_count = usernames_by_id.len(),
-        tenant_count = tenant_names_by_id.len(),
         remaining_tokens = %remaining_tokens,
         consumed_tokens = %consumed_tokens,
         "Dashboard 全部用户额度快照聚合完成"
@@ -391,11 +374,10 @@ async fn load_usage_directory(
         remaining_tokens: remaining_tokens.to_string(),
         consumed_tokens: consumed_tokens.to_string(),
         usernames_by_id,
-        tenant_names_by_id,
     })
 }
 
-async fn query_usage_totals(state: &AppState, scope: UsageScope) -> AppResult<UsageTotalsRow> {
+async fn query_usage_totals(state: &AppState, scope: &UsageScope) -> AppResult<UsageTotalsRow> {
     let current_user_sql = "SELECT \
         toString(sum(total_tokens)) AS total_tokens, \
         sum(request_count) AS request_count \
@@ -434,7 +416,7 @@ async fn query_usage_totals(state: &AppState, scope: UsageScope) -> AppResult<Us
 
 async fn query_usage_daily(
     state: &AppState,
-    scope: UsageScope,
+    scope: &UsageScope,
     query: &NormalizedUsageRange,
 ) -> AppResult<Vec<UsageDailyRow>> {
     // usage_date 已由 writer 按服务固定时区计算并持久化，这里只扫描 365 天的
@@ -492,7 +474,7 @@ async fn query_usage_daily(
         .map_err(|source| usage_daily_query_error(scope, query, source))
 }
 
-async fn query_usage_models(state: &AppState, scope: UsageScope) -> AppResult<Vec<UsageModelRow>> {
+async fn query_usage_models(state: &AppState, scope: &UsageScope) -> AppResult<Vec<UsageModelRow>> {
     // ClickHouse 的 SELECT 别名在 HAVING/ORDER BY 中可见。如果字符串结果也命名为
     // total_tokens，后面的 sum(total_tokens) 会被解析为对 String 别名再次聚合。内部使用
     // 独立别名，确保聚合表达式始终引用请求日志的 Int64 原始列。
@@ -549,11 +531,11 @@ async fn query_usage_models(state: &AppState, scope: UsageScope) -> AppResult<Ve
 
 async fn query_usage_breakdown(
     state: &AppState,
-    scope: UsageScope,
+    scope: &UsageScope,
 ) -> AppResult<UsageBreakdownRows> {
     match scope {
         UsageScope::CurrentUser(tenant_id, user_id) => Ok(UsageBreakdownRows {
-            api_keys: query_usage_api_keys(state, tenant_id, user_id).await?,
+            api_keys: query_usage_api_keys(state, tenant_id, *user_id).await?,
             users: Vec::new(),
             tenants: Vec::new(),
         }),
@@ -572,7 +554,7 @@ async fn query_usage_breakdown(
 
 async fn query_usage_api_keys(
     state: &AppState,
-    tenant_id: Uuid,
+    tenant_id: &str,
     user_id: Uuid,
 ) -> AppResult<Vec<UsageApiKeyRow>> {
     // API Key 名称在单个用户内唯一且不支持改名，普通用户视图可以直接按名称聚合。
@@ -599,7 +581,7 @@ async fn query_usage_api_keys(
         .map_err(|source| {
             usage_query_error(
                 "lifetime_api_key_distribution",
-                UsageScope::CurrentUser(tenant_id, user_id),
+                &UsageScope::CurrentUser(tenant_id.to_owned(), user_id),
                 source,
             )
         })
@@ -624,11 +606,15 @@ async fn query_usage_tenants(state: &AppState) -> AppResult<Vec<UsageTenantRow>>
         .fetch_all::<UsageTenantRow>()
         .await
         .map_err(|source| {
-            usage_query_error("lifetime_tenant_distribution", UsageScope::AllUsers, source)
+            usage_query_error(
+                "lifetime_tenant_distribution",
+                &UsageScope::AllUsers,
+                source,
+            )
         })
 }
 
-async fn query_usage_users(state: &AppState, tenant_id: Uuid) -> AppResult<Vec<UsageUserRow>> {
+async fn query_usage_users(state: &AppState, tenant_id: &str) -> AppResult<Vec<UsageUserRow>> {
     let sql = "SELECT \
         user_id, \
         toString(sum(total_tokens)) AS total_tokens_text, \
@@ -651,7 +637,7 @@ async fn query_usage_users(state: &AppState, tenant_id: Uuid) -> AppResult<Vec<U
         .map_err(|source| {
             usage_query_error(
                 "lifetime_user_distribution",
-                UsageScope::Tenant(tenant_id),
+                &UsageScope::Tenant(tenant_id.to_owned()),
                 source,
             )
         })
@@ -659,7 +645,7 @@ async fn query_usage_users(state: &AppState, tenant_id: Uuid) -> AppResult<Vec<U
 
 fn usage_query_error(
     query_kind: &'static str,
-    scope: UsageScope,
+    scope: &UsageScope,
     source: clickhouse::error::Error,
 ) -> AppError {
     error!(
@@ -676,7 +662,7 @@ fn usage_query_error(
 }
 
 fn usage_daily_query_error(
-    scope: UsageScope,
+    scope: &UsageScope,
     query: &NormalizedUsageRange,
     source: clickhouse::error::Error,
 ) -> AppError {

@@ -51,7 +51,7 @@ impl<'a, P: MaintenanceProvider> ProviderResourceService<'a, P> {
 
     pub async fn find_account(
         &self,
-        tenant_id: Uuid,
+        tenant_id: String,
         id: Uuid,
     ) -> AppResult<Option<ProviderAccount>> {
         let mut conn = self.state.db_conn().await?;
@@ -62,7 +62,7 @@ impl<'a, P: MaintenanceProvider> ProviderResourceService<'a, P> {
 
     pub async fn list_accounts(
         &self,
-        tenant_id: Uuid,
+        tenant_id: String,
         limit: i64,
         offset: i64,
     ) -> AppResult<Vec<AccountSnapshot>> {
@@ -76,7 +76,7 @@ impl<'a, P: MaintenanceProvider> ProviderResourceService<'a, P> {
 
     pub async fn list_accounts_in_groups(
         &self,
-        tenant_id: Uuid,
+        tenant_id: String,
         group_ids: &[Uuid],
         limit: i64,
         offset: i64,
@@ -111,12 +111,12 @@ impl<'a, P: MaintenanceProvider> ProviderResourceService<'a, P> {
 
     pub async fn update_account_enabled(
         &self,
-        tenant_id: Uuid,
+        tenant_id: String,
         id: Uuid,
         enabled: bool,
     ) -> AppResult<AccountSnapshot> {
         let mut conn = self.state.db_conn().await?;
-        require_account_tenant::<P>(&mut conn, tenant_id, id).await?;
+        require_account_tenant::<P>(&mut conn, tenant_id.clone(), id).await?;
         let account =
             sql::account::update_enabled(&mut conn, tenant_id, P::NAME, id, enabled).await?;
         drop(conn);
@@ -125,12 +125,12 @@ impl<'a, P: MaintenanceProvider> ProviderResourceService<'a, P> {
 
     pub async fn update_account_override(
         &self,
-        tenant_id: Uuid,
+        tenant_id: String,
         id: Uuid,
         request_override: RequestOverride,
     ) -> AppResult<AccountSnapshot> {
         let mut conn = self.state.db_conn().await?;
-        require_account_tenant::<P>(&mut conn, tenant_id, id).await?;
+        require_account_tenant::<P>(&mut conn, tenant_id.clone(), id).await?;
         let account =
             sql::account::update_override(&mut conn, tenant_id, P::NAME, id, request_override)
                 .await?;
@@ -140,7 +140,7 @@ impl<'a, P: MaintenanceProvider> ProviderResourceService<'a, P> {
 
     pub async fn update_account_override_in_group(
         &self,
-        tenant_id: Uuid,
+        tenant_id: String,
         id: Uuid,
         group_id: Uuid,
         request_override: RequestOverride,
@@ -161,12 +161,12 @@ impl<'a, P: MaintenanceProvider> ProviderResourceService<'a, P> {
 
     pub async fn update_account_group(
         &self,
-        tenant_id: Uuid,
+        tenant_id: String,
         id: Uuid,
         group_id: Option<Uuid>,
     ) -> AppResult<AccountSnapshot> {
         let mut conn = self.state.db_conn().await?;
-        require_account_tenant::<P>(&mut conn, tenant_id, id).await?;
+        require_account_tenant::<P>(&mut conn, tenant_id.clone(), id).await?;
         let account =
             sql::account::update_group(&mut conn, tenant_id, P::NAME, id, group_id).await?;
         drop(conn);
@@ -180,13 +180,13 @@ impl<'a, P: MaintenanceProvider> ProviderResourceService<'a, P> {
     /// reconcile：只有仍启用、凭证有效且已分组的账号才会重新进入 ready 集合。
     pub async fn clear_account_quota_limit_if_snapshot(
         &self,
-        tenant_id: Uuid,
+        tenant_id: String,
         id: Uuid,
         expected_quota_resets_at: chrono::DateTime<chrono::Utc>,
         expected_updated_at: chrono::DateTime<chrono::Utc>,
     ) -> AppResult<Option<AccountSnapshot>> {
         let mut conn = self.state.db_conn().await?;
-        require_account_tenant::<P>(&mut conn, tenant_id, id).await?;
+        require_account_tenant::<P>(&mut conn, tenant_id.clone(), id).await?;
         let account = sql::account::clear_quota_resets_at_if_snapshot(
             &mut conn,
             P::NAME,
@@ -204,9 +204,9 @@ impl<'a, P: MaintenanceProvider> ProviderResourceService<'a, P> {
     }
 
     /// 数据库删除成功后才写 Redis 永久 tombstone，保持原有 revision fence 语义。
-    pub async fn delete_account(&self, tenant_id: Uuid, id: Uuid) -> AppResult<ProviderAccount> {
+    pub async fn delete_account(&self, tenant_id: String, id: Uuid) -> AppResult<ProviderAccount> {
         let mut conn = self.state.db_conn().await?;
-        require_account_tenant::<P>(&mut conn, tenant_id, id).await?;
+        require_account_tenant::<P>(&mut conn, tenant_id.clone(), id).await?;
         let deleted = sql::account::delete_by_id(&mut conn, tenant_id, P::NAME, id).await?;
         drop(conn);
         store::delete_resource(self.state, P::NAME, UpstreamResourceKind::Account, id)
@@ -220,7 +220,7 @@ impl<'a, P: MaintenanceProvider> ProviderResourceService<'a, P> {
 
     pub async fn list_api_keys(
         &self,
-        tenant_id: Uuid,
+        tenant_id: String,
         limit: i64,
         offset: i64,
     ) -> AppResult<Vec<ApiKeySnapshot>> {
@@ -234,7 +234,7 @@ impl<'a, P: MaintenanceProvider> ProviderResourceService<'a, P> {
 
     pub async fn find_api_key(
         &self,
-        tenant_id: Uuid,
+        tenant_id: String,
         id: Uuid,
     ) -> AppResult<Option<ProviderApiKey>> {
         let mut conn = self.state.db_conn().await?;
@@ -245,7 +245,7 @@ impl<'a, P: MaintenanceProvider> ProviderResourceService<'a, P> {
 
     pub async fn list_api_keys_in_groups(
         &self,
-        tenant_id: Uuid,
+        tenant_id: String,
         group_ids: &[Uuid],
         limit: i64,
         offset: i64,
@@ -269,7 +269,7 @@ impl<'a, P: MaintenanceProvider> ProviderResourceService<'a, P> {
     /// 相同持久字段复制 SQL facade。
     pub async fn create_api_key(
         &self,
-        tenant_id: Uuid,
+        tenant_id: String,
         api_key: String,
         base_url: String,
         request_override: RequestOverride,
@@ -309,12 +309,12 @@ impl<'a, P: MaintenanceProvider> ProviderResourceService<'a, P> {
 
     pub async fn update_api_key_enabled(
         &self,
-        tenant_id: Uuid,
+        tenant_id: String,
         id: Uuid,
         enabled: bool,
     ) -> AppResult<ApiKeySnapshot> {
         let mut conn = self.state.db_conn().await?;
-        require_api_key_tenant::<P>(&mut conn, tenant_id, id).await?;
+        require_api_key_tenant::<P>(&mut conn, tenant_id.clone(), id).await?;
         let api_key = sql::api_key::update_enabled(
             &mut conn,
             tenant_id,
@@ -330,12 +330,12 @@ impl<'a, P: MaintenanceProvider> ProviderResourceService<'a, P> {
 
     pub async fn update_api_key_override(
         &self,
-        tenant_id: Uuid,
+        tenant_id: String,
         id: Uuid,
         request_override: RequestOverride,
     ) -> AppResult<ApiKeySnapshot> {
         let mut conn = self.state.db_conn().await?;
-        require_api_key_tenant::<P>(&mut conn, tenant_id, id).await?;
+        require_api_key_tenant::<P>(&mut conn, tenant_id.clone(), id).await?;
         let api_key =
             sql::api_key::update_override(&mut conn, tenant_id, P::NAME, id, request_override)
                 .await?;
@@ -345,7 +345,7 @@ impl<'a, P: MaintenanceProvider> ProviderResourceService<'a, P> {
 
     pub async fn update_api_key_override_in_group(
         &self,
-        tenant_id: Uuid,
+        tenant_id: String,
         id: Uuid,
         group_id: Uuid,
         request_override: RequestOverride,
@@ -366,12 +366,12 @@ impl<'a, P: MaintenanceProvider> ProviderResourceService<'a, P> {
 
     pub async fn update_api_key_group(
         &self,
-        tenant_id: Uuid,
+        tenant_id: String,
         id: Uuid,
         group_id: Option<Uuid>,
     ) -> AppResult<ApiKeySnapshot> {
         let mut conn = self.state.db_conn().await?;
-        require_api_key_tenant::<P>(&mut conn, tenant_id, id).await?;
+        require_api_key_tenant::<P>(&mut conn, tenant_id.clone(), id).await?;
         let api_key =
             sql::api_key::update_group(&mut conn, tenant_id, P::NAME, id, group_id).await?;
         drop(conn);
@@ -427,9 +427,9 @@ impl<'a, P: MaintenanceProvider> ProviderResourceService<'a, P> {
         }
     }
 
-    pub async fn delete_api_key(&self, tenant_id: Uuid, id: Uuid) -> AppResult<ProviderApiKey> {
+    pub async fn delete_api_key(&self, tenant_id: String, id: Uuid) -> AppResult<ProviderApiKey> {
         let mut conn = self.state.db_conn().await?;
-        require_api_key_tenant::<P>(&mut conn, tenant_id, id).await?;
+        require_api_key_tenant::<P>(&mut conn, tenant_id.clone(), id).await?;
         let deleted = sql::api_key::delete_by_id(&mut conn, tenant_id, P::NAME, id).await?;
         drop(conn);
         store::delete_resource(self.state, P::NAME, UpstreamResourceKind::ApiKey, id)
@@ -465,7 +465,7 @@ impl<'a, P: MaintenanceProvider> ProviderResourceService<'a, P> {
             .filter_map(|account| account.group_id)
             .collect::<Vec<_>>();
         let mut conn = self.state.db_conn().await?;
-        let tenant_id = accounts.first().map(|account| account.tenant_id);
+        let tenant_id = accounts.first().map(|account| account.tenant_id.clone());
         let groups = match tenant_id {
             Some(tenant_id) => group::find_by_ids(&mut conn, tenant_id, &group_ids).await?,
             None => Default::default(),
@@ -527,7 +527,7 @@ impl<'a, P: MaintenanceProvider> ProviderResourceService<'a, P> {
             .filter_map(|api_key| api_key.group_id)
             .collect::<Vec<_>>();
         let mut conn = self.state.db_conn().await?;
-        let tenant_id = api_keys.first().map(|api_key| api_key.tenant_id);
+        let tenant_id = api_keys.first().map(|api_key| api_key.tenant_id.clone());
         let groups = match tenant_id {
             Some(tenant_id) => group::find_by_ids(&mut conn, tenant_id, &group_ids).await?,
             None => Default::default(),
@@ -568,7 +568,7 @@ impl<'a, P: MaintenanceProvider> ProviderResourceService<'a, P> {
 
 async fn require_account_tenant<P: MaintenanceProvider>(
     conn: &mut diesel_async::AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
     id: Uuid,
 ) -> AppResult<()> {
     match sql::account::find_by_id(conn, P::NAME, id).await? {
@@ -581,7 +581,7 @@ async fn require_account_tenant<P: MaintenanceProvider>(
 
 async fn require_api_key_tenant<P: MaintenanceProvider>(
     conn: &mut diesel_async::AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
     id: Uuid,
 ) -> AppResult<()> {
     match sql::api_key::find_by_id(conn, P::NAME, id).await? {

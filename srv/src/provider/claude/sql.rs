@@ -20,7 +20,7 @@ pub mod account {
 
     pub async fn create(
         conn: &mut AsyncPgConnection,
-        tenant_id: uuid::Uuid,
+        tenant_id: String,
         refresh_token: String,
         access_token: String,
         next_token_refresh_at: DateTime<Utc>,

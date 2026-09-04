@@ -125,7 +125,7 @@ pub async fn register_with_tenant_code(
                 message: "租户码无效或对应租户已停用".to_owned(),
             })?;
         let owner_exists = users::table
-            .filter(users::tenant_id.eq(tenant.id))
+            .filter(users::tenant_id.eq(&tenant.id))
             .filter(users::role.eq(USER_ROLE_TENANT_OWNER))
             .select(users::id)
             .first::<Uuid>(&mut *conn)
@@ -162,7 +162,7 @@ pub async fn register_with_tenant_code(
 /// 使用户名、邮箱、密码边界以及数据库唯一冲突在所有创建入口保持一致。
 pub async fn create_owner_managed_user(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
     username: String,
     email: Option<String>,
     password: String,
@@ -192,10 +192,10 @@ pub async fn create_owner_managed_user(
 }
 
 pub(crate) async fn prepare_tenant_owner(
-    tenant_name: &str,
+    tenant_id: &str,
     password: String,
 ) -> AppResult<PreparedTenantOwner> {
-    let username = normalize_username(tenant_name)?;
+    let username = normalize_username(tenant_id)?;
     let email = normalize_email(&format!("{username}@aes.tus"))?;
     let password_hash = hash_password(password).await?;
 
@@ -212,7 +212,7 @@ pub(crate) async fn prepare_tenant_owner(
 
 pub(crate) async fn create_prepared_tenant_owner(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
     owner: PreparedTenantOwner,
 ) -> AppResult<User> {
     create_user(

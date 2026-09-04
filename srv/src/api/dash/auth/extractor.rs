@@ -73,7 +73,7 @@ pub(crate) async fn require_user(state: &AppState, headers: &HeaderMap) -> AppRe
         return Err(AppError::Forbidden);
     }
 
-    if let Some(tenant_id) = user.tenant_id {
+    if let Some(tenant_id) = user.tenant_id.as_deref() {
         tenant::require_enabled(&mut conn, tenant_id).await?;
     }
 

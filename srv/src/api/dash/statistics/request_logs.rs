@@ -149,7 +149,7 @@ impl From<RequestLogQueryRow> for RequestLogRecord {
 #[derive(Debug)]
 struct RequestLogQuery {
     limit: usize,
-    tenant_id: Option<Uuid>,
+    tenant_id: Option<String>,
     user_id: Option<Uuid>,
     start_at: DateTime<Utc>,
     end_at: DateTime<Utc>,
@@ -196,7 +196,7 @@ async fn list_request_logs(
     )?;
     let log_query = RequestLogQuery {
         limit,
-        tenant_id: current_user.tenant_id,
+        tenant_id: current_user.tenant_id.clone(),
         user_id: (!current_user.is_platform_admin() && !current_user.is_tenant_owner())
             .then_some(current_user.id),
         start_at: date_range.start_at,
@@ -293,7 +293,7 @@ async fn query_request_log_page(
         .bind(datetime_millis(query.start_at))
         .bind(datetime_millis(query.end_at));
 
-    if let Some(tenant_id) = query.tenant_id {
+    if let Some(tenant_id) = query.tenant_id.as_deref() {
         clickhouse_query = clickhouse_query.bind(tenant_id);
     }
     if let Some(user_id) = query.user_id {

@@ -121,7 +121,7 @@ async fn create_oauth_authorization(
     State(state): State<AppState>,
     dash_auth::AdminUser(owner): dash_auth::AdminUser,
 ) -> AdminResult<Json<OauthAuthorizationResponse>> {
-    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
+    let tenant_id = owner.tenant_id.clone().ok_or(AppError::Forbidden)?;
     let authorization = auth::create_authorization(&state)?;
     // OAuth 握手只在 Redis 保存 PKCE 临时参数；账号分组由 callback 创建请求单独决定。
     provider_oauth::create(
@@ -163,7 +163,7 @@ async fn complete_oauth_callback(
         .ok_or_else(|| AppError::BadRequest {
             message: "Claude OAuth state 无效或已过期，请重新生成授权链接".to_owned(),
         })?;
-    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
+    let tenant_id = owner.tenant_id.clone().ok_or(AppError::Forbidden)?;
     if session.tenant_id != tenant_id {
         warn!(owner_user_id = %owner.id, owner_tenant_id = %tenant_id, oauth_tenant_id = %session.tenant_id, "Claude OAuth 会话租户与当前 owner 不一致，拒绝消费");
         return Err(AppError::Forbidden);
@@ -209,7 +209,7 @@ async fn list_accounts(
     Query(query): Query<ListPageQuery>,
 ) -> AppResult<Json<ListPage<ClaudeAccountResponse>>> {
     let page = query.normalize()?;
-    let tenant_id = current_user.tenant_id.ok_or(AppError::Forbidden)?;
+    let tenant_id = current_user.tenant_id.clone().ok_or(AppError::Forbidden)?;
     let mut conn = state.db_conn().await?;
     let visible_group_ids = group_access::group_ids_with_permission(
         &mut conn,
@@ -259,7 +259,7 @@ async fn update_account_enabled(
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateEnabledRequest>,
 ) -> AdminResult<Json<ClaudeAccountResponse>> {
-    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
+    let tenant_id = owner.tenant_id.clone().ok_or(AppError::Forbidden)?;
     let snapshot = ProviderResourceService::<ClaudeMaintenance>::new(&state)
         .update_account_enabled(tenant_id, id, payload.enabled)
         .await?;
@@ -273,10 +273,10 @@ async fn update_account_override(
     Json(payload): Json<UpdateOverrideRequest>,
 ) -> AppResult<Json<ClaudeAccountResponse>> {
     payload.override_.validate()?;
-    let tenant_id = current_user.tenant_id.ok_or(AppError::Forbidden)?;
+    let tenant_id = current_user.tenant_id.clone().ok_or(AppError::Forbidden)?;
     let service = ProviderResourceService::<ClaudeMaintenance>::new(&state);
     let account = service
-        .find_account(tenant_id, id)
+        .find_account(tenant_id.clone(), id)
         .await?
         .ok_or(AppError::Forbidden)?;
     let mut conn = state.db_conn().await?;
@@ -312,7 +312,7 @@ async fn update_account_group(
     Path(id): Path<Uuid>,
     Json(payload): Json<ProviderGroupRequest>,
 ) -> AdminResult<Json<ClaudeAccountResponse>> {
-    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
+    let tenant_id = owner.tenant_id.clone().ok_or(AppError::Forbidden)?;
     let snapshot = ProviderResourceService::<ClaudeMaintenance>::new(&state)
         .update_account_group(tenant_id, id, payload.group_id)
         .await?;
@@ -329,7 +329,7 @@ async fn delete_account(
     dash_auth::AdminUser(owner): dash_auth::AdminUser,
     Path(id): Path<Uuid>,
 ) -> AdminResult<Json<DeleteClaudeAccountResponse>> {
-    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
+    let tenant_id = owner.tenant_id.clone().ok_or(AppError::Forbidden)?;
     let deleted = ProviderResourceService::<ClaudeMaintenance>::new(&state)
         .delete_account(tenant_id, id)
         .await?;

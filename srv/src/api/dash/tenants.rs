@@ -30,7 +30,7 @@ use crate::{
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CreateTenantRequest {
-    name: String,
+    id: String,
     /// 缺失、null 或空字符串时只创建租户；非空时同时创建租户 owner。
     password: Option<String>,
 }
@@ -43,7 +43,7 @@ struct UpdateTenantStatusRequest {
 
 #[derive(Debug, Serialize)]
 struct RevokeTenantCodeResponse {
-    tenant_id: Uuid,
+    tenant_id: String,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -114,7 +114,7 @@ async fn create_tenant(
 ) -> AdminResult<PrivateJson<TenantSummary>> {
     let mut conn = state.db_conn().await?;
     Ok(private_json(
-        tenant::create(&mut conn, payload.name, payload.password, admin.id).await?,
+        tenant::create(&mut conn, payload.id, payload.password, admin.id).await?,
     ))
 }
 
@@ -129,12 +129,12 @@ async fn list_tenants(
 async fn list_tenant_resources(
     State(state): State<AppState>,
     auth::PlatformAdminUser(admin): auth::PlatformAdminUser,
-    Path(tenant_id): Path<Uuid>,
+    Path(tenant_id): Path<String>,
     Query(query): Query<ListTenantResourcesQuery>,
 ) -> AdminResult<PrivateJson<ListPage<TenantResourceResponse>>> {
     let page = ListPageQuery::new(query.limit, query.offset).normalize()?;
     let mut conn = state.db_conn().await?;
-    if tenant::find_by_id(&mut conn, tenant_id).await?.is_none() {
+    if tenant::find_by_id(&mut conn, &tenant_id).await?.is_none() {
         return Err(AppError::BadRequest {
             message: format!("租户不存在: {tenant_id}"),
         });
@@ -144,7 +144,7 @@ async fn list_tenant_resources(
         TenantResourceKind::Account => {
             let accounts = sql::account::list_page_by_tenant(
                 &mut conn,
-                tenant_id,
+                tenant_id.clone(),
                 page.query_limit(),
                 page.offset(),
             )
@@ -155,7 +155,7 @@ async fn list_tenant_resources(
         TenantResourceKind::OfficialApiKey => {
             let api_keys = sql::api_key::list_page_by_tenant(
                 &mut conn,
-                tenant_id,
+                tenant_id.clone(),
                 page.query_limit(),
                 page.offset(),
             )
@@ -288,33 +288,33 @@ async fn load_inflight_counts<'a>(
 async fn update_tenant_status(
     State(state): State<AppState>,
     auth::PlatformAdminUser(admin): auth::PlatformAdminUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
     Json(payload): Json<UpdateTenantStatusRequest>,
 ) -> AdminResult<Json<Tenant>> {
     let mut conn = state.db_conn().await?;
     Ok(Json(
-        tenant::set_enabled(&mut conn, id, payload.enabled, admin.id).await?,
+        tenant::set_enabled(&mut conn, &id, payload.enabled, admin.id).await?,
     ))
 }
 
 async fn regenerate_tenant_code(
     State(state): State<AppState>,
     auth::PlatformAdminUser(admin): auth::PlatformAdminUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> AdminResult<PrivateJson<TenantSummary>> {
     let mut conn = state.db_conn().await?;
     Ok(private_json(
-        tenant::regenerate_code(&mut conn, id, admin.id).await?,
+        tenant::regenerate_code(&mut conn, &id, admin.id).await?,
     ))
 }
 
 async fn revoke_tenant_code(
     State(state): State<AppState>,
     auth::PlatformAdminUser(admin): auth::PlatformAdminUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> AdminResult<Json<RevokeTenantCodeResponse>> {
     let mut conn = state.db_conn().await?;
-    tenant::revoke_code(&mut conn, id, admin.id).await?;
+    tenant::revoke_code(&mut conn, &id, admin.id).await?;
     Ok(Json(RevokeTenantCodeResponse { tenant_id: id }))
 }
 

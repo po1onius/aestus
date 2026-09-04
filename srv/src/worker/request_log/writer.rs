@@ -31,8 +31,7 @@ pub(super) struct RequestLogRow {
     pub(super) provider: String,
     pub(super) route: String,
     pub(super) api_key_name: Option<String>,
-    #[serde(with = "clickhouse::serde::uuid::option")]
-    pub(super) tenant_id: Option<Uuid>,
+    pub(super) tenant_id: Option<String>,
     #[serde(with = "clickhouse::serde::uuid::option")]
     pub(super) user_id: Option<Uuid>,
     pub(super) username: Option<String>,

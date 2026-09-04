@@ -23,7 +23,7 @@ use super::{
 type ReleaseRow = (
     Uuid,
     Uuid,
-    Uuid,
+    String,
     String,
     String,
     String,
@@ -74,7 +74,7 @@ macro_rules! suite_select {
 
 pub async fn create_and_publish(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
     created_by: Uuid,
     name: String,
     description: String,
@@ -115,7 +115,7 @@ pub async fn create_and_publish(
 
 pub async fn publish_release(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
     suite_id: Uuid,
     created_by: Uuid,
     manifest_sha256: String,
@@ -126,7 +126,7 @@ pub async fn publish_release(
         .transaction::<ReleaseRow, AppError, _>(async |conn| {
             let suite = plugin_suites::table
                 .filter(plugin_suites::id.eq(suite_id))
-                .filter(plugin_suites::tenant_id.eq(tenant_id))
+                .filter(plugin_suites::tenant_id.eq(tenant_id.clone()))
                 .for_update()
                 .select(suite_select!())
                 .first::<PluginSuite>(&mut *conn)
@@ -209,7 +209,7 @@ async fn insert_release(
     Ok((
         release.0,
         release.1,
-        suite.tenant_id,
+        suite.tenant_id.clone(),
         suite.name.clone(),
         suite.description.clone(),
         suite.provider.clone(),
@@ -222,11 +222,11 @@ async fn insert_release(
 
 pub async fn list(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
 ) -> AppResult<Vec<PluginReleaseSummary>> {
     let rows = plugin_suite_releases::table
         .inner_join(plugin_suites::table.on(plugin_suites::id.eq(plugin_suite_releases::suite_id)))
-        .filter(plugin_suites::tenant_id.eq(tenant_id))
+        .filter(plugin_suites::tenant_id.eq(tenant_id.clone()))
         .order((
             plugin_suites::created_at.desc(),
             plugin_suite_releases::version.desc(),
@@ -239,12 +239,12 @@ pub async fn list(
 
 pub async fn list_enabled_options(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
 ) -> AppResult<Vec<PluginReleaseSummary>> {
     let rows = plugin_suite_releases::table
         .inner_join(plugin_suites::table.on(plugin_suites::id.eq(plugin_suite_releases::suite_id)))
         .filter(plugin_suites::enabled.eq(true))
-        .filter(plugin_suites::tenant_id.eq(tenant_id))
+        .filter(plugin_suites::tenant_id.eq(tenant_id.clone()))
         .order((
             plugin_suites::provider.asc(),
             plugin_suites::name.asc(),
@@ -258,12 +258,12 @@ pub async fn list_enabled_options(
 
 pub async fn find_suite(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
     suite_id: Uuid,
 ) -> AppResult<Option<PluginSuite>> {
     plugin_suites::table
         .filter(plugin_suites::id.eq(suite_id))
-        .filter(plugin_suites::tenant_id.eq(tenant_id))
+        .filter(plugin_suites::tenant_id.eq(tenant_id.clone()))
         .select(suite_select!())
         .first::<PluginSuite>(conn)
         .await
@@ -273,7 +273,7 @@ pub async fn find_suite(
 
 pub async fn find_summaries_by_ids(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
     ids: &[Uuid],
 ) -> AppResult<HashMap<Uuid, PluginReleaseSummary>> {
     if ids.is_empty() {
@@ -282,7 +282,7 @@ pub async fn find_summaries_by_ids(
     let rows = plugin_suite_releases::table
         .inner_join(plugin_suites::table.on(plugin_suites::id.eq(plugin_suite_releases::suite_id)))
         .filter(plugin_suite_releases::id.eq_any(ids))
-        .filter(plugin_suites::tenant_id.eq(tenant_id))
+        .filter(plugin_suites::tenant_id.eq(tenant_id.clone()))
         .select(release_select!())
         .load::<ReleaseRow>(conn)
         .await?;
@@ -295,7 +295,7 @@ pub async fn find_summaries_by_ids(
 
 pub async fn require_enabled_release_for_provider(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
     release_id: Uuid,
     provider: &str,
 ) -> AppResult<PluginReleaseSummary> {
@@ -303,7 +303,7 @@ pub async fn require_enabled_release_for_provider(
         .inner_join(plugin_suites::table.on(plugin_suites::id.eq(plugin_suite_releases::suite_id)))
         .filter(plugin_suite_releases::id.eq(release_id))
         .filter(plugin_suites::enabled.eq(true))
-        .filter(plugin_suites::tenant_id.eq(tenant_id))
+        .filter(plugin_suites::tenant_id.eq(tenant_id.clone()))
         .filter(plugin_suites::provider.eq(provider))
         .select(release_select!())
         .first::<ReleaseRow>(conn)
@@ -322,7 +322,7 @@ pub async fn require_enabled_release_for_provider(
 /// 套件已经不存在；绑定先取得套件锁时，删除会在其提交后解除刚写入的绑定。
 pub async fn require_enabled_release_for_provider_write(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
     release_id: Uuid,
     provider: &str,
 ) -> AppResult<PluginReleaseSummary> {
@@ -337,7 +337,7 @@ pub async fn require_enabled_release_for_provider_write(
         })?;
     let suite_exists = plugin_suites::table
         .filter(plugin_suites::id.eq(suite_id))
-        .filter(plugin_suites::tenant_id.eq(tenant_id))
+        .filter(plugin_suites::tenant_id.eq(tenant_id.clone()))
         .filter(plugin_suites::enabled.eq(true))
         .filter(plugin_suites::provider.eq(provider))
         .for_update()
@@ -356,7 +356,7 @@ pub async fn require_enabled_release_for_provider_write(
 
 pub async fn load_binding(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
     release_id: Uuid,
     provider: &str,
 ) -> AppResult<PluginBinding> {
@@ -371,7 +371,7 @@ pub async fn load_binding(
         )
         .filter(plugin_suite_releases::id.eq(release_id))
         .filter(plugin_suites::enabled.eq(true))
-        .filter(plugin_suites::tenant_id.eq(tenant_id))
+        .filter(plugin_suites::tenant_id.eq(tenant_id.clone()))
         .filter(plugin_suites::provider.eq(provider))
         .order(plugin_suite_artifacts::slot.asc())
         .select((
@@ -425,7 +425,7 @@ pub async fn load_artifact(
         .filter(plugin_suite_artifacts::id.eq(artifact_id))
         .filter(plugin_suite_artifacts::release_id.eq(suite_binding.release_id))
         .filter(plugin_suites::enabled.eq(true))
-        .filter(plugin_suites::tenant_id.eq(suite_binding.tenant_id))
+        .filter(plugin_suites::tenant_id.eq(&suite_binding.tenant_id))
         .select((
             plugin_suite_artifacts::wasm_sha256,
             plugin_suite_artifacts::wasm_bytes,
@@ -450,14 +450,14 @@ pub async fn load_artifact(
 
 pub async fn set_enabled(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
     suite_id: Uuid,
     enabled: bool,
 ) -> AppResult<()> {
     let changed = diesel::update(
         plugin_suites::table
             .filter(plugin_suites::id.eq(suite_id))
-            .filter(plugin_suites::tenant_id.eq(tenant_id)),
+            .filter(plugin_suites::tenant_id.eq(tenant_id.clone())),
     )
     .set((
         plugin_suites::enabled.eq(enabled),
@@ -481,14 +481,14 @@ pub async fn set_enabled(
 /// 自动回落到 Provider 原生流程。
 pub async fn delete_suite(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
+    tenant_id: String,
     suite_id: Uuid,
 ) -> AppResult<DeletedPluginSuite> {
     let deleted = conn
         .transaction::<DeletedPluginSuite, AppError, _>(async |conn| {
             let suite = plugin_suites::table
                 .filter(plugin_suites::id.eq(suite_id))
-                .filter(plugin_suites::tenant_id.eq(tenant_id))
+                .filter(plugin_suites::tenant_id.eq(tenant_id.clone()))
                 .for_update()
                 .select(suite_select!())
                 .first::<PluginSuite>(&mut *conn)

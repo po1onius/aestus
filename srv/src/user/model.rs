@@ -8,7 +8,7 @@ pub mod schema {
     diesel::table! {
         users (id) {
             id -> Uuid,
-            tenant_id -> Nullable<Uuid>,
+            tenant_id -> Nullable<Text>,
             username -> Text,
             email -> Text,
             password_hash -> Text,
@@ -39,7 +39,7 @@ pub const USER_ROLE_TENANT_USER: &str = "tenant_user";
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct User {
     pub id: Uuid,
-    pub tenant_id: Option<Uuid>,
+    pub tenant_id: Option<String>,
     pub username: String,
     pub email: String,
     #[serde(skip_serializing)]
@@ -58,7 +58,7 @@ pub struct User {
 #[derive(Debug, Clone, Serialize)]
 pub struct PublicUser {
     pub id: Uuid,
-    pub tenant_id: Option<Uuid>,
+    pub tenant_id: Option<String>,
     pub username: String,
     pub email: String,
     pub role: String,
@@ -93,7 +93,7 @@ impl From<User> for PublicUser {
 #[derive(Debug, Insertable)]
 #[diesel(table_name = schema::users)]
 pub(super) struct NewUser {
-    pub tenant_id: Option<Uuid>,
+    pub tenant_id: Option<String>,
     pub username: String,
     pub email: String,
     pub password_hash: String,
