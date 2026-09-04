@@ -8,6 +8,7 @@ use uuid::Uuid;
 use crate::{
     err::{AppError, AppResult},
     provider::group,
+    user::{User, group_access},
 };
 
 use super::model::{
@@ -27,8 +28,7 @@ pub struct GatewayApiKeyWithModels {
 /// 标识和名称，避免凭证意外进入日志系统。
 pub async fn create(
     conn: &mut AsyncPgConnection,
-    tenant_id: Uuid,
-    user_id: Uuid,
+    user: &User,
     group_id: Uuid,
     name: String,
     allowed_models: Vec<String>,
@@ -36,12 +36,15 @@ pub async fn create(
 ) -> AppResult<GatewayApiKeyWithModels> {
     use self::api_keys::dsl;
 
+    let tenant_id = user.tenant_id.ok_or(AppError::Forbidden)?;
+    let user_id = user.id;
     let allowed_models = group::normalize_models(allowed_models)?;
 
     let result = conn
         .transaction::<GatewayApiKeyWithModels, AppError, _>(async |conn| {
             let provider_group =
                 group::require_enabled_for_write(&mut *conn, tenant_id, group_id).await?;
+            group_access::require_group_grant(&mut *conn, user, group_id).await?;
             if let Some(plugin_release_id) = plugin_release_id {
                 crate::plugin::sql::require_enabled_release_for_provider_write(
                     &mut *conn,
@@ -137,6 +140,25 @@ pub async fn list_by_user(
             message: source.to_string(),
         })?;
     attach_models(conn, api_keys).await
+}
+
+pub async fn find_for_user(
+    conn: &mut AsyncPgConnection,
+    user_id: Uuid,
+    id: Uuid,
+) -> AppResult<Option<GatewayApiKey>> {
+    use self::api_keys::dsl;
+
+    dsl::api_keys
+        .filter(dsl::id.eq(id))
+        .filter(dsl::user_id.eq(user_id))
+        .select(GatewayApiKey::as_select())
+        .first::<GatewayApiKey>(conn)
+        .await
+        .optional()
+        .map_err(|source| AppError::DbQuery {
+            message: source.to_string(),
+        })
 }
 
 /// 永久删除指定用户自己的调用方网关 API Key。

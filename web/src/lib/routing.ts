@@ -1,7 +1,10 @@
 import { dashboardRoutes } from "../config";
 import type { DashboardPage, DashboardRoute, DashboardUser } from "../types";
 
-export function routesForUser(user: DashboardUser | null) {
+export function routesForUser(
+  user: DashboardUser | null,
+  canViewProviderResources = false,
+) {
   if (!user) {
     return dashboardRoutes.filter((route) => !route.platformOnly && !route.ownerOnly);
   }
@@ -11,7 +14,11 @@ export function routesForUser(user: DashboardUser | null) {
   if (user.role === "tenant_owner") {
     return dashboardRoutes.filter((route) => !route.platformOnly);
   }
-  return dashboardRoutes.filter((route) => !route.platformOnly && !route.ownerOnly);
+  return dashboardRoutes.filter(
+    (route) =>
+      !route.platformOnly &&
+      (!route.ownerOnly || (route.page === "accounts" && canViewProviderResources)),
+  );
 }
 
 export function pageFromPath(pathname: string, routes: DashboardRoute[]): DashboardPage {

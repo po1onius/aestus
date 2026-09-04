@@ -1,5 +1,7 @@
 //! Claude OAuth 账号的 Dashboard HTTP 接口与导入流程。
 
+use std::collections::HashSet;
+
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -29,6 +31,7 @@ use crate::{
         service::{AccountSnapshot, ProviderResourceService},
     },
     state::AppState,
+    user::group_access::{self, GroupPermission},
 };
 
 const MAX_AUTHORIZATION_RESULT_BYTES: usize = 16 * 1024;
@@ -99,7 +102,7 @@ struct ClaudeAccountResponse {
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
     #[serde(rename = "override")]
-    override_: RequestOverride,
+    override_: Option<RequestOverride>,
     runtime: AccountRuntimeView,
 }
 
@@ -163,7 +166,7 @@ async fn complete_oauth_callback(
     let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
     if session.tenant_id != tenant_id {
         warn!(owner_user_id = %owner.id, owner_tenant_id = %tenant_id, oauth_tenant_id = %session.tenant_id, "Claude OAuth 会话租户与当前 owner 不一致，拒绝消费");
-        return Err(AppError::Forbidden.into());
+        return Err(AppError::Forbidden);
     }
 
     let token = auth::exchange_code(
@@ -197,22 +200,55 @@ async fn complete_oauth_callback(
         "Claude OAuth callback 已完成，未分组账号已保存并进入统一 maintenance"
     );
 
-    Ok(Json(ClaudeAccountResponse::from_snapshot(snapshot)?))
+    Ok(Json(ClaudeAccountResponse::from_snapshot(snapshot, true)?))
 }
 
 async fn list_accounts(
     State(state): State<AppState>,
-    dash_auth::AdminUser(owner): dash_auth::AdminUser,
+    dash_auth::CurrentUser(current_user): dash_auth::CurrentUser,
     Query(query): Query<ListPageQuery>,
-) -> AdminResult<Json<ListPage<ClaudeAccountResponse>>> {
+) -> AppResult<Json<ListPage<ClaudeAccountResponse>>> {
     let page = query.normalize()?;
-    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
-    let snapshots = ProviderResourceService::<ClaudeMaintenance>::new(&state)
-        .list_accounts(tenant_id, page.query_limit(), page.offset())
-        .await?;
+    let tenant_id = current_user.tenant_id.ok_or(AppError::Forbidden)?;
+    let mut conn = state.db_conn().await?;
+    let visible_group_ids = group_access::group_ids_with_permission(
+        &mut conn,
+        &current_user,
+        GroupPermission::AccountView,
+    )
+    .await?;
+    let override_group_ids = group_access::group_ids_with_permission(
+        &mut conn,
+        &current_user,
+        GroupPermission::AccountOverrideView,
+    )
+    .await?
+    .map(|ids| ids.into_iter().collect::<HashSet<_>>());
+    drop(conn);
+    let service = ProviderResourceService::<ClaudeMaintenance>::new(&state);
+    let snapshots = match visible_group_ids {
+        None => {
+            service
+                .list_accounts(tenant_id, page.query_limit(), page.offset())
+                .await?
+        }
+        Some(group_ids) => {
+            service
+                .list_accounts_in_groups(tenant_id, &group_ids, page.query_limit(), page.offset())
+                .await?
+        }
+    };
     let items = snapshots
         .into_iter()
-        .map(ClaudeAccountResponse::from_snapshot)
+        .map(|snapshot| {
+            let can_view_override = override_group_ids.as_ref().is_none_or(|ids| {
+                snapshot
+                    .account
+                    .group_id
+                    .is_some_and(|id| ids.contains(&id))
+            });
+            ClaudeAccountResponse::from_snapshot(snapshot, can_view_override)
+        })
         .collect::<AppResult<Vec<_>>>()?;
     Ok(Json(page.finish(items)))
 }
@@ -227,21 +263,47 @@ async fn update_account_enabled(
     let snapshot = ProviderResourceService::<ClaudeMaintenance>::new(&state)
         .update_account_enabled(tenant_id, id, payload.enabled)
         .await?;
-    Ok(Json(ClaudeAccountResponse::from_snapshot(snapshot)?))
+    Ok(Json(ClaudeAccountResponse::from_snapshot(snapshot, true)?))
 }
 
 async fn update_account_override(
     State(state): State<AppState>,
-    dash_auth::AdminUser(owner): dash_auth::AdminUser,
+    dash_auth::CurrentUser(current_user): dash_auth::CurrentUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateOverrideRequest>,
-) -> AdminResult<Json<ClaudeAccountResponse>> {
+) -> AppResult<Json<ClaudeAccountResponse>> {
     payload.override_.validate()?;
-    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
-    let snapshot = ProviderResourceService::<ClaudeMaintenance>::new(&state)
-        .update_account_override(tenant_id, id, payload.override_)
-        .await?;
-    Ok(Json(ClaudeAccountResponse::from_snapshot(snapshot)?))
+    let tenant_id = current_user.tenant_id.ok_or(AppError::Forbidden)?;
+    let service = ProviderResourceService::<ClaudeMaintenance>::new(&state);
+    let account = service
+        .find_account(tenant_id, id)
+        .await?
+        .ok_or(AppError::Forbidden)?;
+    let mut conn = state.db_conn().await?;
+    group_access::require_permission(
+        &mut conn,
+        &current_user,
+        account.group_id,
+        GroupPermission::AccountOverrideUpdate,
+    )
+    .await?;
+    drop(conn);
+    let snapshot = if current_user.is_tenant_owner() {
+        service
+            .update_account_override(tenant_id, id, payload.override_)
+            .await?
+    } else {
+        service
+            .update_account_override_in_group(
+                tenant_id,
+                id,
+                account.group_id.ok_or(AppError::Forbidden)?,
+                payload.override_,
+            )
+            .await?
+    };
+    info!(actor_user_id = %current_user.id, claude_account_id = %snapshot.account.id, "管理端更新 Claude 账号请求 override 成功，runtime 已同步");
+    Ok(Json(ClaudeAccountResponse::from_snapshot(snapshot, true)?))
 }
 
 async fn update_account_group(
@@ -259,7 +321,7 @@ async fn update_account_group(
         provider_group_id = ?snapshot.account.group_id,
         "管理端调整 Claude 账号分组成功，runtime 已同步"
     );
-    Ok(Json(ClaudeAccountResponse::from_snapshot(snapshot)?))
+    Ok(Json(ClaudeAccountResponse::from_snapshot(snapshot, true)?))
 }
 
 async fn delete_account(
@@ -280,7 +342,7 @@ async fn delete_account(
 }
 
 impl ClaudeAccountResponse {
-    fn from_snapshot(snapshot: AccountSnapshot) -> AppResult<Self> {
+    fn from_snapshot(snapshot: AccountSnapshot, can_view_override: bool) -> AppResult<Self> {
         let AccountSnapshot {
             account,
             group,
@@ -330,7 +392,7 @@ impl ClaudeAccountResponse {
             status_reason: account.status_reason.clone(),
             created_at: account.created_at,
             updated_at: account.updated_at,
-            override_: request_override,
+            override_: can_view_override.then_some(request_override),
             runtime,
         })
     }

@@ -114,6 +114,11 @@ export function ApiKeysPage({
                       <p className={cellNoteClass}>
                         {apiKey.group.provider === "gpt" ? "GPT" : "Claude"}
                       </p>
+                      {!apiKey.group_authorized && (
+                        <p className="text-xs font-medium text-red-600 dark:text-red-400">
+                          分组授权已撤销
+                        </p>
+                      )}
                     </td>
                     <td>
                       <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2">
@@ -204,25 +209,25 @@ export function ApiKeysPage({
                       <div className="grid gap-2">
                         <button
                           className={buttonSmall}
-                          disabled={updatingId === apiKey.id}
+                          disabled={updatingId === apiKey.id || !apiKey.group_authorized}
                           onClick={() => onEditModels(apiKey)}
-                          title="修改模型白名单"
+                          title={apiKey.group_authorized ? "修改模型白名单" : "分组授权已撤销"}
                         >
                           <ListChecks size={14} />
                           修改模型
                         </button>
                         <button
                           className={buttonSmall}
-                          disabled={updatingId === apiKey.id}
+                          disabled={updatingId === apiKey.id || !apiKey.group_authorized}
                           onClick={() => onEditPlugin(apiKey)}
-                          title="修改插件绑定"
+                          title={apiKey.group_authorized ? "修改插件绑定" : "分组授权已撤销"}
                         >
                           <Pencil size={14} />
                           修改插件
                         </button>
                         <button
                           className={buttonSmall}
-                          disabled={updatingId === apiKey.id}
+                          disabled={updatingId === apiKey.id || !apiKey.group_authorized}
                           onClick={() => onToggleEnabled(apiKey)}
                           title={apiKey.enabled ? "禁用 API Key" : "启用 API Key"}
                         >

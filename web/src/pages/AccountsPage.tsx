@@ -10,6 +10,7 @@ import { ClaudeAccountsTable } from "../features/accounts/ClaudeAccountsTable";
 import { GptAccountsTable } from "../features/accounts/GptAccountsTable";
 import { ProviderGroupsTable } from "../features/accounts/ProviderGroupsTable";
 import { ProviderUpstreamApiKeysTable } from "../features/accounts/ProviderUpstreamApiKeysTable";
+import type { ProviderAccess } from "../features/group-access/access";
 import {
   buttonPrimary,
   buttonSecondary,
@@ -36,6 +37,7 @@ import type {
 } from "../types";
 
 interface AccountsPageProps {
+  access: ProviderAccess;
   accounts: GptAccount[];
   claudeAccounts: ClaudeAccount[];
   gptUpstreamApiKeys: ProviderUpstreamApiKey[];
@@ -106,6 +108,7 @@ const providerLogos: Record<AccountProviderKey, string> = {
  * 的凭证类型语义。官方 API Key 的展示和操作继续保持 provider 中立。
  */
 export function AccountsPage({
+  access,
   accounts,
   claudeAccounts,
   gptUpstreamApiKeys,
@@ -241,6 +244,7 @@ export function AccountsPage({
                 <button
                   className={cx(tabClass, accountsSelected ? tabSelectedClass : tabIdleClass)}
                   type="button"
+                  disabled={!access.canViewAccounts}
                   onClick={() => onCredentialTabChange("accounts")}
                   role="tab"
                   aria-selected={accountsSelected}
@@ -250,6 +254,7 @@ export function AccountsPage({
                 <button
                   className={cx(tabClass, officialKeysSelected ? tabSelectedClass : tabIdleClass)}
                   type="button"
+                  disabled={!access.canViewOfficialApiKeys}
                   onClick={() => onCredentialTabChange("officialKeys")}
                   role="tab"
                   aria-selected={officialKeysSelected}
@@ -257,18 +262,20 @@ export function AccountsPage({
                   <span className={tabContentClass}>官方 Key</span>
                 </button>
               </SlidingTabList>
-              <button
-                type="button"
-                className={providerGroupsVisible ? buttonPrimary : buttonSecondary}
-                onClick={onProviderGroupsView}
-                aria-pressed={providerGroupsVisible}
-                title={`查看 ${activeProviderMeta.label} 分组`}
-              >
-                <FolderTree size={18} />
-                分组
-              </button>
+              {access.isOwner && (
+                <button
+                  type="button"
+                  className={providerGroupsVisible ? buttonPrimary : buttonSecondary}
+                  onClick={onProviderGroupsView}
+                  aria-pressed={providerGroupsVisible}
+                  title={`查看 ${activeProviderMeta.label} 分组`}
+                >
+                  <FolderTree size={18} />
+                  分组
+                </button>
+              )}
             </div>
-            <div className="flex flex-wrap gap-2">
+            {access.isOwner && <div className="flex flex-wrap gap-2">
               <button
                 type="button"
                 className={buttonPrimary}
@@ -291,7 +298,7 @@ export function AccountsPage({
                 <Plus size={18} />
                 添加
               </button>
-            </div>
+            </div>}
           </div>
         )}
 
@@ -329,6 +336,7 @@ export function AccountsPage({
             <EmptyCredentials label={`还没有添加 ${activeProviderMeta.label} 官方 Key`} />
           ) : (
             <ProviderUpstreamApiKeysTable
+              access={access}
               provider={activeApiKeyProvider}
               providerLabel={activeProviderMeta.label}
               apiKeys={activeUpstreamApiKeys}
@@ -353,6 +361,7 @@ export function AccountsPage({
             <EmptyCredentials label="还没有导入 Claude OAuth 账号" />
           ) : (
             <ClaudeAccountsTable
+              access={access}
               accounts={claudeAccounts}
               groups={activeEnabledProviderGroups}
               groupUpdatingId={resourceGroupUpdatingId}
@@ -370,6 +379,7 @@ export function AccountsPage({
           <EmptyCredentials label="还没有导入账号" />
         ) : (
           <GptAccountsTable
+            access={access}
             accounts={accounts}
             quotas={accountQuotas}
             quotaRefreshingIds={quotaRefreshingIds}

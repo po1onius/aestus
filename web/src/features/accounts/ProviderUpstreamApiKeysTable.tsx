@@ -2,6 +2,7 @@ import { Loader2, Settings, Trash2 } from "lucide-react";
 import { RuntimeBadge } from "../../components/RuntimeBadge";
 import { StatusBadge } from "../../components/StatusBadge";
 import { formatOptionalDateTime } from "../../lib/format";
+import type { ProviderAccess } from "../group-access/access";
 import {
   actionStackClass,
   buttonSmall,
@@ -24,6 +25,7 @@ import { enabledToggleLabel } from "./utils";
 import { ProviderGroupCell } from "./ProviderGroupCell";
 
 interface ProviderUpstreamApiKeysTableProps {
+  access: ProviderAccess;
   provider: UpstreamApiKeyProvider;
   providerLabel: string;
   apiKeys: ProviderUpstreamApiKey[];
@@ -39,6 +41,7 @@ interface ProviderUpstreamApiKeysTableProps {
 
 /** Provider 官方 API Key 共用表格，统一展示探活、调度和请求覆盖状态。 */
 export function ProviderUpstreamApiKeysTable({
+  access,
   provider,
   providerLabel,
   apiKeys,
@@ -67,6 +70,9 @@ export function ProviderUpstreamApiKeysTable({
         </thead>
         <tbody>
           {apiKeys.map((apiKey) => {
+            const canViewOverride =
+              access.has(apiKey.group?.id, "official_api_key.override.view") &&
+              apiKey.override !== null;
             const busy =
               deletingId === apiKey.id ||
               enabledUpdatingId === apiKey.id ||
@@ -82,14 +88,18 @@ export function ProviderUpstreamApiKeysTable({
                   </div>
                 </td>
                 <td>
-                  <ProviderGroupCell
-                    resourceLabel={apiKey.masked_api_key}
-                    provider={provider}
-                    group={apiKey.group}
-                    groups={groups}
-                    disabled={busy}
-                    onChange={(groupId) => onUpdateGroup(apiKey, groupId)}
-                  />
+                  {access.isOwner ? (
+                    <ProviderGroupCell
+                      resourceLabel={apiKey.masked_api_key}
+                      provider={provider}
+                      group={apiKey.group}
+                      groups={groups}
+                      disabled={busy}
+                      onChange={(groupId) => onUpdateGroup(apiKey, groupId)}
+                    />
+                  ) : (
+                    <span className={cellMainClass}>{apiKey.group?.name ?? "未分组"}</span>
+                  )}
                 </td>
                 <td>
                   <div className={cellMainClass} title={apiKey.base_url}>
@@ -131,7 +141,7 @@ export function ProviderUpstreamApiKeysTable({
                 </td>
                 <td>
                   <div className={actionStackClass}>
-                    <button
+                    {access.isOwner && <button
                       className={buttonSmall}
                       disabled={busy}
                       onClick={() => onUpdateEnabled(apiKey, !apiKey.enabled)}
@@ -142,17 +152,17 @@ export function ProviderUpstreamApiKeysTable({
                       ) : (
                         enabledToggleLabel(apiKey.enabled)
                       )}
-                    </button>
+                    </button>}
                     <button
                       className={buttonSmall}
-                      disabled={busy}
+                      disabled={busy || !canViewOverride}
                       onClick={() => onOpenOverride(apiKey)}
-                      title="请求覆盖"
+                      title={canViewOverride ? "查看请求覆盖" : "未获得查看官方 Key 覆盖权限"}
                     >
                       <Settings size={14} />
                       覆盖
                     </button>
-                    <button
+                    {access.isOwner && <button
                       className={buttonSmallDanger}
                       disabled={busy}
                       onClick={() => onDelete(apiKey)}
@@ -164,7 +174,7 @@ export function ProviderUpstreamApiKeysTable({
                         <Trash2 size={14} />
                       )}
                       删除
-                    </button>
+                    </button>}
                   </div>
                 </td>
               </tr>

@@ -16,7 +16,10 @@ use crate::{
     provider::{claude, gpt},
     request::concurrency,
     state::AppState,
-    user::{self, PublicUser, User},
+    user::{
+        self, PublicUser, User,
+        group_access::{self, GroupGrantInput, UserGroupGrant},
+    },
 };
 
 #[derive(Debug, Serialize)]
@@ -76,12 +79,69 @@ struct CreateUserRequest {
     password: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplaceUserGroupGrantsRequest {
+    grants: Vec<UserGroupGrantRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UserGroupGrantRequest {
+    group_id: Uuid,
+    #[serde(default)]
+    permissions: Vec<String>,
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_users).post(create_user))
         .route("/{id}/quota", put(update_user_quota))
         .route("/{id}/max-concurrency", put(update_user_max_concurrency))
         .route("/{id}/status", put(update_user_status))
+        .route(
+            "/{id}/group-grants",
+            get(list_user_group_grants).put(replace_user_group_grants),
+        )
+}
+
+async fn list_user_group_grants(
+    State(state): State<AppState>,
+    auth::AdminUser(owner): auth::AdminUser,
+    Path(id): Path<Uuid>,
+) -> AdminResult<Json<Vec<UserGroupGrant>>> {
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
+    let mut conn = state.db_conn().await?;
+    let grants = group_access::list_for_managed_user(&mut conn, tenant_id, id).await?;
+    info!(
+        admin_user_id = %owner.id,
+        target_user_id = %id,
+        tenant_id = %tenant_id,
+        group_grant_count = grants.len(),
+        "租户 owner 已读取普通用户的 Provider 分组授权"
+    );
+    Ok(Json(grants))
+}
+
+async fn replace_user_group_grants(
+    State(state): State<AppState>,
+    auth::AdminUser(owner): auth::AdminUser,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<ReplaceUserGroupGrantsRequest>,
+) -> AdminResult<Json<Vec<UserGroupGrant>>> {
+    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
+    let inputs = payload
+        .grants
+        .into_iter()
+        .map(|grant| GroupGrantInput {
+            group_id: grant.group_id,
+            permissions: grant.permissions,
+        })
+        .collect();
+    let mut conn = state.db_conn().await?;
+    let grants =
+        group_access::replace_for_managed_user(&mut conn, tenant_id, id, owner.id, inputs).await?;
+    Ok(Json(grants))
 }
 
 async fn create_user(

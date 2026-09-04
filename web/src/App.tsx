@@ -55,6 +55,8 @@ import { requestLogAutoLoadKey } from "./features/request-logs/utils";
 import { UserConcurrencyDialog } from "./features/users/UserConcurrencyDialog";
 import { UserCreateDialog } from "./features/users/UserCreateDialog";
 import { UserQuotaDialog } from "./features/users/UserQuotaDialog";
+import { useCurrentGroupAccess } from "./features/group-access/access";
+import { UserGroupGrantsDialog } from "./features/group-access/UserGroupGrantsDialog";
 import { errorMessageFrom, showErrorToast } from "./lib/errors";
 import {
   activePageLoading,
@@ -238,6 +240,8 @@ export function App() {
     useState<DashboardUser | null>(null);
   const [userConcurrencyValue, setUserConcurrencyValue] = useState("");
   const [userCreateOpen, setUserCreateOpen] = useState(false);
+  const [userGroupGrantsDialogUser, setUserGroupGrantsDialogUser] =
+    useState<DashboardUser | null>(null);
   const [userCreateUsername, setUserCreateUsername] = useState("");
   const [userCreateEmail, setUserCreateEmail] = useState("");
   const [userCreatePassword, setUserCreatePassword] = useState("");
@@ -262,7 +266,12 @@ export function App() {
 
   const activeAccountProviderMeta =
     accountProviderTabs.find((provider) => provider.key === activeAccountProvider) ?? accountProviderTabs[0];
-  const visibleRoutes = useMemo(() => routesForUser(currentUser), [currentUser]);
+  const currentGroupAccess = useCurrentGroupAccess(currentUser, authToken);
+  const providerAccess = currentGroupAccess.access;
+  const visibleRoutes = useMemo(
+    () => routesForUser(currentUser, providerAccess.canViewProviderResources),
+    [currentUser, providerAccess.canViewProviderResources],
+  );
   const activePage = pageFromPath(currentPath, visibleRoutes);
   const activeRoute = visibleRoutes.find((route) => route.page === activePage) ?? visibleRoutes[0] ?? dashboardRoutes[0];
   const activeCredentialPage = activeCredentialTab === "officialKeys"
@@ -277,7 +286,7 @@ export function App() {
     // 刷新页面时 currentUser 会先短暂为 null。如果此时按普通用户路由归一化，管理员专属
     // 地址会先被改写为 /dashboard/usage，待身份恢复后又回退到 /admin/accounts。必须等
     // /dash/auth/me 完成后再按真实角色校验 URL，才能正确保留刷新前的管理员页面。
-    if (authLoading) {
+    if (authLoading || !currentGroupAccess.ready) {
       return;
     }
 
@@ -293,7 +302,7 @@ export function App() {
 
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
-  }, [authLoading, visibleRoutes]);
+  }, [authLoading, currentGroupAccess.ready, visibleRoutes]);
 
   useEffect(() => {
     setAuthExpiredHandler((token, error) => expireDashboardSession(token, error));
@@ -311,6 +320,14 @@ export function App() {
   }, [theme]);
 
   useEffect(() => {
+    if (!providerAccess.canViewAccounts && providerAccess.canViewOfficialApiKeys) {
+      setActiveCredentialTab("officialKeys");
+    } else if (providerAccess.canViewAccounts && !providerAccess.canViewOfficialApiKeys) {
+      setActiveCredentialTab("accounts");
+    }
+  }, [providerAccess.canViewAccounts, providerAccess.canViewOfficialApiKeys]);
+
+  useEffect(() => {
     if (!currentUser || !authToken) {
       return;
     }
@@ -323,8 +340,8 @@ export function App() {
       void loadApiKeys(0);
       void loadPluginOptions();
     } else if (currentUser.role === "tenant_user") {
-      setLoading(false);
       setUsersLoading(false);
+      void loadAccounts({ gpt: 0, claude: 0, gptUpstreamKeys: 0, claudeUpstreamKeys: 0 });
       void loadProviderGroupOptions();
       void loadApiKeys(0);
       void loadPluginOptions();
@@ -978,6 +995,7 @@ export function App() {
         loadApiKeys(),
         loadPluginOptions(),
         currentUser?.role === "tenant_owner" ? loadProviderGroups() : loadProviderGroupOptions(),
+        currentUser?.role === "tenant_user" ? currentGroupAccess.reload() : Promise.resolve(),
       ]);
       return;
     }
@@ -989,6 +1007,8 @@ export function App() {
 
     if (currentUser?.role === "tenant_owner") {
       await Promise.all([loadAccounts(), loadProviderGroups()]);
+    } else if (currentUser?.role === "tenant_user") {
+      await Promise.all([loadAccounts(), currentGroupAccess.reload()]);
     }
   }
 
@@ -1120,6 +1140,10 @@ export function App() {
   }
 
   function openRequestOverrideDialog(target: RequestOverrideTarget) {
+    if (!target.item.override) {
+      toast.error("请求覆盖不可见", { description: "当前用户没有查看该资源覆盖配置的权限。" });
+      return;
+    }
     setRequestOverrideTarget(target);
     setRequestOverrideHeaderRows(overrideEntriesFromObject(target.item.override.header));
     setRequestOverrideBodyRows(overrideEntriesFromObject(target.item.override.body));
@@ -2035,7 +2059,7 @@ export function App() {
     event.preventDefault();
     const token = authToken;
     const target = requestOverrideTarget;
-    if (!token || currentUser?.role !== "tenant_owner" || !target) {
+    if (!token || !target || !canUpdateRequestOverride(target)) {
       return;
     }
 
@@ -2099,6 +2123,13 @@ export function App() {
         setRequestOverrideSaving(false);
       }
     }
+  }
+
+  function canUpdateRequestOverride(target: RequestOverrideTarget) {
+    if (target.kind === "apiKey") {
+      return providerAccess.has(target.item.group?.id, "official_api_key.override.update");
+    }
+    return providerAccess.has(target.item.group?.id, "account.override.update");
   }
 
   async function updateGptAccountGroup(account: GptAccount, groupId: string) {
@@ -2305,7 +2336,12 @@ export function App() {
   }
 
   async function applyRateLimitResetCredit(credit: RateLimitResetCredit) {
-    if (!rateLimitResetTarget || applyingResetCreditId || rateLimitResetLoading) {
+    if (
+      !rateLimitResetTarget ||
+      !providerAccess.has(rateLimitResetTarget.group?.id, "account.reset.consume") ||
+      applyingResetCreditId ||
+      rateLimitResetLoading
+    ) {
       return;
     }
 
@@ -2737,6 +2773,10 @@ export function App() {
               loading={rateLimitResetLoading}
               error={rateLimitResetError}
               applyingCreditId={applyingResetCreditId}
+              canConsume={providerAccess.has(
+                rateLimitResetTarget.group?.id,
+                "account.reset.consume",
+              )}
               onApply={applyRateLimitResetCredit}
               onClose={closeRateLimitResetDialog}
             />
@@ -2793,6 +2833,7 @@ export function App() {
               headerRows={requestOverrideHeaderRows}
               bodyRows={requestOverrideBodyRows}
               saving={requestOverrideSaving}
+              readOnly={!canUpdateRequestOverride(requestOverrideTarget)}
               onAdd={addRequestOverrideRow}
               onChange={updateRequestOverrideRow}
               onRemove={removeRequestOverrideRow}
@@ -2897,6 +2938,15 @@ export function App() {
               onClose={closeUserCreateDialog}
             />
           )}
+          {userGroupGrantsDialogUser && activePage === "users" && authToken && (
+            <UserGroupGrantsDialog
+              key={`user-group-grants-${userGroupGrantsDialogUser.id}`}
+              user={userGroupGrantsDialogUser}
+              groups={providerGroups}
+              token={authToken}
+              onClose={() => setUserGroupGrantsDialogUser(null)}
+            />
+          )}
           {confirmationRequest && (
             <ConfirmDialog
               key="confirmation"
@@ -2934,6 +2984,7 @@ export function App() {
         </Suspense>
       ) : activePage === "accounts" ? (
         <AccountsPage
+          access={providerAccess}
           accounts={accounts}
           claudeAccounts={claudeAccounts}
           gptUpstreamApiKeys={gptUpstreamApiKeys}
@@ -3009,6 +3060,7 @@ export function App() {
           onAdd={() => setUserCreateOpen(true)}
           onOpenQuota={openUserQuotaDialog}
           onOpenConcurrency={openUserConcurrencyDialog}
+          onOpenGroupGrants={setUserGroupGrantsDialogUser}
           onToggleStatus={updateUserStatus}
           onPageChange={loadUsers}
         />

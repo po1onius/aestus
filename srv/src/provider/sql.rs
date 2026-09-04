@@ -138,6 +138,30 @@ pub mod account {
             .map_err(db_error)
     }
 
+    /// 普通用户的资源列表必须先在 PostgreSQL 中按授权分组裁剪，再执行分页。
+    pub async fn list_page_by_provider_and_groups(
+        conn: &mut AsyncPgConnection,
+        tenant_id: Uuid,
+        provider: &str,
+        group_ids: &[Uuid],
+        limit: i64,
+        offset: i64,
+    ) -> AppResult<Vec<ProviderAccount>> {
+        use provider_accounts::dsl;
+
+        dsl::provider_accounts
+            .filter(dsl::tenant_id.eq(tenant_id))
+            .filter(dsl::provider.eq(provider))
+            .filter(dsl::group_id.eq_any(group_ids))
+            .order((dsl::created_at.desc(), dsl::id.desc()))
+            .limit(limit)
+            .offset(offset)
+            .select(ProviderAccount::as_select())
+            .load(conn)
+            .await
+            .map_err(db_error)
+    }
+
     /// 平台管理员按租户查看跨 provider 的账号资源；只读取一页，避免大租户一次加载全部凭证。
     pub async fn list_page_by_tenant(
         conn: &mut AsyncPgConnection,
@@ -558,6 +582,39 @@ pub mod account {
             id,
         )
     }
+
+    /// 委派用户写入覆盖时把鉴权时看到的分组加入 UPDATE 条件，避免 owner 并发换组后
+    /// 仍把旧分组权限应用到资源的新安全边界。
+    pub async fn update_override_in_group(
+        conn: &mut AsyncPgConnection,
+        tenant_id: Uuid,
+        provider: &str,
+        id: Uuid,
+        group_id: Uuid,
+        request_override: RequestOverride,
+    ) -> AppResult<ProviderAccount> {
+        use provider_accounts::dsl;
+
+        request_override.validate()?;
+        required_account(
+            diesel::update(
+                dsl::provider_accounts
+                    .filter(dsl::tenant_id.eq(tenant_id))
+                    .filter(dsl::provider.eq(provider))
+                    .filter(dsl::id.eq(id))
+                    .filter(dsl::group_id.eq(group_id)),
+            )
+            .set((
+                dsl::override_.eq(request_override.to_value()),
+                dsl::updated_at.eq(next_projection_version!(dsl::updated_at)),
+            ))
+            .returning(ProviderAccount::as_returning())
+            .get_result(conn)
+            .await,
+            provider,
+            id,
+        )
+    }
 }
 
 pub mod api_key {
@@ -620,6 +677,30 @@ pub mod api_key {
         dsl::provider_api_keys
             .filter(dsl::tenant_id.eq(tenant_id))
             .filter(dsl::provider.eq(provider))
+            .order((dsl::created_at.desc(), dsl::id.desc()))
+            .limit(limit)
+            .offset(offset)
+            .select(ProviderApiKey::as_select())
+            .load(conn)
+            .await
+            .map_err(db_error)
+    }
+
+    /// 普通用户的官方 Key 列表只查询其拥有可视权限的分组，未分组资源始终不可见。
+    pub async fn list_page_by_provider_and_groups(
+        conn: &mut AsyncPgConnection,
+        tenant_id: Uuid,
+        provider: &str,
+        group_ids: &[Uuid],
+        limit: i64,
+        offset: i64,
+    ) -> AppResult<Vec<ProviderApiKey>> {
+        use provider_api_keys::dsl;
+
+        dsl::provider_api_keys
+            .filter(dsl::tenant_id.eq(tenant_id))
+            .filter(dsl::provider.eq(provider))
+            .filter(dsl::group_id.eq_any(group_ids))
             .order((dsl::created_at.desc(), dsl::id.desc()))
             .limit(limit)
             .offset(offset)
@@ -862,6 +943,37 @@ pub mod api_key {
                     .filter(dsl::tenant_id.eq(tenant_id))
                     .filter(dsl::provider.eq(provider))
                     .filter(dsl::id.eq(id)),
+            )
+            .set((
+                dsl::override_.eq(request_override.to_value()),
+                dsl::updated_at.eq(next_projection_version!(dsl::updated_at)),
+            ))
+            .returning(ProviderApiKey::as_returning())
+            .get_result(conn)
+            .await,
+            provider,
+            id,
+        )
+    }
+
+    pub async fn update_override_in_group(
+        conn: &mut AsyncPgConnection,
+        tenant_id: Uuid,
+        provider: &str,
+        id: Uuid,
+        group_id: Uuid,
+        request_override: RequestOverride,
+    ) -> AppResult<ProviderApiKey> {
+        use provider_api_keys::dsl;
+
+        request_override.validate()?;
+        required_api_key(
+            diesel::update(
+                dsl::provider_api_keys
+                    .filter(dsl::tenant_id.eq(tenant_id))
+                    .filter(dsl::provider.eq(provider))
+                    .filter(dsl::id.eq(id))
+                    .filter(dsl::group_id.eq(group_id)),
             )
             .set((
                 dsl::override_.eq(request_override.to_value()),

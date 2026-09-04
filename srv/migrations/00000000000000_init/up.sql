@@ -89,6 +89,50 @@ CREATE TABLE provider_group_models (
 
 CREATE INDEX idx_provider_group_models_model_name ON provider_group_models (model_name);
 
+-- 分组授权主记录决定普通租户用户能否把自己的网关 API Key 绑定到对应分组。具体的
+-- 上游资源查看和操作能力逐行保存在权限表中；tenant owner 始终由应用层隐式获得全部
+-- 权限，不写入这里。项目禁止数据库外键，用户、租户和分组一致性由应用事务维护。
+CREATE TABLE tenant_user_group_grants (
+    tenant_id UUID NOT NULL,
+    user_id UUID NOT NULL,
+    group_id UUID NOT NULL,
+    granted_by UUID NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, group_id)
+);
+
+CREATE INDEX idx_tenant_user_group_grants_tenant_user
+    ON tenant_user_group_grants (tenant_id, user_id);
+CREATE INDEX idx_tenant_user_group_grants_group
+    ON tenant_user_group_grants (group_id);
+
+CREATE TABLE tenant_user_group_permissions (
+    tenant_id UUID NOT NULL,
+    user_id UUID NOT NULL,
+    group_id UUID NOT NULL,
+    permission TEXT NOT NULL,
+    granted_by UUID NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, group_id, permission),
+    CHECK (permission IN (
+        'account.view',
+        'account.quota.view',
+        'account.reset.view',
+        'account.reset.consume',
+        'account.override.view',
+        'account.override.update',
+        'official_api_key.view',
+        'official_api_key.override.view',
+        'official_api_key.override.update'
+    ))
+);
+
+CREATE INDEX idx_tenant_user_group_permissions_tenant_user_permission
+    ON tenant_user_group_permissions (tenant_id, user_id, permission, group_id);
+CREATE INDEX idx_tenant_user_group_permissions_group
+    ON tenant_user_group_permissions (group_id);
+
 -- 插件套件按 Provider 挂载。套件主记录只保存稳定身份和全局启停开关；每个不可变发布
 -- 版本由 request、buffered_response、stream_response 三种可空 artifact 组成。API Key
 -- 固定绑定具体 release，空插槽明确表示回落到 provider 原生流程，不从旧版本隐式继承。

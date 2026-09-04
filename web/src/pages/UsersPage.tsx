@@ -1,4 +1,4 @@
-import { Activity, Gauge, Loader2, Plus, UserCog } from "lucide-react";
+import { Activity, Gauge, Loader2, Plus, ShieldCheck, UserCog } from "lucide-react";
 import { ListPager } from "../components/ListPager";
 import { StatusBadge } from "../components/StatusBadge";
 import { formatDateTime } from "../lib/format";
@@ -32,6 +32,7 @@ interface UsersPageProps {
   onAdd: () => void;
   onOpenQuota: (user: DashboardUser) => void;
   onOpenConcurrency: (user: DashboardUser) => void;
+  onOpenGroupGrants: (user: DashboardUser) => void;
   onToggleStatus: (user: DashboardUser) => void;
   onPageChange: (offset: number) => void;
 }
@@ -47,6 +48,7 @@ export function UsersPage({
   onAdd,
   onOpenQuota,
   onOpenConcurrency,
+  onOpenGroupGrants,
   onToggleStatus,
   onPageChange,
 }: UsersPageProps) {
@@ -123,6 +125,14 @@ export function UsersPage({
                     </td>
                     <td>
                       <div className={actionStackClass}>
+                        <button
+                          className={buttonSmall}
+                          disabled={updatingId === user.id || user.role !== "tenant_user"}
+                          onClick={() => onOpenGroupGrants(user)}
+                        >
+                          <ShieldCheck size={14} />
+                          分组授权
+                        </button>
                         <button
                           className={buttonSmall}
                           disabled={updatingId === user.id}

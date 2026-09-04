@@ -18,6 +18,7 @@ use crate::{
         },
         resource::UpstreamResourceKind,
     },
+    user::group_access::schema::{tenant_user_group_grants, tenant_user_group_permissions},
 };
 
 const MAX_GROUP_NAME_BYTES: usize = 128;
@@ -868,6 +869,23 @@ pub async fn delete(
                     ),
                 });
             }
+
+            // 分组授权没有数据库外键，删除分组时必须先清理权限明细，再清理授权主记录，
+            // 避免普通用户保留指向已删除分组的授权事实。
+            diesel::delete(
+                tenant_user_group_permissions::table
+                    .filter(tenant_user_group_permissions::group_id.eq(group.id)),
+            )
+            .execute(&mut *conn)
+            .await
+            .map_err(db_error)?;
+            diesel::delete(
+                tenant_user_group_grants::table
+                    .filter(tenant_user_group_grants::group_id.eq(group.id)),
+            )
+            .execute(&mut *conn)
+            .await
+            .map_err(db_error)?;
 
             diesel::delete(
                 provider_group_models::table

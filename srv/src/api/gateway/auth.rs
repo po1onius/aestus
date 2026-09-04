@@ -11,7 +11,7 @@ use crate::{
     provider::group::{self, schema::provider_groups},
     state::AppState,
     tenant,
-    user::schema::users,
+    user::{group_access::schema::tenant_user_group_grants, schema::users},
 };
 
 // 四张表分别定义在不同领域模块中。项目不使用数据库外键，因此这里显式声明鉴权查询
@@ -41,6 +41,7 @@ struct GatewayAuthRow {
     group_name: Option<String>,
     group_enabled: Option<bool>,
     username: Option<String>,
+    user_role: Option<String>,
     user_enabled: Option<bool>,
     user_quota: Option<i64>,
     user_max_concurrency: Option<i32>,
@@ -159,6 +160,7 @@ pub async fn authenticate_gateway_key(
             provider_groups::name.nullable(),
             provider_groups::enabled.nullable(),
             users::username.nullable(),
+            users::role.nullable(),
             users::enabled.nullable(),
             users::quota.nullable(),
             users::max_concurrency.nullable(),
@@ -199,6 +201,7 @@ pub async fn authenticate_gateway_key(
         group_name,
         group_enabled,
         username,
+        user_role,
         user_enabled,
         user_quota,
         user_max_concurrency,
@@ -253,8 +256,8 @@ pub async fn authenticate_gateway_key(
     // 因此在基础身份与分组状态通过后追加一次小查询，以有界成本取得第二层授权集合。
     let group_allowed_models = group::load_model_names(&mut conn, group_id).await?;
 
-    let (Some(username), Some(user_enabled), Some(user_quota)) =
-        (username, user_enabled, user_quota)
+    let (Some(username), Some(user_role), Some(user_enabled), Some(user_quota)) =
+        (username, user_role, user_enabled, user_quota)
     else {
         warn!(
             api_key_id = %api_key_id,
@@ -272,6 +275,33 @@ pub async fn authenticate_gateway_key(
             username,
             "API Key 所属用户已禁用，拒绝请求"
         );
+        return Err(AppError::InvalidApiKey);
+    }
+
+    if user_role == crate::user::USER_ROLE_TENANT_USER {
+        let group_granted = tenant_user_group_grants::table
+            .filter(tenant_user_group_grants::tenant_id.eq(tenant_id))
+            .filter(tenant_user_group_grants::user_id.eq(user_id))
+            .filter(tenant_user_group_grants::group_id.eq(group_id))
+            .select(tenant_user_group_grants::group_id)
+            .first::<Uuid>(&mut conn)
+            .await
+            .optional()
+            .map_err(|source| AppError::DbQuery {
+                message: source.to_string(),
+            })?
+            .is_some();
+        if !group_granted {
+            warn!(
+                api_key_id = %api_key_id,
+                user_id = %user_id,
+                provider_group_id = %group_id,
+                "普通用户的 Provider 分组授权已撤销，拒绝既有 API Key 请求"
+            );
+            return Err(AppError::InvalidApiKey);
+        }
+    } else if user_role != crate::user::USER_ROLE_TENANT_OWNER {
+        warn!(api_key_id = %api_key_id, user_id = %user_id, role = %user_role, "API Key 所属用户角色不能使用租户 Provider 分组");
         return Err(AppError::InvalidApiKey);
     }
 

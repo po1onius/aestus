@@ -10,6 +10,7 @@ interface RequestOverrideDialogProps {
   headerRows: OverrideEntry[];
   bodyRows: OverrideEntry[];
   saving: boolean;
+  readOnly: boolean;
   onAdd: (section: "header" | "body") => void;
   onChange: (
     section: "header" | "body",
@@ -45,7 +46,7 @@ export function RequestOverrideDialog(props: RequestOverrideDialogProps) {
             <OverrideKvEditor
               title="Header"
               rows={props.headerRows}
-              disabled={props.saving}
+              disabled={props.saving || props.readOnly}
               onAdd={() => props.onAdd("header")}
               onChange={(id, field, value) => props.onChange("header", id, field, value)}
               onRemove={(id) => props.onRemove("header", id)}
@@ -53,18 +54,18 @@ export function RequestOverrideDialog(props: RequestOverrideDialogProps) {
             <OverrideKvEditor
               title="Body"
               rows={props.bodyRows}
-              disabled={props.saving}
+              disabled={props.saving || props.readOnly}
               onAdd={() => props.onAdd("body")}
               onChange={(id, field, value) => props.onChange("body", id, field, value)}
               onRemove={(id) => props.onRemove("body", id)}
             />
           </div>
-          <div className="flex justify-end">
+          {!props.readOnly && <div className="flex justify-end">
             <button type="submit" className={buttonPrimary} disabled={props.saving}>
               {props.saving ? <Loader2 className={spinnerClass} size={18} /> : <Save size={18} />}
               保存覆盖
             </button>
-          </div>
+          </div>}
         </form>
       </div>
     </Modal>

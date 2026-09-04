@@ -74,6 +74,27 @@ impl<'a, P: MaintenanceProvider> ProviderResourceService<'a, P> {
         self.attach_account_runtime(accounts).await
     }
 
+    pub async fn list_accounts_in_groups(
+        &self,
+        tenant_id: Uuid,
+        group_ids: &[Uuid],
+        limit: i64,
+        offset: i64,
+    ) -> AppResult<Vec<AccountSnapshot>> {
+        let mut conn = self.state.db_conn().await?;
+        let accounts = sql::account::list_page_by_provider_and_groups(
+            &mut conn,
+            tenant_id,
+            P::NAME,
+            group_ids,
+            limit,
+            offset,
+        )
+        .await?;
+        drop(conn);
+        self.attach_account_runtime(accounts).await
+    }
+
     pub async fn sync_account(&self, account: ProviderAccount) -> AppResult<AccountSnapshot> {
         let id = account.id;
         let result = async {
@@ -113,6 +134,27 @@ impl<'a, P: MaintenanceProvider> ProviderResourceService<'a, P> {
         let account =
             sql::account::update_override(&mut conn, tenant_id, P::NAME, id, request_override)
                 .await?;
+        drop(conn);
+        self.sync_account(account).await
+    }
+
+    pub async fn update_account_override_in_group(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        group_id: Uuid,
+        request_override: RequestOverride,
+    ) -> AppResult<AccountSnapshot> {
+        let mut conn = self.state.db_conn().await?;
+        let account = sql::account::update_override_in_group(
+            &mut conn,
+            tenant_id,
+            P::NAME,
+            id,
+            group_id,
+            request_override,
+        )
+        .await?;
         drop(conn);
         self.sync_account(account).await
     }
@@ -186,6 +228,38 @@ impl<'a, P: MaintenanceProvider> ProviderResourceService<'a, P> {
         let api_keys =
             sql::api_key::list_page_by_provider(&mut conn, tenant_id, P::NAME, limit, offset)
                 .await?;
+        drop(conn);
+        self.attach_api_key_runtime(api_keys).await
+    }
+
+    pub async fn find_api_key(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> AppResult<Option<ProviderApiKey>> {
+        let mut conn = self.state.db_conn().await?;
+        Ok(sql::api_key::find_by_id(&mut conn, P::NAME, id)
+            .await?
+            .filter(|api_key| api_key.tenant_id == tenant_id))
+    }
+
+    pub async fn list_api_keys_in_groups(
+        &self,
+        tenant_id: Uuid,
+        group_ids: &[Uuid],
+        limit: i64,
+        offset: i64,
+    ) -> AppResult<Vec<ApiKeySnapshot>> {
+        let mut conn = self.state.db_conn().await?;
+        let api_keys = sql::api_key::list_page_by_provider_and_groups(
+            &mut conn,
+            tenant_id,
+            P::NAME,
+            group_ids,
+            limit,
+            offset,
+        )
+        .await?;
         drop(conn);
         self.attach_api_key_runtime(api_keys).await
     }
@@ -265,6 +339,27 @@ impl<'a, P: MaintenanceProvider> ProviderResourceService<'a, P> {
         let api_key =
             sql::api_key::update_override(&mut conn, tenant_id, P::NAME, id, request_override)
                 .await?;
+        drop(conn);
+        self.sync_api_key(api_key).await
+    }
+
+    pub async fn update_api_key_override_in_group(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+        group_id: Uuid,
+        request_override: RequestOverride,
+    ) -> AppResult<ApiKeySnapshot> {
+        let mut conn = self.state.db_conn().await?;
+        let api_key = sql::api_key::update_override_in_group(
+            &mut conn,
+            tenant_id,
+            P::NAME,
+            id,
+            group_id,
+            request_override,
+        )
+        .await?;
         drop(conn);
         self.sync_api_key(api_key).await
     }

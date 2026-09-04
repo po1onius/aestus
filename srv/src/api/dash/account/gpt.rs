@@ -1,5 +1,7 @@
 //! GPT OAuth 账号的 Dashboard HTTP 接口、导入流程与额度查询。
 
+use std::collections::HashSet;
+
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -31,6 +33,7 @@ use crate::{
         service::{AccountSnapshot, ProviderResourceService},
     },
     state::AppState,
+    user::group_access::{self, GroupPermission},
 };
 
 const MAX_REFRESH_TOKEN_BYTES: usize = 32 * 1024;
@@ -103,7 +106,7 @@ struct GptAccountResponse {
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
     #[serde(rename = "override")]
-    override_: RequestOverride,
+    override_: Option<RequestOverride>,
     runtime: AccountRuntimeView,
 }
 
@@ -172,7 +175,7 @@ async fn complete_oauth_callback(
     let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
     if session.tenant_id != tenant_id {
         warn!(owner_user_id = %owner.id, owner_tenant_id = %tenant_id, oauth_tenant_id = %session.tenant_id, "GPT OAuth 会话租户与当前 owner 不一致，拒绝消费");
-        return Err(AppError::Forbidden.into());
+        return Err(AppError::Forbidden);
     }
 
     let auth_token = auth::exchange_callback_code(
@@ -194,7 +197,7 @@ async fn complete_oauth_callback(
         "GPT OAuth callback 已完成，未分组账号已保存并进入统一 maintenance"
     );
 
-    Ok(Json(GptAccountResponse::from_snapshot(snapshot)?))
+    Ok(Json(GptAccountResponse::from_snapshot(snapshot, true)?))
 }
 
 async fn create_gpt_account(
@@ -230,7 +233,7 @@ async fn create_gpt_account(
                 error = %error,
                 "管理端 refresh_token 导入 GPT 账号失败"
             );
-            return Err(map_refresh_token_import_error(error).into());
+            return Err(map_refresh_token_import_error(error));
         }
     };
     let auth_token =
@@ -252,7 +255,7 @@ async fn create_gpt_account(
         "管理端通过 refresh_token 创建 GPT 账号成功"
     );
 
-    Ok(Json(GptAccountResponse::from_snapshot(snapshot)?))
+    Ok(Json(GptAccountResponse::from_snapshot(snapshot, true)?))
 }
 
 async fn persist_imported_auth_token(
@@ -383,17 +386,50 @@ async fn persist_auth_token_with_plan(
 
 async fn list_gpt_accounts(
     State(state): State<AppState>,
-    dash_auth::AdminUser(owner): dash_auth::AdminUser,
+    dash_auth::CurrentUser(current_user): dash_auth::CurrentUser,
     Query(query): Query<ListPageQuery>,
-) -> AdminResult<Json<ListPage<GptAccountResponse>>> {
+) -> AppResult<Json<ListPage<GptAccountResponse>>> {
     let page = query.normalize()?;
-    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
-    let snapshots = ProviderResourceService::<GptMaintenance>::new(&state)
-        .list_accounts(tenant_id, page.query_limit(), page.offset())
-        .await?;
+    let tenant_id = current_user.tenant_id.ok_or(AppError::Forbidden)?;
+    let mut conn = state.db_conn().await?;
+    let visible_group_ids = group_access::group_ids_with_permission(
+        &mut conn,
+        &current_user,
+        GroupPermission::AccountView,
+    )
+    .await?;
+    let override_group_ids = group_access::group_ids_with_permission(
+        &mut conn,
+        &current_user,
+        GroupPermission::AccountOverrideView,
+    )
+    .await?
+    .map(|ids| ids.into_iter().collect::<HashSet<_>>());
+    drop(conn);
+    let service = ProviderResourceService::<GptMaintenance>::new(&state);
+    let snapshots = match visible_group_ids {
+        None => {
+            service
+                .list_accounts(tenant_id, page.query_limit(), page.offset())
+                .await?
+        }
+        Some(group_ids) => {
+            service
+                .list_accounts_in_groups(tenant_id, &group_ids, page.query_limit(), page.offset())
+                .await?
+        }
+    };
     let items = snapshots
         .into_iter()
-        .map(GptAccountResponse::from_snapshot)
+        .map(|snapshot| {
+            let can_view_override = override_group_ids.as_ref().is_none_or(|ids| {
+                snapshot
+                    .account
+                    .group_id
+                    .is_some_and(|id| ids.contains(&id))
+            });
+            GptAccountResponse::from_snapshot(snapshot, can_view_override)
+        })
         .collect::<AppResult<Vec<_>>>()?;
 
     Ok(Json(page.finish(items)))
@@ -410,26 +446,52 @@ async fn update_gpt_account_enabled(
         .update_account_enabled(tenant_id, id, payload.enabled)
         .await?;
 
-    Ok(Json(GptAccountResponse::from_snapshot(snapshot)?))
+    Ok(Json(GptAccountResponse::from_snapshot(snapshot, true)?))
 }
 
 async fn update_gpt_account_override(
     State(state): State<AppState>,
-    dash_auth::AdminUser(owner): dash_auth::AdminUser,
+    dash_auth::CurrentUser(current_user): dash_auth::CurrentUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateRequestOverrideRequest>,
-) -> AdminResult<Json<GptAccountResponse>> {
+) -> AppResult<Json<GptAccountResponse>> {
     payload.override_.validate()?;
-    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
-    let snapshot = ProviderResourceService::<GptMaintenance>::new(&state)
-        .update_account_override(tenant_id, id, payload.override_)
-        .await?;
+    let tenant_id = current_user.tenant_id.ok_or(AppError::Forbidden)?;
+    let service = ProviderResourceService::<GptMaintenance>::new(&state);
+    let account = service
+        .find_account(tenant_id, id)
+        .await?
+        .ok_or(AppError::Forbidden)?;
+    let mut conn = state.db_conn().await?;
+    group_access::require_permission(
+        &mut conn,
+        &current_user,
+        account.group_id,
+        GroupPermission::AccountOverrideUpdate,
+    )
+    .await?;
+    drop(conn);
+    let snapshot = if current_user.is_tenant_owner() {
+        service
+            .update_account_override(tenant_id, id, payload.override_)
+            .await?
+    } else {
+        service
+            .update_account_override_in_group(
+                tenant_id,
+                id,
+                account.group_id.ok_or(AppError::Forbidden)?,
+                payload.override_,
+            )
+            .await?
+    };
 
     info!(
+        actor_user_id = %current_user.id,
         gpt_account_id = %snapshot.account.id,
         "管理端更新 GPT 账号请求 override 成功，runtime 已同步"
     );
-    Ok(Json(GptAccountResponse::from_snapshot(snapshot)?))
+    Ok(Json(GptAccountResponse::from_snapshot(snapshot, true)?))
 }
 
 async fn update_gpt_account_group(
@@ -447,22 +509,31 @@ async fn update_gpt_account_group(
         provider_group_id = ?snapshot.account.group_id,
         "管理端调整 GPT 账号分组成功，runtime 已同步"
     );
-    Ok(Json(GptAccountResponse::from_snapshot(snapshot)?))
+    Ok(Json(GptAccountResponse::from_snapshot(snapshot, true)?))
 }
 
 async fn refresh_gpt_account_quota(
     State(state): State<AppState>,
-    dash_auth::AdminUser(owner): dash_auth::AdminUser,
+    dash_auth::CurrentUser(current_user): dash_auth::CurrentUser,
     Path(id): Path<Uuid>,
-) -> AdminResult<Json<quota::GptAccountQuotaResponse>> {
+) -> AppResult<Json<quota::GptAccountQuotaResponse>> {
     let service = ProviderResourceService::<GptMaintenance>::new(&state);
-    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
+    let tenant_id = current_user.tenant_id.ok_or(AppError::Forbidden)?;
     let account = service.find_account(tenant_id, id).await?.ok_or_else(|| {
         warn!(gpt_account_id = %id, "管理端刷新 GPT 账号额度失败，账号不存在");
         AppError::BadRequest {
             message: format!("GPT 账号不存在: {id}"),
         }
     })?;
+    let mut conn = state.db_conn().await?;
+    group_access::require_permission(
+        &mut conn,
+        &current_user,
+        account.group_id,
+        GroupPermission::AccountQuotaView,
+    )
+    .await?;
+    drop(conn);
 
     // 只记录查询发起前仍生效的 quota 快照。查询期间若账号发生任意持久变化，后续 CAS
     // 会拒绝用旧的上游结果清理状态，防止覆盖新到达的额度耗尽回执。
@@ -515,6 +586,7 @@ async fn refresh_gpt_account_quota(
     }
 
     info!(
+        actor_user_id = %current_user.id,
         gpt_account_id = %account.id,
         chatgpt_account_id = quota.chatgpt_account_id.as_deref().unwrap_or("<missing>"),
         snapshot_count = quota.snapshots.len(),
@@ -528,20 +600,30 @@ async fn refresh_gpt_account_quota(
 /// 查询指定 GPT OAuth 账号可用的人工额度重置记录。
 async fn list_gpt_account_rate_limit_reset_credits(
     State(state): State<AppState>,
-    dash_auth::AdminUser(owner): dash_auth::AdminUser,
+    dash_auth::CurrentUser(current_user): dash_auth::CurrentUser,
     Path(id): Path<Uuid>,
-) -> AdminResult<Json<rate_limit_reset::RateLimitResetCreditsResponse>> {
+) -> AppResult<Json<rate_limit_reset::RateLimitResetCreditsResponse>> {
     let service = ProviderResourceService::<GptMaintenance>::new(&state);
-    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
+    let tenant_id = current_user.tenant_id.ok_or(AppError::Forbidden)?;
     let account = service.find_account(tenant_id, id).await?.ok_or_else(|| {
         warn!(gpt_account_id = %id, "管理端查询 GPT 账号额度重置记录失败，账号不存在");
         AppError::BadRequest {
             message: format!("GPT 账号不存在: {id}"),
         }
     })?;
+    let mut conn = state.db_conn().await?;
+    group_access::require_permission(
+        &mut conn,
+        &current_user,
+        account.group_id,
+        GroupPermission::AccountResetView,
+    )
+    .await?;
+    drop(conn);
 
     let response = rate_limit_reset::fetch_rate_limit_reset_credits(&state, &account).await?;
     info!(
+        actor_user_id = %current_user.id,
         gpt_account_id = %account.id,
         available_count = response.available_count,
         credit_count = response.credits.len(),
@@ -553,18 +635,27 @@ async fn list_gpt_account_rate_limit_reset_credits(
 /// 应用一条由查询接口返回的额度重置记录。
 async fn consume_gpt_account_rate_limit_reset_credit(
     State(state): State<AppState>,
-    dash_auth::AdminUser(owner): dash_auth::AdminUser,
+    dash_auth::CurrentUser(current_user): dash_auth::CurrentUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<rate_limit_reset::ConsumeRateLimitResetCreditRequest>,
-) -> AdminResult<Json<rate_limit_reset::ConsumeRateLimitResetCreditResponse>> {
+) -> AppResult<Json<rate_limit_reset::ConsumeRateLimitResetCreditResponse>> {
     let service = ProviderResourceService::<GptMaintenance>::new(&state);
-    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
+    let tenant_id = current_user.tenant_id.ok_or(AppError::Forbidden)?;
     let account = service.find_account(tenant_id, id).await?.ok_or_else(|| {
         warn!(gpt_account_id = %id, "管理端应用 GPT 账号额度重置记录失败，账号不存在");
         AppError::BadRequest {
             message: format!("GPT 账号不存在: {id}"),
         }
     })?;
+    let mut conn = state.db_conn().await?;
+    group_access::require_permission(
+        &mut conn,
+        &current_user,
+        account.group_id,
+        GroupPermission::AccountResetConsume,
+    )
+    .await?;
+    drop(conn);
 
     // 上游 redeem_request_id 是本次后端操作的协议细节，不暴露给浏览器。UUID v7 同时便于
     // 按时间定位日志；当前管理接口不做透明自动重试，每次点击“应用”创建一次新操作。
@@ -577,6 +668,7 @@ async fn consume_gpt_account_rate_limit_reset_credit(
     )
     .await?;
     info!(
+        actor_user_id = %current_user.id,
         gpt_account_id = %account.id,
         credit_id = %payload.credit_id,
         idempotency_key = %idempotency_key,
@@ -600,8 +692,7 @@ async fn delete_gpt_account(
         warn!(gpt_account_id = %id, "管理端删除 GPT 账号失败，账号不存在");
         return Err(AppError::BadRequest {
             message: format!("GPT 账号不存在: {id}"),
-        }
-        .into());
+        });
     }
 
     let deleted = service.delete_account(tenant_id, id).await?;
@@ -652,7 +743,7 @@ fn normalize_optional_limited(
 }
 
 impl GptAccountResponse {
-    fn from_snapshot(snapshot: AccountSnapshot) -> AppResult<Self> {
+    fn from_snapshot(snapshot: AccountSnapshot, can_view_override: bool) -> AppResult<Self> {
         let AccountSnapshot {
             account,
             group,
@@ -695,7 +786,7 @@ impl GptAccountResponse {
             status_reason: account.status_reason.clone(),
             created_at: account.created_at,
             updated_at: account.updated_at,
-            override_: request_override,
+            override_: can_view_override.then_some(request_override),
             runtime,
         })
     }

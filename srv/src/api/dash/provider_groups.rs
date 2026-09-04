@@ -16,6 +16,7 @@ use crate::{
         service::ProviderResourceService,
     },
     state::AppState,
+    user::group_access::{self, UserGroupGrant},
 };
 
 #[derive(Debug, Default, Deserialize)]
@@ -65,6 +66,7 @@ struct DeleteGroupResponse {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/options", get(list_group_options))
+        .route("/access", get(list_current_group_access))
         .route("/unassigned-resources", get(list_unassigned_resources))
         .route("/", get(list_groups).post(create_group))
         .route("/{id}", put(rename_group).delete(delete_group))
@@ -100,7 +102,23 @@ async fn list_group_options(
 ) -> AppResult<Json<Vec<ProviderGroupWithModels>>> {
     let tenant_id = current_user.tenant_id.ok_or(AppError::Forbidden)?;
     let mut conn = state.db_conn().await?;
-    Ok(Json(group::list_enabled(&mut conn, tenant_id).await?))
+    let mut groups = group::list_enabled(&mut conn, tenant_id).await?;
+    if let Some(group_ids) = group_access::granted_group_ids(&mut conn, &current_user).await? {
+        let granted = group_ids
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
+        groups.retain(|group| granted.contains(&group.group.id));
+    }
+    Ok(Json(groups))
+}
+
+async fn list_current_group_access(
+    State(state): State<AppState>,
+    auth::CurrentUser(current_user): auth::CurrentUser,
+) -> AppResult<Json<Vec<UserGroupGrant>>> {
+    let mut conn = state.db_conn().await?;
+    let grants = group_access::list_for_current_user(&mut conn, &current_user).await?;
+    Ok(Json(grants))
 }
 
 async fn list_groups(

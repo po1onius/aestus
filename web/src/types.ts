@@ -21,6 +21,21 @@ export type AccountImportMode = "oauth" | "refreshToken";
 export type AccountProviderKey = "gpt" | "claude" | "grok";
 export type ProviderCredentialTab = "accounts" | "officialKeys";
 export type UpstreamApiKeyProvider = "gpt" | "claude";
+export type GroupPermission =
+  | "account.view"
+  | "account.quota.view"
+  | "account.reset.view"
+  | "account.reset.consume"
+  | "account.override.view"
+  | "account.override.update"
+  | "official_api_key.view"
+  | "official_api_key.override.view"
+  | "official_api_key.override.update";
+
+export interface UserGroupGrant {
+  group_id: string;
+  permissions: GroupPermission[];
+}
 
 export interface ProviderGroupReference {
   id: string;
@@ -187,7 +202,7 @@ export interface GptAccount {
   status_reason: string | null;
   created_at: string;
   updated_at: string;
-  override: RequestOverride;
+  override: RequestOverride | null;
   runtime: GptAccountRuntime;
 }
 
@@ -312,7 +327,7 @@ export interface ClaudeAccount {
   status_reason: string | null;
   created_at: string;
   updated_at: string;
-  override: RequestOverride;
+  override: RequestOverride | null;
   runtime: ClaudeAccountRuntime;
 }
 
@@ -339,7 +354,7 @@ export interface ProviderUpstreamApiKey {
   enabled: boolean;
   group: ProviderGroupReference | null;
   error: string | null;
-  override: RequestOverride;
+  override: RequestOverride | null;
   runtime: ProviderUpstreamApiKeyRuntime;
 }
 
@@ -355,6 +370,7 @@ export interface ApiKey {
   name: string;
   api_key: string;
   enabled: boolean;
+  group_authorized: boolean;
   group: ProviderGroupReference;
   group_allowed_models: string[];
   allowed_models: string[];

@@ -2,6 +2,7 @@ import { Loader2, Settings, Trash2 } from "lucide-react";
 import { RuntimeBadge } from "../../components/RuntimeBadge";
 import { StatusBadge } from "../../components/StatusBadge";
 import { formatDateTime, formatOptionalDateTime } from "../../lib/format";
+import type { ProviderAccess } from "../group-access/access";
 import {
   actionStackClass,
   buttonSmall,
@@ -21,6 +22,7 @@ import { enabledToggleLabel } from "./utils";
 import { ProviderGroupCell } from "./ProviderGroupCell";
 
 interface ClaudeAccountsTableProps {
+  access: ProviderAccess;
   accounts: ClaudeAccount[];
   groups: ProviderGroup[];
   groupUpdatingId: string | null;
@@ -51,6 +53,7 @@ function formatExtraUsage(enabled: boolean | null): string {
  * 数据请求和弹窗状态留在上层，避免表格组件持有第二份服务端状态。
  */
 export function ClaudeAccountsTable({
+  access,
   accounts,
   groups,
   groupUpdatingId,
@@ -77,7 +80,10 @@ export function ClaudeAccountsTable({
           </tr>
         </thead>
         <tbody>
-          {accounts.map((account) => (
+          {accounts.map((account) => {
+            const canViewOverride =
+              access.has(account.group?.id, "account.override.view") && account.override !== null;
+            return (
             <tr key={account.id} className={account.enabled ? undefined : disabledRowClass}>
               <td>
                 <div className={entryStackClass}>
@@ -90,18 +96,22 @@ export function ClaudeAccountsTable({
                 </div>
               </td>
               <td>
-                <ProviderGroupCell
-                  resourceLabel={account.display_name || account.email || account.id}
-                  provider="claude"
-                  group={account.group}
-                  groups={groups}
-                  disabled={
-                    deletingId === account.id ||
-                    enabledUpdatingId === account.id ||
-                    groupUpdatingId === account.id
-                  }
-                  onChange={(groupId) => onUpdateGroup(account, groupId)}
-                />
+                {access.isOwner ? (
+                  <ProviderGroupCell
+                    resourceLabel={account.display_name || account.email || account.id}
+                    provider="claude"
+                    group={account.group}
+                    groups={groups}
+                    disabled={
+                      deletingId === account.id ||
+                      enabledUpdatingId === account.id ||
+                      groupUpdatingId === account.id
+                    }
+                    onChange={(groupId) => onUpdateGroup(account, groupId)}
+                  />
+                ) : (
+                  <span className={cellMainClass}>{account.group?.name ?? "未分组"}</span>
+                )}
               </td>
               <td>
                 <div className={cellMainClass} title={account.account_uuid || "未返回 account UUID"}>
@@ -169,7 +179,7 @@ export function ClaudeAccountsTable({
               </td>
               <td>
                 <div className={actionStackClass}>
-                  <button
+                  {access.isOwner && <button
                     className={buttonSmall}
                     disabled={
                       deletingId === account.id ||
@@ -184,21 +194,21 @@ export function ClaudeAccountsTable({
                     ) : (
                       enabledToggleLabel(account.enabled)
                     )}
-                  </button>
+                  </button>}
                   <button
                     className={buttonSmall}
-                    disabled={
+                    disabled={!canViewOverride ||
                       deletingId === account.id ||
                       enabledUpdatingId === account.id ||
                       groupUpdatingId === account.id
                     }
                     onClick={() => onOpenOverride(account)}
-                    title="请求覆盖"
+                    title={canViewOverride ? "查看请求覆盖" : "未获得查看账号覆盖权限"}
                   >
                     <Settings size={14} />
                     覆盖
                   </button>
-                  <button
+                  {access.isOwner && <button
                     className={buttonSmallDanger}
                     disabled={
                       deletingId === account.id ||
@@ -214,11 +224,12 @@ export function ClaudeAccountsTable({
                       <Trash2 size={14} />
                     )}
                     删除
-                  </button>
+                  </button>}
                 </div>
               </td>
             </tr>
-          ))}
+            );
+          })}
         </tbody>
       </table>
     </div>

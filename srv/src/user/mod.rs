@@ -1,4 +1,5 @@
 mod credential;
+pub mod group_access;
 mod model;
 mod quota;
 mod registration;
@@ -7,6 +8,7 @@ mod repository;
 pub(crate) use credential::validate_registration_password;
 pub use credential::{burn_dummy_password_verification, decode_jwt, issue_jwt, verify_password};
 pub use model::{PublicUser, User, schema};
+pub(crate) use model::{USER_ROLE_TENANT_OWNER, USER_ROLE_TENANT_USER};
 pub use quota::deduct_quota;
 pub use registration::{
     bootstrap_admin, create_owner_managed_user, normalize_email, normalize_username,

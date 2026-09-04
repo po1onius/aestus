@@ -2,6 +2,7 @@ import { Loader2, RotateCcw, Search, Settings, Trash2 } from "lucide-react";
 import { RuntimeBadge } from "../../components/RuntimeBadge";
 import { StatusBadge } from "../../components/StatusBadge";
 import { formatDateTime, formatOptionalDateTime } from "../../lib/format";
+import type { ProviderAccess } from "../group-access/access";
 import {
   actionStackClass,
   buttonSmall,
@@ -21,6 +22,7 @@ import { QuotaCell } from "./QuotaCell";
 import { enabledToggleLabel } from "./utils";
 
 interface GptAccountsTableProps {
+  access: ProviderAccess;
   accounts: GptAccount[];
   quotas: Record<string, GptAccountQuotaResponse>;
   quotaRefreshingIds: Record<string, boolean>;
@@ -39,6 +41,7 @@ interface GptAccountsTableProps {
 
 /** GPT OAuth 账号表格。所有写操作均由上层控制器执行，组件本身保持无副作用。 */
 export function GptAccountsTable({
+  access,
   accounts,
   quotas,
   quotaRefreshingIds,
@@ -71,6 +74,11 @@ export function GptAccountsTable({
         </thead>
         <tbody>
           {accounts.map((account) => {
+            const groupId = account.group?.id;
+            const canViewQuota = access.has(groupId, "account.quota.view");
+            const canViewReset = access.has(groupId, "account.reset.view");
+            const canViewOverride =
+              access.has(groupId, "account.override.view") && account.override !== null;
             const busy =
               Boolean(quotaRefreshingIds[account.id]) ||
               resetOperationAccountId === account.id ||
@@ -90,20 +98,28 @@ export function GptAccountsTable({
                   </div>
                 </td>
                 <td>
-                <ProviderGroupCell
-                  resourceLabel={account.email || account.id}
-                  provider="gpt"
-                  group={account.group}
-                    groups={groups}
-                    disabled={busy}
-                    onChange={(groupId) => onUpdateGroup(account, groupId)}
-                  />
+                  {access.isOwner ? (
+                    <ProviderGroupCell
+                      resourceLabel={account.email || account.id}
+                      provider="gpt"
+                      group={account.group}
+                      groups={groups}
+                      disabled={busy}
+                      onChange={(groupId) => onUpdateGroup(account, groupId)}
+                    />
+                  ) : (
+                    <span className={cellMainClass}>{account.group?.name ?? "未分组"}</span>
+                  )}
                 </td>
                 <td>
                   <div className={cellMainClass}>{account.plan_type}</div>
                 </td>
                 <td>
-                  <QuotaCell quota={quotas[account.id]} />
+                  {canViewQuota ? (
+                    <QuotaCell quota={quotas[account.id]} />
+                  ) : (
+                    <span className={cellNoteClass}>无查看权限</span>
+                  )}
                 </td>
                 <td>
                   <div className="grid gap-1.5">
@@ -142,9 +158,9 @@ export function GptAccountsTable({
                   <div className={actionStackClass}>
                     <button
                       className={buttonSmall}
-                      disabled={busy}
+                      disabled={busy || !canViewQuota}
                       onClick={() => onRefreshQuota(account)}
-                      title="查询账号额度"
+                      title={canViewQuota ? "查询账号额度" : "未获得查看账号额度权限"}
                     >
                       {quotaRefreshingIds[account.id] ? (
                         <Loader2 className={spinnerClass} size={14} />
@@ -155,9 +171,9 @@ export function GptAccountsTable({
                     </button>
                     <button
                       className={buttonSmall}
-                      disabled={busy}
+                      disabled={busy || !canViewReset}
                       onClick={() => onOpenRateLimitReset(account)}
-                      title="查询并应用账号额度重置"
+                      title={canViewReset ? "查询账号额度重置信息" : "未获得查看重置信息权限"}
                     >
                       {resetOperationAccountId === account.id ? (
                         <Loader2 className={spinnerClass} size={14} />
@@ -166,28 +182,30 @@ export function GptAccountsTable({
                       )}
                       重置
                     </button>
+                    {access.isOwner && (
+                      <button
+                        className={buttonSmall}
+                        disabled={busy}
+                        onClick={() => onUpdateEnabled(account, !account.enabled)}
+                        title={account.enabled ? "禁用账号调度" : "启用账号调度"}
+                      >
+                        {enabledUpdatingId === account.id ? (
+                          <Loader2 className={spinnerClass} size={14} />
+                        ) : (
+                          enabledToggleLabel(account.enabled)
+                        )}
+                      </button>
+                    )}
                     <button
                       className={buttonSmall}
-                      disabled={busy}
-                      onClick={() => onUpdateEnabled(account, !account.enabled)}
-                      title={account.enabled ? "禁用账号调度" : "启用账号调度"}
-                    >
-                      {enabledUpdatingId === account.id ? (
-                        <Loader2 className={spinnerClass} size={14} />
-                      ) : (
-                        enabledToggleLabel(account.enabled)
-                      )}
-                    </button>
-                    <button
-                      className={buttonSmall}
-                      disabled={busy}
+                      disabled={busy || !canViewOverride}
                       onClick={() => onOpenOverride(account)}
-                      title="请求覆盖"
+                      title={canViewOverride ? "查看请求覆盖" : "未获得查看账号覆盖权限"}
                     >
                       <Settings size={14} />
                       覆盖
                     </button>
-                    <button
+                    {access.isOwner && <button
                       className={buttonSmallDanger}
                       disabled={busy}
                       onClick={() => onDelete(account)}
@@ -199,7 +217,7 @@ export function GptAccountsTable({
                         <Trash2 size={14} />
                       )}
                       删除
-                    </button>
+                    </button>}
                   </div>
                 </td>
               </tr>

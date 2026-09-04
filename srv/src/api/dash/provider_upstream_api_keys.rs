@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -21,6 +23,7 @@ use crate::{
         service::{ApiKeySnapshot, ProviderResourceService},
     },
     state::AppState,
+    user::group_access::{self, GroupPermission},
 };
 
 const MAX_UPSTREAM_API_KEY_BYTES: usize = 4 * 1024;
@@ -70,7 +73,7 @@ struct ProviderUpstreamApiKeyResponse {
     group: Option<ProviderGroup>,
     error: Option<String>,
     #[serde(rename = "override")]
-    override_: RequestOverride,
+    override_: Option<RequestOverride>,
     runtime: ApiKeyRuntimeView,
 }
 
@@ -114,45 +117,104 @@ async fn create_provider_upstream_api_key<P: MaintenanceProvider>(
         "管理端创建未分组 provider 官方 API Key 成功，已同步统一 maintenance/runtime 状态"
     );
     Ok(Json(ProviderUpstreamApiKeyResponse::from_snapshot(
-        snapshot,
+        snapshot, true,
     )?))
 }
 
 async fn list_provider_upstream_api_keys<P: MaintenanceProvider>(
     State(state): State<AppState>,
-    dash_auth::AdminUser(owner): dash_auth::AdminUser,
+    dash_auth::CurrentUser(current_user): dash_auth::CurrentUser,
     Query(query): Query<ListPageQuery>,
-) -> AdminResult<Json<ListPage<ProviderUpstreamApiKeyResponse>>> {
+) -> AppResult<Json<ListPage<ProviderUpstreamApiKeyResponse>>> {
     let page = query.normalize()?;
-    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
-    let snapshots = ProviderResourceService::<P>::new(&state)
-        .list_api_keys(tenant_id, page.query_limit(), page.offset())
-        .await?;
+    let tenant_id = current_user.tenant_id.ok_or(AppError::Forbidden)?;
+    let mut conn = state.db_conn().await?;
+    let visible_group_ids = group_access::group_ids_with_permission(
+        &mut conn,
+        &current_user,
+        GroupPermission::OfficialApiKeyView,
+    )
+    .await?;
+    let override_group_ids = group_access::group_ids_with_permission(
+        &mut conn,
+        &current_user,
+        GroupPermission::OfficialApiKeyOverrideView,
+    )
+    .await?
+    .map(|ids| ids.into_iter().collect::<HashSet<_>>());
+    drop(conn);
+    let service = ProviderResourceService::<P>::new(&state);
+    let snapshots = match visible_group_ids {
+        None => {
+            service
+                .list_api_keys(tenant_id, page.query_limit(), page.offset())
+                .await?
+        }
+        Some(group_ids) => {
+            service
+                .list_api_keys_in_groups(tenant_id, &group_ids, page.query_limit(), page.offset())
+                .await?
+        }
+    };
     let items = snapshots
         .into_iter()
-        .map(ProviderUpstreamApiKeyResponse::from_snapshot)
+        .map(|snapshot| {
+            let can_view_override = override_group_ids.as_ref().is_none_or(|ids| {
+                snapshot
+                    .api_key
+                    .group_id
+                    .is_some_and(|id| ids.contains(&id))
+            });
+            ProviderUpstreamApiKeyResponse::from_snapshot(snapshot, can_view_override)
+        })
         .collect::<AppResult<Vec<_>>>()?;
     Ok(Json(page.finish(items)))
 }
 
 async fn update_provider_upstream_api_key_override<P: MaintenanceProvider>(
     State(state): State<AppState>,
-    dash_auth::AdminUser(owner): dash_auth::AdminUser,
+    dash_auth::CurrentUser(current_user): dash_auth::CurrentUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateRequestOverrideRequest>,
-) -> AdminResult<Json<ProviderUpstreamApiKeyResponse>> {
+) -> AppResult<Json<ProviderUpstreamApiKeyResponse>> {
     payload.override_.validate()?;
-    let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
-    let snapshot = ProviderResourceService::<P>::new(&state)
-        .update_api_key_override(tenant_id, id, payload.override_)
-        .await?;
+    let tenant_id = current_user.tenant_id.ok_or(AppError::Forbidden)?;
+    let service = ProviderResourceService::<P>::new(&state);
+    let api_key = service
+        .find_api_key(tenant_id, id)
+        .await?
+        .ok_or(AppError::Forbidden)?;
+    let mut conn = state.db_conn().await?;
+    group_access::require_permission(
+        &mut conn,
+        &current_user,
+        api_key.group_id,
+        GroupPermission::OfficialApiKeyOverrideUpdate,
+    )
+    .await?;
+    drop(conn);
+    let snapshot = if current_user.is_tenant_owner() {
+        service
+            .update_api_key_override(tenant_id, id, payload.override_)
+            .await?
+    } else {
+        service
+            .update_api_key_override_in_group(
+                tenant_id,
+                id,
+                api_key.group_id.ok_or(AppError::Forbidden)?,
+                payload.override_,
+            )
+            .await?
+    };
     info!(
+        actor_user_id = %current_user.id,
         provider = P::NAME,
         provider_api_key_id = %snapshot.api_key.id,
         "管理端更新 provider 官方 API Key request override 成功，runtime 已同步"
     );
     Ok(Json(ProviderUpstreamApiKeyResponse::from_snapshot(
-        snapshot,
+        snapshot, true,
     )?))
 }
 
@@ -174,7 +236,7 @@ async fn update_provider_upstream_api_key_enabled<P: MaintenanceProvider>(
         "管理端更新 provider 官方 API Key enabled 成功，已同步 runtime"
     );
     Ok(Json(ProviderUpstreamApiKeyResponse::from_snapshot(
-        snapshot,
+        snapshot, true,
     )?))
 }
 
@@ -195,7 +257,7 @@ async fn update_provider_upstream_api_key_group<P: MaintenanceProvider>(
         "管理端调整 provider 官方 API Key 分组成功，runtime 已同步"
     );
     Ok(Json(ProviderUpstreamApiKeyResponse::from_snapshot(
-        snapshot,
+        snapshot, true,
     )?))
 }
 
@@ -276,7 +338,7 @@ fn normalize_api_key(value: String) -> AppResult<String> {
 }
 
 impl ProviderUpstreamApiKeyResponse {
-    fn from_snapshot(snapshot: ApiKeySnapshot) -> AppResult<Self> {
+    fn from_snapshot(snapshot: ApiKeySnapshot, can_view_override: bool) -> AppResult<Self> {
         let ApiKeySnapshot {
             api_key,
             group,
@@ -305,7 +367,7 @@ impl ProviderUpstreamApiKeyResponse {
             enabled: api_key.enabled,
             group,
             error: api_key.error.clone(),
-            override_: request_override,
+            override_: can_view_override.then_some(request_override),
             runtime,
         })
     }

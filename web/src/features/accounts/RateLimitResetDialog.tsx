@@ -14,6 +14,7 @@ interface RateLimitResetDialogProps {
   loading: boolean;
   error: string | null;
   applyingCreditId: string | null;
+  canConsume: boolean;
   onApply: (credit: RateLimitResetCredit) => void;
   onClose: () => void;
 }
@@ -54,6 +55,7 @@ export function RateLimitResetDialog(props: RateLimitResetDialogProps) {
                 credit={credit}
                 applying={props.applyingCreditId === credit.id}
                 disabled={busy}
+                canConsume={props.canConsume}
                 onApply={() => props.onApply(credit)}
               />
             ))}
@@ -78,6 +80,7 @@ function ResetCreditItem(props: {
   credit: RateLimitResetCredit;
   applying: boolean;
   disabled: boolean;
+  canConsume: boolean;
   onApply: () => void;
 }) {
   const available = props.credit.status === "available";
@@ -109,9 +112,15 @@ function ResetCreditItem(props: {
       <button
         type="button"
         className={`${buttonPrimary} shrink-0`}
-        disabled={props.disabled || !available}
+        disabled={props.disabled || !available || !props.canConsume}
         onClick={props.onApply}
-        title={available ? "应用此额度重置" : "该重置记录当前不可应用"}
+        title={
+          !props.canConsume
+            ? "未获得使用重置次数权限"
+            : available
+              ? "应用此额度重置"
+              : "该重置记录当前不可应用"
+        }
       >
         {props.applying ? (
           <Loader2 className={spinnerClass} size={16} />

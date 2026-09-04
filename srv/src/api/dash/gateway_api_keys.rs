@@ -2,6 +2,8 @@
 //!
 //! 该资源用于调用者访问本服务，与转发模型请求所使用的上游官方 API Key 分开管理。
 
+use std::collections::HashSet;
+
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -20,6 +22,7 @@ use crate::{
     plugin::{self, model::PluginReleaseSummary},
     provider::group::{self, ProviderGroup, ProviderGroupWithModels},
     state::AppState,
+    user::{User, group_access},
 };
 
 const MAX_API_KEY_NAME_BYTES: usize = 128;
@@ -60,6 +63,7 @@ struct ApiKeyResponse {
     name: String,
     api_key: String,
     enabled: bool,
+    group_authorized: bool,
     group: ProviderGroup,
     group_allowed_models: Vec<String>,
     allowed_models: Vec<String>,
@@ -93,8 +97,7 @@ async fn create_api_key(
 
     let api_key = gateway_key::create(
         &mut conn,
-        current_user.tenant_id.ok_or(AppError::Forbidden)?,
-        current_user.id,
+        &current_user,
         payload.group_id,
         name,
         payload.allowed_models,
@@ -112,7 +115,7 @@ async fn create_api_key(
     info!(api_key_id = %api_key.api_key.id, "管理端创建 API Key 成功");
 
     Ok(no_store_json(ApiKeyResponse::from_parts(
-        api_key, group, plugin,
+        api_key, group, plugin, true,
     )))
 }
 
@@ -144,6 +147,9 @@ async fn list_api_keys(
         .collect::<Vec<_>>();
     let plugins =
         plugin::sql::find_summaries_by_ids(&mut conn, tenant_id, &plugin_release_ids).await?;
+    let authorized_group_ids = group_access::granted_group_ids(&mut conn, &current_user)
+        .await?
+        .map(|ids| ids.into_iter().collect::<HashSet<_>>());
     let items = api_keys
         .into_iter()
         .map(|api_key| {
@@ -174,6 +180,9 @@ async fn list_api_keys(
                     })
                 })
                 .transpose()?;
+            let group_authorized = authorized_group_ids
+                .as_ref()
+                .is_none_or(|ids| ids.contains(&api_key.api_key.group_id));
             Ok(ApiKeyResponse::from_parts(
                 api_key,
                 ProviderGroupWithModels {
@@ -181,6 +190,7 @@ async fn list_api_keys(
                     allowed_models: group_allowed_models,
                 },
                 plugin,
+                group_authorized,
             ))
         })
         .collect::<AppResult<Vec<_>>>()?;
@@ -211,6 +221,7 @@ async fn update_api_key_enabled(
     Json(payload): Json<UpdateApiKeyEnabledRequest>,
 ) -> AppResult<impl IntoResponse> {
     let mut conn = state.db_conn().await?;
+    require_api_key_group_grant(&mut conn, &current_user, id).await?;
 
     let api_key =
         gateway_key::update_enabled_for_user(&mut conn, current_user.id, id, payload.enabled)
@@ -224,7 +235,7 @@ async fn update_api_key_enabled(
     .await?;
     info!(api_key_id = %api_key.api_key.id, user_id = %current_user.id, enabled = api_key.api_key.enabled, "管理端已修改 API Key 启用状态");
     Ok(no_store_json(ApiKeyResponse::from_parts(
-        api_key, group, plugin,
+        api_key, group, plugin, true,
     )))
 }
 
@@ -235,6 +246,7 @@ async fn update_api_key_models(
     Json(payload): Json<UpdateApiKeyModelsRequest>,
 ) -> AppResult<impl IntoResponse> {
     let mut conn = state.db_conn().await?;
+    require_api_key_group_grant(&mut conn, &current_user, id).await?;
     let api_key =
         gateway_key::update_models_for_user(&mut conn, current_user.id, id, payload.allowed_models)
             .await?;
@@ -247,7 +259,7 @@ async fn update_api_key_models(
     .await?;
     info!(api_key_id = %api_key.api_key.id, user_id = %current_user.id, model_count = api_key.allowed_models.len(), "管理端已修改 API Key 模型白名单");
     Ok(no_store_json(ApiKeyResponse::from_parts(
-        api_key, group, plugin,
+        api_key, group, plugin, true,
     )))
 }
 
@@ -258,6 +270,7 @@ async fn update_api_key_plugin(
     Json(payload): Json<UpdateApiKeyPluginRequest>,
 ) -> AppResult<impl IntoResponse> {
     let mut conn = state.db_conn().await?;
+    require_api_key_group_grant(&mut conn, &current_user, id).await?;
     let api_key = gateway_key::update_plugin_for_user(
         &mut conn,
         current_user.id,
@@ -281,7 +294,7 @@ async fn update_api_key_plugin(
     );
 
     Ok(no_store_json(ApiKeyResponse::from_parts(
-        api_key, group, plugin,
+        api_key, group, plugin, true,
     )))
 }
 
@@ -311,6 +324,7 @@ impl ApiKeyResponse {
         api_key: GatewayApiKeyWithModels,
         group: ProviderGroupWithModels,
         plugin: Option<PluginReleaseSummary>,
+        group_authorized: bool,
     ) -> Self {
         let GatewayApiKeyWithModels {
             api_key,
@@ -325,6 +339,7 @@ impl ApiKeyResponse {
             name: api_key.name,
             api_key: api_key.api_key,
             enabled: api_key.enabled,
+            group_authorized,
             group,
             group_allowed_models,
             allowed_models,
@@ -334,6 +349,19 @@ impl ApiKeyResponse {
             disabled_at: api_key.disabled_at,
         }
     }
+}
+
+async fn require_api_key_group_grant(
+    conn: &mut diesel_async::AsyncPgConnection,
+    user: &User,
+    api_key_id: Uuid,
+) -> AppResult<()> {
+    let api_key = gateway_key::find_for_user(conn, user.id, api_key_id)
+        .await?
+        .ok_or_else(|| AppError::BadRequest {
+            message: format!("API Key 不存在: {api_key_id}"),
+        })?;
+    group_access::require_group_grant(conn, user, api_key.group_id).await
 }
 
 async fn load_plugin_summary(
