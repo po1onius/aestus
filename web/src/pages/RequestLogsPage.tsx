@@ -15,12 +15,17 @@ import {
   panelClass,
   spinnerClass,
   tableClass,
+  compactInputClass,
 } from "../lib/ui";
-import type { RequestLogCursor, RequestLogRecord } from "../types";
+import type { RequestLogCursor, RequestLogRecord, TenantSummary } from "../types";
 
 interface RequestLogsPageProps {
   logs: RequestLogRecord[];
+  showTenant: boolean;
   showUsername: boolean;
+  tenants: TenantSummary[];
+  tenantsLoading: boolean;
+  selectedTenantId: string;
   loading: boolean;
   date: string;
   minDate: string;
@@ -30,6 +35,7 @@ interface RequestLogsPageProps {
   nextCursor: RequestLogCursor | null;
   cursorStack: Array<RequestLogCursor | null>;
   onDateChange: (date: string) => void;
+  onTenantChange: (tenantId: string) => void;
   onNonSuccessOnlyChange: (nonSuccessOnly: boolean) => void;
   onPreviousPage: () => void;
   onNextPage: () => void;
@@ -37,7 +43,11 @@ interface RequestLogsPageProps {
 
 export function RequestLogsPage({
   logs,
+  showTenant,
   showUsername,
+  tenants,
+  tenantsLoading,
+  selectedTenantId,
   loading,
   date,
   minDate,
@@ -47,6 +57,7 @@ export function RequestLogsPage({
   nextCursor,
   cursorStack,
   onDateChange,
+  onTenantChange,
   onNonSuccessOnlyChange,
   onPreviousPage,
   onNextPage,
@@ -69,6 +80,25 @@ export function RequestLogsPage({
             <h2 className="text-base font-semibold tracking-tight text-slate-950 dark:text-slate-100">请求日志</h2>
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2">
+            {showTenant && (
+              <label>
+                <span className="sr-only">按租户查询请求日志</span>
+                <select
+                  className={`${compactInputClass} min-w-44`}
+                  value={selectedTenantId}
+                  disabled={loading || tenantsLoading}
+                  aria-label="按租户查询请求日志"
+                  onChange={(event) => onTenantChange(event.target.value)}
+                >
+                  <option value="">全部租户</option>
+                  {tenants.map((tenant) => (
+                    <option key={tenant.id} value={tenant.id}>
+                      {tenant.id}{tenant.enabled ? "" : "（已停用）"}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
             <div className="flex items-center">
               <DatePickerInput
                 value={date}
@@ -123,18 +153,34 @@ export function RequestLogsPage({
           </div>
         ) : (
           <div className="min-h-0 w-full flex-1 overflow-auto overscroll-contain">
-            <table className={`${tableClass} min-w-[76rem] [&_th]:sticky [&_th]:top-0 [&_th]:z-10`}>
+            <table className={`${tableClass} ${showTenant ? "min-w-[88rem]" : "min-w-[76rem]"} [&_th]:sticky [&_th]:top-0 [&_th]:z-10`}>
               <colgroup>
-                <col className="w-[20%]" />
-                <col className="w-[18%]" />
-                <col className="w-[13%]" />
-                <col className="w-[10%]" />
-                <col className="w-[10%]" />
-                <col className="w-[18%]" />
-                <col className="w-[11%]" />
+                {showTenant ? (
+                  <>
+                    <col className="w-[14%]" />
+                    <col className="w-[16%]" />
+                    <col className="w-[16%]" />
+                    <col className="w-[12%]" />
+                    <col className="w-[9%]" />
+                    <col className="w-[9%]" />
+                    <col className="w-[17%]" />
+                    <col className="w-[7%]" />
+                  </>
+                ) : (
+                  <>
+                    <col className="w-[20%]" />
+                    <col className="w-[18%]" />
+                    <col className="w-[13%]" />
+                    <col className="w-[10%]" />
+                    <col className="w-[10%]" />
+                    <col className="w-[18%]" />
+                    <col className="w-[11%]" />
+                  </>
+                )}
               </colgroup>
               <thead>
                 <tr>
+                  {showTenant && <th>租户 ID</th>}
                   <th>请求</th>
                   <th>模型</th>
                   <th>请求参数</th>
@@ -156,6 +202,13 @@ export function RequestLogsPage({
                     onClick={() => setSelectedLog(log)}
                     onKeyDown={(event) => handleLogKeyDown(event, log)}
                   >
+                    {showTenant && (
+                      <td>
+                        <div className={cellMainClass} title={log.tenant_id || undefined}>
+                          {log.tenant_id || "未归属"}
+                        </div>
+                      </td>
+                    )}
                     <td>
                       <strong className={`${entryTitleClass} block`} title={log.route}>
                         {log.route}

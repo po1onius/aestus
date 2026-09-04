@@ -20,6 +20,8 @@ use crate::{
     api::dash::auth,
     err::{AppError, AppResult},
     state::AppState,
+    tenant,
+    user::User,
 };
 
 use super::calendar::{current_service_date, local_day_range_utc};
@@ -32,6 +34,8 @@ struct ListRequestLogsQuery {
     limit: Option<usize>,
     /// 服务固定时区下的自然日；省略时查询当天。
     date: Option<NaiveDate>,
+    /// 仅平台管理员可以指定；省略时平台管理员查询全平台日志。
+    tenant_id: Option<String>,
     before_started_at: Option<DateTime<Utc>>,
     before_request_id: Option<Uuid>,
     non_success_only: Option<bool>,
@@ -56,6 +60,7 @@ struct RequestLogQueryRow {
     provider: String,
     route: String,
     api_key_name: Option<String>,
+    tenant_id: Option<String>,
     #[serde(with = "clickhouse::serde::uuid::option")]
     user_id: Option<Uuid>,
     username: Option<String>,
@@ -88,6 +93,7 @@ struct RequestLogRecord {
     provider: String,
     route: String,
     api_key_name: Option<String>,
+    tenant_id: Option<String>,
     user_id: Option<Uuid>,
     username: Option<String>,
     provider_group_id: Option<Uuid>,
@@ -122,6 +128,7 @@ impl From<RequestLogQueryRow> for RequestLogRecord {
             provider: row.provider,
             route: row.route,
             api_key_name: row.api_key_name,
+            tenant_id: row.tenant_id,
             user_id: row.user_id,
             username: row.username,
             provider_group_id: row.provider_group_id,
@@ -184,26 +191,35 @@ async fn list_request_logs(
     auth::CurrentUser(current_user): auth::CurrentUser,
     Query(query): Query<ListRequestLogsQuery>,
 ) -> AppResult<Json<ListRequestLogsResponse>> {
-    let limit = normalize_limit(query.limit)?;
+    let ListRequestLogsQuery {
+        limit,
+        date,
+        tenant_id: requested_tenant_id,
+        before_started_at,
+        before_request_id,
+        non_success_only,
+    } = query;
+    let limit = normalize_limit(limit)?;
     let timezone = state.config().service_timezone;
     let retention_days = state.config().request_log_retention_days;
-    let date_range = normalize_log_date(query.date, timezone, retention_days)?;
+    let date_range = normalize_log_date(date, timezone, retention_days)?;
     let (before_started_at, before_request_id) = normalize_cursor(
-        query.before_started_at,
-        query.before_request_id,
+        before_started_at,
+        before_request_id,
         date_range.start_at,
         date_range.end_at,
     )?;
+    let tenant_id = resolve_tenant_scope(&state, &current_user, requested_tenant_id).await?;
     let log_query = RequestLogQuery {
         limit,
-        tenant_id: current_user.tenant_id.clone(),
+        tenant_id,
         user_id: (!current_user.is_platform_admin() && !current_user.is_tenant_owner())
             .then_some(current_user.id),
         start_at: date_range.start_at,
         end_at: date_range.end_at,
         before_started_at,
         before_request_id,
-        non_success_only: query.non_success_only.unwrap_or(false),
+        non_success_only: non_success_only.unwrap_or(false),
     };
     let page = query_request_log_page(&state, log_query).await?;
 
@@ -213,6 +229,44 @@ async fn list_request_logs(
         items: page.items,
         next_cursor: page.next_cursor,
     }))
+}
+
+async fn resolve_tenant_scope(
+    state: &AppState,
+    current_user: &User,
+    requested_tenant_id: Option<String>,
+) -> AppResult<Option<String>> {
+    if !current_user.is_platform_admin() {
+        if let Some(requested_tenant_id) = requested_tenant_id {
+            warn!(
+                user_id = %current_user.id,
+                role = %current_user.role,
+                own_tenant_id = ?current_user.tenant_id,
+                requested_tenant_id,
+                "非平台管理员尝试指定请求日志租户筛选"
+            );
+            return Err(AppError::Forbidden);
+        }
+        return Ok(current_user.tenant_id.clone());
+    }
+
+    let Some(requested_tenant_id) = requested_tenant_id else {
+        return Ok(None);
+    };
+    let tenant_id = tenant::normalize_name(requested_tenant_id)?;
+    let mut conn = state.db_conn().await?;
+    if tenant::find_by_id(&mut conn, &tenant_id).await?.is_none() {
+        warn!(
+            platform_admin_id = %current_user.id,
+            tenant_id,
+            "平台管理员查询请求日志时指定了不存在的租户"
+        );
+        return Err(AppError::BadRequest {
+            message: format!("租户不存在: {tenant_id}"),
+        });
+    }
+
+    Ok(Some(tenant_id))
 }
 
 fn normalize_limit(limit: Option<usize>) -> AppResult<usize> {

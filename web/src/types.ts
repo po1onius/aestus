@@ -423,6 +423,7 @@ export interface RequestLogRecord {
   provider: string;
   route: string;
   api_key_name: string | null;
+  tenant_id: string | null;
   user_id: string | null;
   username: string | null;
   provider_group_id: string | null;

@@ -28,6 +28,7 @@ import {
   providerGroupsPath,
   requestLogPageSize,
   requestLogsPath,
+  tenantsPath,
   usagePath,
   usersPath,
   themeStorageKey,
@@ -110,6 +111,7 @@ import type {
   RequestLogRecord,
   RequestOverride,
   RequestOverrideTarget,
+  TenantSummary,
   UpstreamApiKeyProvider,
   UsageResponse,
   UnassignedProviderResource,
@@ -190,6 +192,8 @@ export function App() {
   const [requestLogs, setRequestLogs] = useState<RequestLogRecord[]>([]);
   const [requestLogDate, setRequestLogDate] = useState(() => todayInputValue("UTC"));
   const [requestLogNonSuccessOnly, setRequestLogNonSuccessOnly] = useState(false);
+  const [requestLogTenantId, setRequestLogTenantId] = useState("");
+  const [requestLogTenantOptions, setRequestLogTenantOptions] = useState<TenantSummary[]>([]);
   const [requestLogNextCursor, setRequestLogNextCursor] = useState<RequestLogCursor | null>(null);
   const [requestLogCursorStack, setRequestLogCursorStack] = useState<Array<RequestLogCursor | null>>([]);
   const [requestLogCurrentCursor, setRequestLogCurrentCursor] = useState<RequestLogCursor | null>(null);
@@ -203,6 +207,7 @@ export function App() {
   const [unassignedProviderResourcesLoading, setUnassignedProviderResourcesLoading] =
     useState(false);
   const [requestLogsLoading, setRequestLogsLoading] = useState(false);
+  const [requestLogTenantsLoading, setRequestLogTenantsLoading] = useState(false);
   const [usageLoading, setUsageLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [apiKeySaving, setApiKeySaving] = useState(false);
@@ -372,7 +377,12 @@ export function App() {
       return;
     }
 
-    const queryKey = requestLogAutoLoadKey(currentUser.id, requestLogDate, requestLogNonSuccessOnly);
+    const queryKey = requestLogAutoLoadKey(
+      currentUser.id,
+      requestLogDate,
+      requestLogNonSuccessOnly,
+      requestLogTenantId,
+    );
     if (requestLogAutoLoadedKey === queryKey) {
       return;
     }
@@ -381,11 +391,18 @@ export function App() {
     // 避免请求结束后的状态更新形成隐式重试循环。
     setRequestLogAutoLoadedKey(queryKey);
     void loadRequestLogs(null, []);
-  }, [activePage, authToken, currentUser, requestLogDate, requestLogNonSuccessOnly, requestLogAutoLoadedKey]);
+  }, [activePage, authToken, currentUser, requestLogDate, requestLogNonSuccessOnly, requestLogTenantId, requestLogAutoLoadedKey]);
 
   useEffect(() => {
     resetRequestLogPaging();
-  }, [requestLogDate, requestLogNonSuccessOnly]);
+  }, [requestLogDate, requestLogNonSuccessOnly, requestLogTenantId]);
+
+  useEffect(() => {
+    if (activePage !== "requestLogs" || currentUser?.role !== "platform_admin" || !authToken) {
+      return;
+    }
+    void loadRequestLogTenantOptions();
+  }, [activePage, authToken, currentUser]);
 
   async function loadCurrentUser() {
     if (!authToken) {
@@ -585,6 +602,8 @@ export function App() {
     setRequestOverrideHeaderRows([]);
     setRequestOverrideBodyRows([]);
     setRequestLogs([]);
+    setRequestLogTenantId("");
+    setRequestLogTenantOptions([]);
     setRequestLogAutoLoadedKey(null);
     setRequestLogNextCursor(null);
     setRequestLogCursorStack([]);
@@ -642,6 +661,7 @@ export function App() {
     setProviderGroupsLoading(false);
     setUnassignedProviderResourcesLoading(false);
     setRequestLogsLoading(false);
+    setRequestLogTenantsLoading(false);
     setUsageLoading(false);
     setSaving(false);
     setApiKeySaving(false);
@@ -928,6 +948,31 @@ export function App() {
     }
   }
 
+  async function loadRequestLogTenantOptions() {
+    const token = authToken;
+    if (!token || currentUser?.role !== "platform_admin") {
+      setRequestLogTenantOptions([]);
+      setRequestLogTenantsLoading(false);
+      return;
+    }
+
+    setRequestLogTenantsLoading(true);
+    try {
+      const tenants = await requestJson<TenantSummary[]>(tenantsPath, undefined, token);
+      if (isActiveAuthToken(token)) {
+        setRequestLogTenantOptions(tenants);
+      }
+    } catch (error) {
+      if (isActiveAuthToken(token)) {
+        showErrorToast("请求日志租户列表加载失败", error);
+      }
+    } finally {
+      if (isActiveAuthToken(token)) {
+        setRequestLogTenantsLoading(false);
+      }
+    }
+  }
+
   function resetRequestLogPaging() {
     setRequestLogs([]);
     setRequestLogNextCursor(null);
@@ -961,6 +1006,9 @@ export function App() {
 
     if (requestLogNonSuccessOnly) {
       params.set("non_success_only", "true");
+    }
+    if (currentUser?.role === "platform_admin" && requestLogTenantId) {
+      params.set("tenant_id", requestLogTenantId);
     }
     if (cursor) {
       params.set("before_started_at", cursor.before_started_at);
@@ -1001,7 +1049,12 @@ export function App() {
     }
 
     if (activePage === "requestLogs") {
-      await loadRequestLogs(null, []);
+      await Promise.all([
+        loadRequestLogs(null, []),
+        currentUser?.role === "platform_admin"
+          ? loadRequestLogTenantOptions()
+          : Promise.resolve(),
+      ]);
       return;
     }
 
@@ -3079,7 +3132,11 @@ export function App() {
       ) : (
         <RequestLogsPage
           logs={requestLogs}
+          showTenant={currentUser.role === "platform_admin"}
           showUsername={currentUser.role !== "tenant_user"}
+          tenants={requestLogTenantOptions}
+          tenantsLoading={requestLogTenantsLoading}
+          selectedTenantId={requestLogTenantId}
           loading={requestLogsLoading}
           date={requestLogDate}
           minDate={shiftDateInputValue(
@@ -3092,6 +3149,7 @@ export function App() {
           nextCursor={requestLogNextCursor}
           cursorStack={requestLogCursorStack}
           onDateChange={setRequestLogDate}
+          onTenantChange={setRequestLogTenantId}
           onNonSuccessOnlyChange={setRequestLogNonSuccessOnly}
           onPreviousPage={loadPreviousRequestLogPage}
           onNextPage={loadNextRequestLogPage}
