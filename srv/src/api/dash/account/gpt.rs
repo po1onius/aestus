@@ -246,11 +246,8 @@ async fn create_gpt_account(
         .sync_account(account)
         .await?;
 
-    let specific = snapshot.account.parse_specific::<GptAccountSpecific>()?;
-
     info!(
         gpt_account_id = %snapshot.account.id,
-        chatgpt_account_id = specific.chatgpt_account_id.as_deref().unwrap_or("<missing>"),
         client_id = %snapshot.account.client_id,
         "管理端通过 refresh_token 创建 GPT 账号成功"
     );
@@ -686,15 +683,6 @@ async fn delete_gpt_account(
 ) -> AdminResult<Json<DeleteGptAccountResponse>> {
     let service = ProviderResourceService::<GptMaintenance>::new(&state);
     let tenant_id = owner.tenant_id.ok_or(AppError::Forbidden)?;
-    let account_exists = service.find_account(tenant_id, id).await?.is_some();
-
-    if !account_exists {
-        warn!(gpt_account_id = %id, "管理端删除 GPT 账号失败，账号不存在");
-        return Err(AppError::BadRequest {
-            message: format!("GPT 账号不存在: {id}"),
-        });
-    }
-
     let deleted = service.delete_account(tenant_id, id).await?;
 
     info!(

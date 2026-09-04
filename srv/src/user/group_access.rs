@@ -214,7 +214,6 @@ pub async fn replace_for_managed_user(
 ) -> AppResult<Vec<UserGroupGrant>> {
     let normalized = normalize_inputs(inputs)?;
     let requested_group_ids = normalized.keys().copied().collect::<Vec<_>>();
-    let before = list_for_managed_user(conn, tenant_id, user_id).await?;
 
     conn.transaction::<(), AppError, _>(async |conn| {
         let target = users::table
@@ -319,7 +318,6 @@ pub async fn replace_for_managed_user(
         actor_user_id = %actor_id,
         target_user_id = %user_id,
         tenant_id = %tenant_id,
-        previous_grants = ?before,
         current_grants = ?after,
         "租户 owner 已原子替换普通用户的 Provider 分组授权"
     );

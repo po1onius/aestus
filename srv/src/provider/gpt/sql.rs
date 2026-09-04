@@ -57,10 +57,8 @@ pub mod account {
         )
         .await?;
 
-        let specific = account.parse_specific::<GptAccountSpecific>()?;
         info!(
             gpt_account_id = %account.id,
-            chatgpt_account_id = specific.chatgpt_account_id.as_deref().unwrap_or("<missing>"),
             "GPT 账号已新增；chatgpt_account_id 允许重复"
         );
         Ok(account)

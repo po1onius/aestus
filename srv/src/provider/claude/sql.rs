@@ -47,11 +47,8 @@ pub mod account {
             claude_account_create_db_error,
         )
         .await?;
-        let specific = account.parse_specific::<ClaudeAccountSpecific>()?;
         info!(
             claude_account_id = %account.id,
-            account_uuid = specific.account_uuid.as_deref().unwrap_or("<missing>"),
-            organization_uuid = specific.organization_uuid.as_deref().unwrap_or("<missing>"),
             "Claude OAuth 账号已写入通用 provider_accounts"
         );
         Ok(account)
