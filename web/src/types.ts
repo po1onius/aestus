@@ -69,7 +69,7 @@ export interface DeleteProviderGroupResponse {
   name: string;
   released_account_count: number;
   released_upstream_api_key_count: number;
-  deleted_gateway_api_key_count: number;
+  affected_gateway_api_key_count: number;
 }
 
 /** 创建分组时可选择的未分组上游资源；不包含任何长期凭证。 */
@@ -372,7 +372,8 @@ export interface ApiKey {
   api_key: string;
   enabled: boolean;
   group_authorized: boolean;
-  group: ProviderGroupReference;
+  group_id: string;
+  group: ProviderGroupReference | null;
   group_allowed_models: string[];
   allowed_models: string[];
   plugin_suite_id: string | null;

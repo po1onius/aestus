@@ -60,7 +60,7 @@ struct DeleteGroupResponse {
     name: String,
     released_account_count: usize,
     released_upstream_api_key_count: usize,
-    deleted_gateway_api_key_count: usize,
+    affected_gateway_api_key_count: i64,
 }
 
 pub fn router() -> Router<AppState> {
@@ -228,7 +228,7 @@ async fn delete_group(
         name: deleted.group.name.clone(),
         released_account_count: deleted.accounts.len(),
         released_upstream_api_key_count: deleted.upstream_api_keys.len(),
-        deleted_gateway_api_key_count: deleted.deleted_gateway_api_key_count,
+        affected_gateway_api_key_count: deleted.affected_gateway_api_key_count,
     };
     match deleted.group.provider.as_str() {
         gpt_model::PROVIDER => {

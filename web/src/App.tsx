@@ -1465,7 +1465,7 @@ export function App() {
   function requestDeleteProviderGroup(group: ProviderGroupSummary) {
     setConfirmationRequest({
       title: `删除 ${providerLabel(group.provider)} 分组`,
-      description: `将删除分组“${group.name}”。受影响资源：${group.counts.account_count} 个 OAuth 账号和 ${group.counts.upstream_api_key_count} 个上游官方 Key 将解除分组、退出调度但保留凭证；${group.counts.gateway_api_key_count} 个调用方网关 Key 将永久删除。历史请求日志不受影响。`,
+      description: `将删除分组“${group.name}”。受影响资源：${group.counts.account_count} 个 OAuth 账号和 ${group.counts.upstream_api_key_count} 个上游官方 Key 将解除分组、退出调度但保留凭证；${group.counts.gateway_api_key_count} 个调用方网关 Key 将保留原分组绑定并失效，后续请求返回 401。历史请求日志不受影响。`,
       confirmLabel: "删除分组",
       pendingLabel: "正在删除",
       onConfirm: () => deleteProviderGroup(group),
@@ -1480,12 +1480,14 @@ export function App() {
 
     setProviderGroupSavingId(group.id);
     try {
-      await requestJson<DeleteProviderGroupResponse>(`${providerGroupsPath}/${group.id}`, {
+      const deleted = await requestJson<DeleteProviderGroupResponse>(`${providerGroupsPath}/${group.id}`, {
         method: "DELETE",
       }, token);
       if (!isActiveAuthToken(token)) return;
       await Promise.all([loadProviderGroups(), loadAccounts(), loadApiKeys(apiKeysPage.offset)]);
-      toast.success("Provider 分组已删除");
+      toast.success("Provider 分组已删除", {
+        description: `${deleted.affected_gateway_api_key_count} 个网关 Key 已保留，分组绑定失效。`,
+      });
     } catch (error) {
       if (isActiveAuthToken(token)) {
         showErrorToast("Provider 分组删除失败", error);
@@ -1803,6 +1805,10 @@ export function App() {
     if (!token || !target) {
       return;
     }
+    if (!target.group) {
+      toast.error("分组已删除，Key 无效，不能编辑");
+      return;
+    }
 
     const selectedPlugin = pluginOptions.find(
       (plugin) => plugin.id === apiKeyPluginSuiteId,
@@ -2039,7 +2045,7 @@ export function App() {
   function requestDeleteApiKey(apiKey: ApiKey) {
     setConfirmationRequest({
       title: "删除网关 API Key",
-      description: `将永久删除网关 API Key“${apiKey.name}”，后续请求将立即无法再使用该凭证。所属 Provider 分组“${apiKey.group.name}”、上游资源和历史请求日志不受影响。`,
+      description: `将永久删除网关 API Key“${apiKey.name}”，后续请求将立即无法再使用该凭证。Provider 分组、上游资源和历史请求日志不受影响。`,
       confirmLabel: "删除 API Key",
       pendingLabel: "正在删除",
       onConfirm: () => deleteApiKey(apiKey),

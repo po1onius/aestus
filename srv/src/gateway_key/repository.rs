@@ -240,19 +240,27 @@ pub async fn update_enabled_for_user(
     use self::api_keys::dsl;
 
     let now = chrono::Utc::now();
-    let api_key = diesel::update(
-        dsl::api_keys
-            .filter(dsl::id.eq(id))
-            .filter(dsl::user_id.eq(user_id)),
-    )
-    .set((
-        dsl::enabled.eq(enabled),
-        dsl::disabled_at.eq((!enabled).then_some(now)),
-        dsl::updated_at.eq(now),
-    ))
-    .returning(GatewayApiKey::as_returning())
-    .get_result::<GatewayApiKey>(conn)
-    .await;
+    let api_key = conn
+        .transaction::<GatewayApiKey, AppError, _>(async |conn| {
+            lock_group_for_key_edit(conn, user_id, id).await?;
+            diesel::update(
+                dsl::api_keys
+                    .filter(dsl::id.eq(id))
+                    .filter(dsl::user_id.eq(user_id)),
+            )
+            .set((
+                dsl::enabled.eq(enabled),
+                dsl::disabled_at.eq((!enabled).then_some(now)),
+                dsl::updated_at.eq(now),
+            ))
+            .returning(GatewayApiKey::as_returning())
+            .get_result::<GatewayApiKey>(conn)
+            .await
+            .map_err(|source| AppError::DbQuery {
+                message: source.to_string(),
+            })
+        })
+        .await;
 
     match api_key {
         Ok(api_key) => {
@@ -263,12 +271,7 @@ pub async fn update_enabled_for_user(
                 allowed_models,
             })
         }
-        Err(diesel::result::Error::NotFound) => Err(AppError::BadRequest {
-            message: format!("API Key 不存在: {id}"),
-        }),
-        Err(source) => Err(AppError::DbQuery {
-            message: source.to_string(),
-        }),
+        Err(source) => Err(source),
     }
 }
 
@@ -288,8 +291,8 @@ pub async fn update_models_for_user(
     let allowed_models = group::normalize_models(allowed_models)?;
     let api_key = conn
         .transaction::<GatewayApiKey, AppError, _>(async |conn| {
-            // 先读取不可变的分组归属，再统一按“分组 -> API Key”顺序加锁。分组删除会
-            // 级联删除调用方 Key；固定锁序避免它与白名单更新形成死锁。
+            // 先读取不可变的分组归属，再统一按“分组 -> API Key”顺序加锁。
+            // 与分组删除串行化，确保缺失分组的 Key 不能继续编辑白名单。
             let (tenant_id, group_id) = dsl::api_keys
                 .filter(dsl::id.eq(id))
                 .filter(dsl::user_id.eq(user_id))
@@ -416,7 +419,7 @@ fn ensure_models_within_group(
 /// 修改指定用户自己的 API Key 插件绑定。
 ///
 /// API Key 的 Provider 由其分组决定，因此非空绑定必须在同一事务内验证套件仍处于
-/// 启用状态且 Provider 一致。传入 `None` 始终表示解除绑定，不依赖原插件当前是否启用。
+/// 启用状态且 Provider 一致。分组必须存在；传入 `None` 表示解除绑定，不依赖原插件状态。
 pub async fn update_plugin_for_user(
     conn: &mut AsyncPgConnection,
     user_id: Uuid,
@@ -441,15 +444,13 @@ pub async fn update_plugin_for_user(
                     message: format!("API Key 不存在: {id}"),
                 })?;
 
+            let provider_group = group::require_for_update_in_tenant(
+                conn,
+                current.tenant_id.clone(),
+                current.group_id,
+            )
+            .await?;
             if let Some(suite_id) = plugin_suite_id {
-                let provider_group = group::find_by_id(&mut *conn, current.group_id)
-                    .await?
-                    .ok_or_else(|| AppError::DbQuery {
-                        message: format!(
-                            "API Key 关联的 Provider 分组不存在: {}",
-                            current.group_id
-                        ),
-                    })?;
                 crate::plugin::sql::require_enabled_suite_for_provider_write(
                     &mut *conn,
                     current.tenant_id,
@@ -490,6 +491,21 @@ pub async fn update_plugin_for_user(
         api_key,
         allowed_models,
     })
+}
+
+/// 与分组删除采用相同锁序，保证 Key 编辑发生时所属分组仍存在。
+async fn lock_group_for_key_edit(
+    conn: &mut AsyncPgConnection,
+    user_id: Uuid,
+    id: Uuid,
+) -> AppResult<()> {
+    let current = find_for_user(conn, user_id, id)
+        .await?
+        .ok_or_else(|| AppError::BadRequest {
+            message: format!("API Key 不存在: {id}"),
+        })?;
+    group::require_for_update_in_tenant(conn, current.tenant_id, current.group_id).await?;
+    Ok(())
 }
 
 /// 批量加载 API Key 模型映射，列表分页只产生一次额外查询，不随 Key 数量产生 N+1。

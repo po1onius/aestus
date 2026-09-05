@@ -60,7 +60,7 @@ export function TenantCreateDialog(props: TenantCreateDialogProps) {
             autoFocus
             autoComplete="off"
             onChange={(event) => props.onNameChange(event.target.value)}
-            placeholder="例如 AcmeCorp"
+            placeholder="例如 AcmeCorp；创建 owner 时至少 5 个字符"
           />
         </label>
 
@@ -73,7 +73,7 @@ export function TenantCreateDialog(props: TenantCreateDialogProps) {
             disabled={props.saving}
             autoComplete="new-password"
             onChange={(event) => props.onPasswordChange(event.target.value)}
-            placeholder="留空则暂不创建 owner"
+            placeholder="至少 8 个字符；留空则暂不创建 owner"
           />
         </label>
 

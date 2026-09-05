@@ -44,7 +44,7 @@ export function UserCreateDialog(props: UserCreateDialogProps) {
             className={inputClass}
             value={props.username}
             onChange={(event) => props.onUsernameChange(event.target.value)}
-            placeholder="例如 alice"
+            placeholder="至少 5 个字符，例如 alice"
             autoComplete="off"
             maxLength={32}
             disabled={props.saving}

@@ -12,7 +12,7 @@ use axum::{
     routing::{delete, get, post, put},
 };
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -64,7 +64,8 @@ struct ApiKeyResponse {
     api_key: String,
     enabled: bool,
     group_authorized: bool,
-    group: ProviderGroup,
+    group_id: Uuid,
+    group: Option<ProviderGroup>,
     group_allowed_models: Vec<String>,
     allowed_models: Vec<String>,
     plugin_suite_id: Option<Uuid>,
@@ -128,68 +129,70 @@ async fn list_api_keys(
     let page = query.normalize()?;
     let mut conn = state.db_conn().await?;
 
-    let api_keys = gateway_key::list_by_user(
-        &mut conn,
-        current_user.id,
-        page.query_limit(),
-        page.offset(),
-    )
-    .await?;
-    let group_ids = api_keys
-        .iter()
-        .map(|item| item.api_key.group_id)
-        .collect::<Vec<_>>();
-    let tenant_id = current_user.tenant_id.clone().ok_or(AppError::Forbidden)?;
-    let groups = group::find_by_ids(&mut conn, tenant_id.clone(), &group_ids).await?;
-    let group_models = group::load_models_by_group_ids(&mut conn, &group_ids).await?;
-    let plugin_suite_ids = api_keys
-        .iter()
-        .filter_map(|item| item.api_key.plugin_suite_id)
-        .collect::<Vec<_>>();
-    let plugins =
-        plugin::sql::find_summaries_by_ids(&mut conn, tenant_id, &plugin_suite_ids).await?;
-    let authorized_group_ids = group_access::granted_group_ids(&mut conn, &current_user)
-        .await?
-        .map(|ids| ids.into_iter().collect::<HashSet<_>>());
-    let items = api_keys
-        .into_iter()
-        .map(|api_key| {
-            let group = groups
-                .get(&api_key.api_key.group_id)
-                .cloned()
-                .ok_or_else(|| AppError::DbQuery {
-                    message: format!(
-                        "API Key 关联的 Provider 分组不存在: {}",
-                        api_key.api_key.group_id
-                    ),
-                })?;
-            let group_allowed_models = group_models
-                .get(&api_key.api_key.group_id)
-                .cloned()
-                .ok_or_else(|| AppError::DbQuery {
-                    message: format!(
-                        "API Key 关联的 Provider 分组缺少模型白名单: {}",
-                        api_key.api_key.group_id
-                    ),
-                })?;
-            let plugin = api_key
-                .api_key
-                .plugin_suite_id
-                .and_then(|id| plugins.get(&id).cloned());
-            let group_authorized = authorized_group_ids
-                .as_ref()
-                .is_none_or(|ids| ids.contains(&api_key.api_key.group_id));
-            Ok(ApiKeyResponse::from_parts(
-                api_key,
-                ProviderGroupWithModels {
-                    group,
-                    allowed_models: group_allowed_models,
-                },
-                plugin,
-                group_authorized,
-            ))
+    // 列表和关联信息共用只读快照，避免并发删除分组造成模型映射读取不完整。
+    let items = conn
+        .build_transaction()
+        .repeatable_read()
+        .read_only()
+        .run::<_, AppError, _>(async |conn| {
+            let api_keys =
+                gateway_key::list_by_user(conn, current_user.id, page.query_limit(), page.offset())
+                    .await?;
+            let group_ids = api_keys
+                .iter()
+                .map(|item| item.api_key.group_id)
+                .collect::<Vec<_>>();
+            let tenant_id = current_user.tenant_id.clone().ok_or(AppError::Forbidden)?;
+            let groups = group::find_by_ids(conn, tenant_id.clone(), &group_ids).await?;
+            let group_models = group::load_models_by_group_ids(conn, &group_ids).await?;
+            let plugin_suite_ids = api_keys
+                .iter()
+                .filter_map(|item| item.api_key.plugin_suite_id)
+                .collect::<Vec<_>>();
+            let plugins =
+                plugin::sql::find_summaries_by_ids(conn, tenant_id, &plugin_suite_ids).await?;
+            let authorized_group_ids = group_access::granted_group_ids(conn, &current_user)
+                .await?
+                .map(|ids| ids.into_iter().collect::<HashSet<_>>());
+            let items = api_keys
+                .into_iter()
+                .map(|api_key| {
+                    let group = groups.get(&api_key.api_key.group_id).cloned();
+                    let group = group
+                        .map(|group| -> AppResult<ProviderGroupWithModels> {
+                            let allowed_models =
+                                group_models.get(&group.id).cloned().ok_or_else(|| {
+                                    AppError::DbQuery {
+                                        message: format!(
+                                            "API Key 关联的 Provider 分组缺少模型白名单: {}",
+                                            group.id
+                                        ),
+                                    }
+                                })?;
+                            Ok(ProviderGroupWithModels {
+                                group,
+                                allowed_models,
+                            })
+                        })
+                        .transpose()?;
+                    let plugin = api_key
+                        .api_key
+                        .plugin_suite_id
+                        .and_then(|id| plugins.get(&id).cloned());
+                    let group_authorized = authorized_group_ids
+                        .as_ref()
+                        .is_none_or(|ids| ids.contains(&api_key.api_key.group_id));
+                    Ok(ApiKeyResponse::from_parts(
+                        api_key,
+                        group,
+                        plugin,
+                        group_authorized,
+                    ))
+                })
+                .collect::<AppResult<Vec<_>>>()?;
+            Ok(items)
         })
-        .collect::<AppResult<Vec<_>>>()?;
+        .await?;
 
     Ok(no_store_json(page.finish(items)))
 }
@@ -318,7 +321,7 @@ fn normalize_name(name: String) -> AppResult<String> {
 impl ApiKeyResponse {
     fn from_parts(
         api_key: GatewayApiKeyWithModels,
-        group: ProviderGroupWithModels,
+        group: Option<ProviderGroupWithModels>,
         plugin: Option<PluginSuiteSummary>,
         group_authorized: bool,
     ) -> Self {
@@ -326,16 +329,18 @@ impl ApiKeyResponse {
             api_key,
             allowed_models,
         } = api_key;
-        let ProviderGroupWithModels {
-            group,
-            allowed_models: group_allowed_models,
-        } = group;
+        let group_authorized = group.is_some() && group_authorized;
+        let (group, group_allowed_models) = match group {
+            Some(group) => (Some(group.group), group.allowed_models),
+            None => (None, Vec::new()),
+        };
         Self {
             id: api_key.id,
             name: api_key.name,
             api_key: api_key.api_key,
             enabled: api_key.enabled,
             group_authorized,
+            group_id: api_key.group_id,
             group,
             group_allowed_models,
             allowed_models,
@@ -358,6 +363,13 @@ async fn require_api_key_group_grant(
         .ok_or_else(|| AppError::BadRequest {
             message: format!("API Key 不存在: {api_key_id}"),
         })?;
+    if group::find_by_id(conn, api_key.group_id).await?.is_none() {
+        warn!(api_key_id = %api_key_id, user_id = %user.id, provider_group_id = %api_key.group_id,
+            "API Key 所属分组已删除，拒绝编辑");
+        return Err(AppError::BadRequest {
+            message: "API Key 所属分组已删除，Key 无效，不能编辑".to_owned(),
+        });
+    }
     group_access::require_group_grant(conn, user, api_key.group_id).await
 }
 
@@ -379,11 +391,15 @@ async fn load_plugin_summary(
 async fn load_group(
     conn: &mut diesel_async::AsyncPgConnection,
     group_id: Uuid,
-) -> AppResult<ProviderGroupWithModels> {
-    let group = group::find_by_id(conn, group_id)
-        .await?
-        .ok_or_else(|| AppError::DbQuery {
-            message: format!("API Key 关联的 Provider 分组不存在: {group_id}"),
-        })?;
-    group::with_models(conn, group).await
+) -> AppResult<Option<ProviderGroupWithModels>> {
+    conn.build_transaction()
+        .repeatable_read()
+        .read_only()
+        .run::<_, AppError, _>(
+            async |conn| match group::find_by_id(conn, group_id).await? {
+                Some(group) => Ok(Some(group::with_models(conn, group).await?)),
+                None => Ok(None),
+            },
+        )
+        .await
 }

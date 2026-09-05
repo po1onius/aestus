@@ -105,18 +105,26 @@ export function ApiKeysPage({
               </thead>
               <tbody>
                 {apiKeys.map((apiKey) => (
-                  <tr key={apiKey.id} className={apiKey.enabled ? undefined : disabledRowClass}>
+                  <tr key={apiKey.id} className={apiKey.enabled && apiKey.group ? undefined : disabledRowClass}>
                     <td>
                       <strong className={entryTitleClass}>{apiKey.name}</strong>
                     </td>
                     <td>
-                      <div className={cellMainClass}>{apiKey.group.name}</div>
-                      <p className={cellNoteClass}>
-                        {apiKey.group.provider === "gpt" ? "GPT" : "Claude"}
-                      </p>
-                      {!apiKey.group_authorized && (
-                        <p className="text-xs font-medium text-red-600 dark:text-red-400">
-                          分组授权已撤销
+                      {apiKey.group ? (
+                        <>
+                          <div className={cellMainClass}>{apiKey.group.name}</div>
+                          <p className={cellNoteClass}>
+                            {apiKey.group.provider === "gpt" ? "GPT" : "Claude"}
+                          </p>
+                          {!apiKey.group_authorized && (
+                            <p className="text-xs font-medium text-red-600 dark:text-red-400">
+                              分组授权已撤销
+                            </p>
+                          )}
+                        </>
+                      ) : (
+                        <p className="text-xs font-medium text-red-600 dark:text-red-400" title={apiKey.group_id}>
+                          分组已删除，Key 无效
                         </p>
                       )}
                     </td>
@@ -195,19 +203,19 @@ export function ApiKeysPage({
                         actions={[
                           {
                             id: "edit-models", label: "模型", icon: ListChecks,
-                            disabled: !apiKey.group_authorized, opensDialog: true,
-                            description: apiKey.group_authorized ? "修改模型白名单" : "分组授权已撤销",
+                            disabled: !apiKey.group || !apiKey.group_authorized, opensDialog: true,
+                            description: !apiKey.group ? "分组已删除，Key 无效" : apiKey.group_authorized ? "修改模型白名单" : "分组授权已撤销",
                             onSelect: () => onEditModels(apiKey),
                           },
                           {
                             id: "edit-plugin", label: "修改套件", icon: Pencil,
-                            disabled: !apiKey.group_authorized, opensDialog: true,
-                            description: apiKey.group_authorized ? "修改套件绑定" : "分组授权已撤销",
+                            disabled: !apiKey.group || !apiKey.group_authorized, opensDialog: true,
+                            description: !apiKey.group ? "分组已删除，Key 无效" : apiKey.group_authorized ? "修改套件绑定" : "分组授权已撤销",
                             onSelect: () => onEditPlugin(apiKey),
                           },
                           {
                             id: "toggle-enabled", label: apiKey.enabled ? "禁用" : "启用",
-                            icon: apiKey.enabled ? Ban : Power, disabled: !apiKey.group_authorized,
+                            icon: apiKey.enabled ? Ban : Power, disabled: !apiKey.group || !apiKey.group_authorized,
                             onSelect: () => onToggleEnabled(apiKey),
                           },
                           {

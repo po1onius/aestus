@@ -25,7 +25,7 @@ interface ApiKeyPluginDialogProps {
 /** 只修改网关 Key 的套件绑定，不混入名称、分组或模型白名单编辑状态。 */
 export function ApiKeyPluginDialog(props: ApiKeyPluginDialogProps) {
   const compatiblePlugins = props.plugins.filter(
-    (plugin) => plugin.provider === props.apiKey.group.provider && plugin.enabled,
+    (plugin) => plugin.provider === props.apiKey.group?.provider && plugin.enabled,
   );
   const currentPlugin = props.apiKey.plugin;
   const currentPluginIsSelectable =
@@ -43,10 +43,10 @@ export function ApiKeyPluginDialog(props: ApiKeyPluginDialogProps) {
       <form className="grid gap-4" onSubmit={props.onSubmit}>
         <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm dark:border-slate-700 dark:bg-slate-950/60">
           <div className="font-medium text-slate-800 dark:text-slate-200">
-            {props.apiKey.group.name}
+            {props.apiKey.group?.name ?? "分组已删除，Key 无效"}
           </div>
           <div className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-            Provider：{props.apiKey.group.provider.toUpperCase()}
+            Provider：{props.apiKey.group?.provider.toUpperCase()}
           </div>
         </div>
 
@@ -80,7 +80,7 @@ export function ApiKeyPluginDialog(props: ApiKeyPluginDialogProps) {
 
         <button
           className={`${buttonPrimary} mt-1 w-full`}
-          disabled={props.saving || props.pluginSuiteId === originalSuiteId}
+          disabled={props.saving || !props.apiKey.group || props.pluginSuiteId === originalSuiteId}
         >
           {props.saving ? <Loader2 className={spinnerClass} size={18} /> : <Save size={18} />}
           保存插件绑定

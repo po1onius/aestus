@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::{
     err::{AppError, AppResult},
-    gateway_key::schema::{api_key_models, api_keys},
+    gateway_key::schema::api_keys,
     provider::{
         credential::{
             ProviderAccount, ProviderApiKey,
@@ -140,14 +140,14 @@ pub struct CreatedProviderGroup {
 
 /// 删除分组事务提交后的完整影响快照。
 ///
-/// 上游账号和官方 API Key 只解除分组归属，凭证记录继续保留；调用方网关 Key 无法脱离
-/// 分组独立存在，因此与其模型映射一起永久删除。HTTP 层使用资源快照把 PostgreSQL 的
-/// 最新事实同步到 Redis runtime，并向管理员返回精确的删除统计。
+/// 上游账号和官方 API Key 只解除分组归属，凭证记录继续保留；调用方网关 Key 和模型
+/// 映射保留，原 group_id 成为失效引用，入口鉴权拒绝后续请求。HTTP 层同步上游资源
+/// 快照到 Redis runtime，并向管理员返回受影响 Key 数量。
 pub struct DeletedProviderGroup {
     pub group: ProviderGroup,
     pub accounts: Vec<ProviderAccount>,
     pub upstream_api_keys: Vec<ProviderApiKey>,
-    pub deleted_gateway_api_key_count: usize,
+    pub affected_gateway_api_key_count: i64,
 }
 
 pub fn normalize_name(name: String) -> AppResult<String> {
@@ -783,12 +783,11 @@ pub async fn update_enabled(
     })
 }
 
-/// 原子删除 Provider 分组及所有不能脱离分组存在的调用方配置。
+/// 原子删除 Provider 分组及其模型授权和用户权限，保留网关 Key 的失效引用。
 ///
 /// 删除不要求先停用分组。事务首先锁定分组，使并发创建网关 Key、修改分组模型和删除
-/// 串行化；随后把上游账号和官方 API Key 释放为未分组状态，删除调用方网关 Key及两层
-/// 模型映射，最后删除分组主记录。项目不使用数据库外键，因此每一种关联都必须在这里
-/// 显式处理并校验受影响行数。
+/// 串行化；随后把上游账号和官方 API Key 释放为未分组状态，删除分组模型映射、用户
+/// 授权和分组主记录。网关 Key、其模型白名单、插件绑定及原 group_id 均保留。
 pub async fn delete(
     conn: &mut AsyncPgConnection,
     tenant_id: String,
@@ -830,40 +829,13 @@ pub async fn delete(
             .await
             .map_err(db_error)?;
 
-            // 网关 Key 模型映射没有数据库外键，必须先取得并锁定主记录 ID，再显式删除
-            // 映射。所有会同时锁定分组和网关 Key 的写路径统一使用“分组 -> Key”顺序，
-            // 避免删除与模型白名单更新形成反向锁序。
-            let gateway_api_key_ids = api_keys::table
+            // 按当前数据库快照统计受影响 Key，不修改 Key 或其模型映射。
+            let affected_gateway_api_key_count = api_keys::table
                 .filter(api_keys::group_id.eq(group.id))
-                .order(api_keys::id.asc())
-                .for_update()
-                .select(api_keys::id)
-                .load::<Uuid>(&mut *conn)
+                .count()
+                .get_result::<i64>(&mut *conn)
                 .await
                 .map_err(db_error)?;
-            if !gateway_api_key_ids.is_empty() {
-                diesel::delete(
-                    api_key_models::table
-                        .filter(api_key_models::api_key_id.eq_any(&gateway_api_key_ids)),
-                )
-                .execute(&mut *conn)
-                .await
-                .map_err(db_error)?;
-            }
-            let deleted_gateway_api_key_count =
-                diesel::delete(api_keys::table.filter(api_keys::group_id.eq(group.id)))
-                    .execute(&mut *conn)
-                    .await
-                    .map_err(db_error)?;
-            if deleted_gateway_api_key_count != gateway_api_key_ids.len() {
-                return Err(AppError::DbQuery {
-                    message: format!(
-                        "删除 Provider 分组时网关 Key 数量发生并发变化: group_id={}, expected={}, actual={deleted_gateway_api_key_count}",
-                        group.id,
-                        gateway_api_key_ids.len(),
-                    ),
-                });
-            }
 
             // 分组授权没有数据库外键，删除分组时必须先清理权限明细，再清理授权主记录，
             // 避免普通用户保留指向已删除分组的授权事实。
@@ -883,18 +855,16 @@ pub async fn delete(
             .map_err(db_error)?;
 
             diesel::delete(
-                provider_group_models::table
-                    .filter(provider_group_models::group_id.eq(group.id)),
+                provider_group_models::table.filter(provider_group_models::group_id.eq(group.id)),
             )
             .execute(&mut *conn)
             .await
             .map_err(db_error)?;
-            let deleted_group_count = diesel::delete(
-                provider_groups::table.filter(provider_groups::id.eq(group.id)),
-            )
-            .execute(&mut *conn)
-            .await
-            .map_err(db_error)?;
+            let deleted_group_count =
+                diesel::delete(provider_groups::table.filter(provider_groups::id.eq(group.id)))
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(db_error)?;
             if deleted_group_count != 1 {
                 return Err(AppError::DbQuery {
                     message: format!("删除 Provider 分组主记录失败: {}", group.id),
@@ -905,7 +875,7 @@ pub async fn delete(
                 group,
                 accounts,
                 upstream_api_keys,
-                deleted_gateway_api_key_count,
+                affected_gateway_api_key_count,
             })
         })
         .await?;
@@ -917,8 +887,8 @@ pub async fn delete(
         provider_group_was_enabled = deleted.group.enabled,
         released_account_count = deleted.accounts.len(),
         released_upstream_api_key_count = deleted.upstream_api_keys.len(),
-        deleted_gateway_api_key_count = deleted.deleted_gateway_api_key_count,
-        "Provider 分组及关联调用方配置已删除，上游资源已释放为未分组状态"
+        affected_gateway_api_key_count = deleted.affected_gateway_api_key_count,
+        "Provider 分组及分组授权已删除，网关 Key 保留失效分组引用，上游资源已释放为未分组状态"
     );
     Ok(deleted)
 }
