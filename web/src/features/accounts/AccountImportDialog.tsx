@@ -51,7 +51,7 @@ export function AccountImportDialog(props: AccountImportDialogProps) {
     <Modal
       titleId="accountImportTitle"
       title={`添加 ${props.providerLabel} 账号`}
-      description={isClaude ? "通过 Anthropic OAuth 导入 Max、Pro、Team 或 Enterprise 付费账号。" : "导入 Codex OAuth 账号凭证。"}
+      description={isClaude ? "通过 Anthropic OAuth 导入 Max、Pro、Team 或 Enterprise 付费账号。" : undefined}
       closeDisabled={props.saving || props.oauthLoading}
       onClose={props.onClose}
     >
@@ -81,10 +81,6 @@ export function AccountImportDialog(props: AccountImportDialogProps) {
           </button>
         </SlidingTabList>
       )}
-
-      <p className={fieldHelp}>
-        账号会先以未分组状态导入；创建分组或在账号列表调整归属后才会参与调度。
-      </p>
 
       {props.mode === "oauth" ? (
         <div>

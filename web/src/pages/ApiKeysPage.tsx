@@ -90,13 +90,12 @@ export function ApiKeysPage({
           </div>
         ) : (
           <div className={tableScrollClass}>
-            <table className={`${tableClass} min-w-[96rem]`}>
+            <table className={`${tableClass} min-w-[84rem]`}>
               <thead>
                 <tr>
                   <th>名称</th>
                   <th>Provider 分组</th>
                   <th>API Key</th>
-                  <th>模型白名单</th>
                   <th>插件</th>
                   <th>状态</th>
                   <th>更新</th>
@@ -160,29 +159,6 @@ export function ApiKeysPage({
                       </div>
                     </td>
                     <td>
-                      <div
-                        className="flex flex-wrap gap-1.5"
-                        aria-label={`${apiKey.name} 的模型白名单`}
-                      >
-                        {apiKey.allowed_models.map((model) => {
-                          const allowedByGroup = apiKey.group_allowed_models.includes(model);
-                          return (
-                            <code
-                              key={model}
-                              className={
-                                allowedByGroup
-                                  ? "max-w-full break-all rounded-md bg-indigo-50 px-2 py-1 font-mono text-[11px] leading-4 text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300"
-                                  : "max-w-full break-all rounded-md bg-amber-50 px-2 py-1 font-mono text-[11px] leading-4 text-amber-700 line-through dark:bg-amber-950/60 dark:text-amber-300"
-                              }
-                              title={allowedByGroup ? model : `${model}（当前分组未授权）`}
-                            >
-                              {model}
-                            </code>
-                          );
-                        })}
-                      </div>
-                    </td>
-                    <td>
                       {apiKey.plugin ? (
                         <div>
                           <div className={cellMainClass}>{apiKey.plugin.suite_name}</div>
@@ -211,7 +187,7 @@ export function ApiKeysPage({
                         busy={updatingId === apiKey.id}
                         actions={[
                           {
-                            id: "edit-models", label: "修改模型", icon: ListChecks,
+                            id: "edit-models", label: "模型", icon: ListChecks,
                             disabled: !apiKey.group_authorized, opensDialog: true,
                             description: apiKey.group_authorized ? "修改模型白名单" : "分组授权已撤销",
                             onSelect: () => onEditModels(apiKey),

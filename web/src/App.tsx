@@ -502,13 +502,13 @@ export function App() {
     const username = registerUsername.trim().toLowerCase();
     const usernameCharacters = Array.from(username);
     if (
-      usernameCharacters.length === 0 ||
+      usernameCharacters.length < 5 ||
       usernameCharacters.length > 32 ||
       utf8ByteLength(username) > 128 ||
       !/^[\p{L}\p{N}][\p{L}\p{N}_-]*$/u.test(username)
     ) {
       toast.error("注册失败", {
-        description: "用户名最多 32 个字符，只能包含字母、数字、下划线和连字符。",
+        description: "用户名必须为 5 到 32 个字符，只能包含字母、数字、下划线和连字符。",
       });
       return;
     }
@@ -2666,13 +2666,13 @@ export function App() {
     const username = userCreateUsername.trim().toLowerCase();
     const usernameCharacters = Array.from(username);
     if (
-      usernameCharacters.length === 0 ||
+      usernameCharacters.length < 5 ||
       usernameCharacters.length > 32 ||
       utf8ByteLength(username) > 128 ||
       !/^[\p{L}\p{N}][\p{L}\p{N}_-]*$/u.test(username)
     ) {
       toast.error("用户添加失败", {
-        description: "用户名最多 32 个字符，只能包含字母、数字、下划线和连字符。",
+        description: "用户名必须为 5 到 32 个字符，只能包含字母、数字、下划线和连字符。",
       });
       return;
     }

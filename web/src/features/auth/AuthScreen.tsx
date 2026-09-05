@@ -154,7 +154,7 @@ export function AuthScreen(props: AuthScreenProps) {
                 maxLength={128}
                 required
               />
-              <p className={fieldHelp}>最多 32 个字符，可使用字母、数字、下划线或连字符，注册后不可修改。</p>
+              <p className={fieldHelp}>5 到 32 个字符，可使用字母、数字、下划线或连字符，注册后不可修改。</p>
             </label>
             <label className={fieldStack}>
               <span className={fieldLabel}>邮箱</span>

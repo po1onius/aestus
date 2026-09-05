@@ -49,7 +49,6 @@ export function ApiKeyCreateDialog(props: ApiKeyCreateDialogProps) {
     <Modal
       titleId="apiKeyCreateTitle"
       title="创建 API Key"
-      description="配置网关访问密钥和模型白名单。"
       closeDisabled={props.saving}
       onClose={props.onClose}
     >

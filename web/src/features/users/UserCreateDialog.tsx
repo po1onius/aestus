@@ -32,7 +32,6 @@ export function UserCreateDialog(props: UserCreateDialogProps) {
     <Modal
       titleId="userCreateTitle"
       title="添加用户"
-      description="创建一个可直接登录 Dashboard 的普通用户。"
       closeDisabled={props.saving}
       onClose={props.onClose}
     >
@@ -52,7 +51,6 @@ export function UserCreateDialog(props: UserCreateDialogProps) {
             required
             autoFocus
           />
-          <span className={fieldHelp}>最多 32 个字符，可使用字母、数字、下划线和连字符。</span>
         </label>
 
         <label className={fieldStack}>
@@ -84,7 +82,6 @@ export function UserCreateDialog(props: UserCreateDialogProps) {
             disabled={props.saving}
             required
           />
-          <span className={fieldHelp}>至少 8 个字符，UTF-8 编码长度不能超过 72 字节。</span>
         </label>
 
         <button

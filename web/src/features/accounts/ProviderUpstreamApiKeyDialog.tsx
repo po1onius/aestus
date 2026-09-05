@@ -29,15 +29,11 @@ export function ProviderUpstreamApiKeyDialog(props: ProviderUpstreamApiKeyDialog
     <Modal
       titleId="providerOfficialKeyTitle"
       title={`添加 ${props.providerLabel} 官方 Key`}
-      description="API Key 与 Base URL 导入后固定；需要更换时请删除后重新导入。"
       closeDisabled={props.saving}
       onClose={props.onClose}
     >
       <div>
         <form className="grid gap-4" onSubmit={props.onSubmit}>
-          <p className="text-sm text-slate-500 dark:text-slate-400">
-            官方 Key 会先以未分组状态保存；分配到分组前不会进入可调度池。
-          </p>
           <label className={fieldStack}>
             <span className={fieldLabel}>
               API Key<span className={requiredMark}>*</span>

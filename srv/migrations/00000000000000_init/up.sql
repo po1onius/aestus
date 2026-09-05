@@ -43,7 +43,7 @@ CREATE TABLE users (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     disabled_at TIMESTAMPTZ,
-    CHECK (char_length(username) BETWEEN 1 AND 32),
+    CHECK (char_length(username) BETWEEN 5 AND 32),
     CHECK (octet_length(username) <= 128),
     CHECK (username !~ '[[:space:]@[:cntrl:]]'),
     CHECK (role IN ('platform_admin', 'tenant_owner', 'tenant_user')),

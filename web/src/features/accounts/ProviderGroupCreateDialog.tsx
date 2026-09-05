@@ -110,7 +110,6 @@ export function ProviderGroupCreateDialog({
     <Modal
       titleId="providerGroupCreateTitle"
       title={`添加 ${providerLabel} 分组`}
-      description="配置限制模型；也可以选择当前尚未分组的账号或官方 API Key 作为初始资源。"
       closeDisabled={saving}
       onClose={onClose}
     >
@@ -180,13 +179,13 @@ export function ProviderGroupCreateDialog({
               添加
             </button>
           </div>
-          <span className={fieldHelp}>
-            {modelLimitReached
-              ? `最多添加 ${MAX_GROUP_MODELS} 个模型。`
-              : modelAlreadyConfirmed
-                ? "该模型已经添加。"
-                : "输入一个模型名后点击“添加”，也可以按 Enter 确认。"}
-          </span>
+          {(modelLimitReached || modelAlreadyConfirmed) && (
+            <span className={fieldHelp}>
+              {modelLimitReached
+                ? `最多添加 ${MAX_GROUP_MODELS} 个模型。`
+                : "该模型已经添加。"}
+            </span>
+          )}
         </div>
         <div className={fieldStack}>
           <span className={fieldLabel}>
@@ -224,9 +223,6 @@ export function ProviderGroupCreateDialog({
               />
             </div>
           )}
-          <span className={fieldHelp}>
-            可以不选择初始资源；资源一次只能属于一个分组，之后可在资源列表中迁移或设为未分组。
-          </span>
         </div>
         <button
           className={`${buttonPrimary} w-full`}

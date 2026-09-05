@@ -23,7 +23,7 @@ use super::{
 
 const EMAIL_CODE_DIGITS: u32 = 6;
 const EMAIL_ADDRESS_MAX_BYTES: usize = 254;
-const USERNAME_MIN_CHARS: usize = 1;
+const USERNAME_MIN_CHARS: usize = 5;
 const USERNAME_MAX_CHARS: usize = 32;
 const USERNAME_MAX_BYTES: usize = 128;
 const EMAIL_CODE_MAX_ATTEMPTS: i64 = 5;

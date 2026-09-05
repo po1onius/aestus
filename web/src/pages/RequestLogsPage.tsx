@@ -63,6 +63,7 @@ export function RequestLogsPage({
   onNextPage,
 }: RequestLogsPageProps) {
   const [selectedLog, setSelectedLog] = useState<RequestLogRecord | null>(null);
+  const showUsernameColumn = showUsername && !showTenant;
 
   function handleLogKeyDown(event: KeyboardEvent<HTMLTableRowElement>, log: RequestLogRecord) {
     if (event.key !== "Enter" && event.key !== " ") {
@@ -153,34 +154,28 @@ export function RequestLogsPage({
           </div>
         ) : (
           <div className="min-h-0 w-full flex-1 overflow-auto overscroll-contain">
-            <table className={`${tableClass} ${showTenant ? "min-w-[88rem]" : "min-w-[76rem]"} [&_th]:sticky [&_th]:top-0 [&_th]:z-10`}>
+            <table
+              className={cx(
+                tableClass,
+                showTenant || showUsernameColumn ? "min-w-[88rem]" : "min-w-[76rem]",
+                "[&_th]:sticky [&_th]:top-0 [&_th]:z-10",
+              )}
+            >
               <colgroup>
-                {showTenant ? (
-                  <>
-                    <col className="w-[14%]" />
-                    <col className="w-[16%]" />
-                    <col className="w-[16%]" />
-                    <col className="w-[12%]" />
-                    <col className="w-[9%]" />
-                    <col className="w-[9%]" />
-                    <col className="w-[17%]" />
-                    <col className="w-[7%]" />
-                  </>
-                ) : (
-                  <>
-                    <col className="w-[20%]" />
-                    <col className="w-[18%]" />
-                    <col className="w-[13%]" />
-                    <col className="w-[10%]" />
-                    <col className="w-[10%]" />
-                    <col className="w-[18%]" />
-                    <col className="w-[11%]" />
-                  </>
-                )}
+                {showTenant && <col className="w-[12rem]" />}
+                {showUsernameColumn && <col className="w-[12rem]" />}
+                <col className="w-[16rem]" />
+                <col className="w-[14rem]" />
+                <col className="w-[10rem]" />
+                <col className="w-[8rem]" />
+                <col className="w-[8rem]" />
+                <col className="w-[14rem]" />
+                <col className="w-[6rem]" />
               </colgroup>
               <thead>
                 <tr>
                   {showTenant && <th>租户 ID</th>}
+                  {showUsernameColumn && <th>用户名</th>}
                   <th>请求</th>
                   <th>模型</th>
                   <th>请求参数</th>
@@ -206,6 +201,13 @@ export function RequestLogsPage({
                       <td>
                         <div className={cellMainClass} title={log.tenant_id || undefined}>
                           {log.tenant_id || "未归属"}
+                        </div>
+                      </td>
+                    )}
+                    {showUsernameColumn && (
+                      <td>
+                        <div className={cellMainClass} title={log.username || undefined}>
+                          {log.username || "未记录"}
                         </div>
                       </td>
                     )}

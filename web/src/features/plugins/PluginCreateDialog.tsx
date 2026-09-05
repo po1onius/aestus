@@ -51,7 +51,6 @@ export function PluginCreateDialog({ saving, onCreate, onClose }: PluginCreateDi
     <Modal
       titleId="pluginCreateTitle"
       title="添加插件"
-      description="上传请求、非流式响应或流式响应 Component；至少需要一个插件插槽。"
       className="max-w-4xl"
       closeDisabled={saving}
       onClose={onClose}

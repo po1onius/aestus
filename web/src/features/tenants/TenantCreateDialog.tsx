@@ -3,7 +3,6 @@ import type { FormEvent } from "react";
 import { Modal } from "../../components/Modal";
 import {
   buttonPrimary,
-  fieldHelp,
   fieldLabel,
   fieldStack,
   inputClass,
@@ -33,7 +32,7 @@ export function TenantCreateDialog(props: TenantCreateDialogProps) {
   const ownerNameCharacters = Array.from(normalizedOwnerName);
   const ownerNameInvalid =
     ownerRequested &&
-    (ownerNameCharacters.length === 0 ||
+    (ownerNameCharacters.length < 5 ||
       ownerNameCharacters.length > 32 ||
       new TextEncoder().encode(normalizedOwnerName).length > 64 ||
       !/^[\p{L}\p{N}][\p{L}\p{N}_-]*$/u.test(normalizedOwnerName));
@@ -61,7 +60,7 @@ export function TenantCreateDialog(props: TenantCreateDialogProps) {
             autoFocus
             autoComplete="off"
             onChange={(event) => props.onNameChange(event.target.value)}
-            placeholder="例如 Acme"
+            placeholder="例如 AcmeCorp"
           />
         </label>
 
@@ -76,19 +75,6 @@ export function TenantCreateDialog(props: TenantCreateDialogProps) {
             onChange={(event) => props.onPasswordChange(event.target.value)}
             placeholder="留空则暂不创建 owner"
           />
-          <span
-            className={
-              passwordInvalid || ownerNameInvalid
-                ? "text-xs leading-5 text-red-600 dark:text-red-400"
-                : fieldHelp
-            }
-          >
-            {ownerNameInvalid
-              ? "填写密码时，租户名称还需能作为用户名和邮箱前缀：最多 32 个字符、64 字节，只能包含字母、数字、下划线和连字符，并以字母或数字开头。"
-              : ownerRequested
-              ? `将创建 owner：${normalizedOwnerName || "租户名称"}（${normalizedOwnerName || "租户名称"}@aes.tus）；密码至少 8 个字符且不超过 72 字节，当前 ${passwordBytes} 字节。`
-              : "可选。填写后将同时创建 owner；用户名为租户名称，邮箱为“租户名称@aes.tus”。"}
-          </span>
         </label>
 
         <button
