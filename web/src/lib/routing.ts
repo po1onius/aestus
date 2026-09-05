@@ -9,7 +9,7 @@ export function routesForUser(
     return dashboardRoutes.filter((route) => !route.platformOnly && !route.ownerOnly);
   }
   if (user.role === "platform_admin") {
-    return dashboardRoutes.filter((route) => route.platformOnly || (!route.ownerOnly && !route.tenantOnly));
+    return dashboardRoutes.filter((route) => route.page === "plugins" || route.platformOnly || (!route.ownerOnly && !route.tenantOnly));
   }
   if (user.role === "tenant_owner") {
     return dashboardRoutes.filter((route) => !route.platformOnly);

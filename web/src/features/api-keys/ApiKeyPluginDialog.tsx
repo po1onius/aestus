@@ -1,3 +1,4 @@
+import { pluginSourceLabel } from "../plugins/access";
 import { Loader2, Save } from "lucide-react";
 import type { FormEvent } from "react";
 import { Modal } from "../../components/Modal";
@@ -9,33 +10,33 @@ import {
   inputClass,
   spinnerClass,
 } from "../../lib/ui";
-import type { ApiKey, PluginReleaseSummary } from "../../types";
+import type { ApiKey, PluginSuiteSummary } from "../../types";
 
 interface ApiKeyPluginDialogProps {
   apiKey: ApiKey;
-  plugins: PluginReleaseSummary[];
-  pluginReleaseId: string;
+  plugins: PluginSuiteSummary[];
+  pluginSuiteId: string;
   saving: boolean;
-  onPluginChange: (releaseId: string) => void;
+  onPluginChange: (suiteId: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onClose: () => void;
 }
 
-/** 只修改网关 Key 的插件 release 绑定，不混入名称、分组或模型白名单编辑状态。 */
+/** 只修改网关 Key 的套件绑定，不混入名称、分组或模型白名单编辑状态。 */
 export function ApiKeyPluginDialog(props: ApiKeyPluginDialogProps) {
   const compatiblePlugins = props.plugins.filter(
-    (plugin) => plugin.provider === props.apiKey.group.provider && plugin.suite_enabled,
+    (plugin) => plugin.provider === props.apiKey.group.provider && plugin.enabled,
   );
   const currentPlugin = props.apiKey.plugin;
   const currentPluginIsSelectable =
     currentPlugin !== null && compatiblePlugins.some((plugin) => plugin.id === currentPlugin.id);
-  const originalReleaseId = currentPlugin?.id ?? "";
+  const originalSuiteId = props.apiKey.plugin_suite_id ?? "";
 
   return (
     <Modal
       titleId="apiKeyPluginTitle"
-      title="修改插件"
-      description={`为 API Key“${props.apiKey.name}”选择插件发布版本。`}
+      title="修改套件绑定"
+      description={`为 API Key“${props.apiKey.name}”选择插件套件。`}
       closeDisabled={props.saving}
       onClose={props.onClose}
     >
@@ -50,33 +51,36 @@ export function ApiKeyPluginDialog(props: ApiKeyPluginDialogProps) {
         </div>
 
         <label className={fieldStack}>
-          <span className={fieldLabel}>插件</span>
+          <span className={fieldLabel}>插件套件</span>
           <select
             className={inputClass}
-            value={props.pluginReleaseId}
+            value={props.pluginSuiteId}
             disabled={props.saving}
             onChange={(event) => props.onPluginChange(event.target.value)}
           >
             <option value="">不使用插件</option>
+            {!currentPlugin && props.apiKey.plugin_suite_id && (
+              <option value={props.apiKey.plugin_suite_id} disabled>原套件已删除（绑定失效）</option>
+            )}
             {currentPlugin && !currentPluginIsSelectable && (
               <option value={currentPlugin.id} disabled>
-                {currentPlugin.suite_name} · v{currentPlugin.version}（当前版本已停用）
+                {currentPlugin.name} · {pluginSourceLabel(currentPlugin.tenant_id)}（已停用）
               </option>
             )}
             {compatiblePlugins.map((plugin) => (
               <option key={plugin.id} value={plugin.id}>
-                {plugin.suite_name} · v{plugin.version}
+                {plugin.name} · {pluginSourceLabel(plugin.tenant_id)}
               </option>
             ))}
           </select>
           <span className={fieldHelp}>
-            只列出与当前 Provider 匹配的启用版本；选择“不使用插件”会解除现有绑定。插件仅作用于 OAuth 账号 attempt。
+            只列出与当前 Provider 匹配的启用套件；选择“不使用插件”会解除现有绑定。插件仅作用于 OAuth 账号的 Responses / Messages 请求。
           </span>
         </label>
 
         <button
           className={`${buttonPrimary} mt-1 w-full`}
-          disabled={props.saving || props.pluginReleaseId === originalReleaseId}
+          disabled={props.saving || props.pluginSuiteId === originalSuiteId}
         >
           {props.saving ? <Loader2 className={spinnerClass} size={18} /> : <Save size={18} />}
           保存插件绑定

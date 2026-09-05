@@ -13,7 +13,7 @@ pub mod schema {
             group_id -> Uuid,
             name -> Text,
             api_key -> Text,
-            plugin_release_id -> Nullable<Uuid>,
+            plugin_suite_id -> Nullable<Uuid>,
             enabled -> Bool,
             created_at -> Timestamptz,
             updated_at -> Timestamptz,
@@ -47,7 +47,7 @@ pub struct GatewayApiKey {
     pub name: String,
     #[serde(skip_serializing)]
     pub api_key: String,
-    pub plugin_release_id: Option<Uuid>,
+    pub plugin_suite_id: Option<Uuid>,
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -62,7 +62,7 @@ pub(super) struct NewGatewayApiKey {
     pub group_id: Uuid,
     pub name: String,
     pub api_key: String,
-    pub plugin_release_id: Option<Uuid>,
+    pub plugin_suite_id: Option<Uuid>,
 }
 
 /// API Key 模型白名单写入行；复合主键在没有外键的前提下负责模型去重。

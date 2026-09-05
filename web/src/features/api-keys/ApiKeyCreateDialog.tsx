@@ -1,3 +1,4 @@
+import { pluginSourceLabel } from "../plugins/access";
 import { Loader2, Save } from "lucide-react";
 import type { FormEvent } from "react";
 import { Modal } from "../../components/Modal";
@@ -10,7 +11,7 @@ import {
   requiredMark,
   spinnerClass,
 } from "../../lib/ui";
-import type { PluginReleaseSummary, ProviderGroup } from "../../types";
+import type { PluginSuiteSummary, ProviderGroup } from "../../types";
 
 interface ApiKeyCreateDialogProps {
   name: string;
@@ -18,12 +19,12 @@ interface ApiKeyCreateDialogProps {
   saving: boolean;
   groups: ProviderGroup[];
   groupId: string;
-  plugins: PluginReleaseSummary[];
-  pluginReleaseId: string;
+  plugins: PluginSuiteSummary[];
+  pluginSuiteId: string;
   onNameChange: (value: string) => void;
   onModelsChange: (models: string[]) => void;
   onGroupChange: (groupId: string) => void;
-  onPluginChange: (releaseId: string) => void;
+  onPluginChange: (suiteId: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onClose: () => void;
 }
@@ -33,7 +34,7 @@ export function ApiKeyCreateDialog(props: ApiKeyCreateDialogProps) {
   const selectedModelSet = new Set(props.selectedModels);
   const compatiblePlugins = selectedGroup
     ? props.plugins.filter(
-        (plugin) => plugin.provider === selectedGroup.provider && plugin.suite_enabled,
+        (plugin) => plugin.provider === selectedGroup.provider && plugin.enabled,
       )
     : [];
 
@@ -113,19 +114,19 @@ export function ApiKeyCreateDialog(props: ApiKeyCreateDialogProps) {
             <span className={fieldLabel}>插件套件</span>
             <select
               className={inputClass}
-              value={props.pluginReleaseId}
+              value={props.pluginSuiteId}
               disabled={props.saving || !selectedGroup}
               onChange={(event) => props.onPluginChange(event.target.value)}
             >
               <option value="">不使用插件</option>
               {compatiblePlugins.map((plugin) => (
                 <option key={plugin.id} value={plugin.id}>
-                  {plugin.suite_name} · v{plugin.version}
+                  {plugin.name} · {pluginSourceLabel(plugin.tenant_id)}
                 </option>
               ))}
             </select>
             <span className="text-xs text-slate-500 dark:text-slate-400">
-              套件只作用于调度到 OAuth 账号的请求；官方 API Key 始终使用原生流程。空插槽沿用原生流程，绑定版本保持不变。
+              套件只作用于调度到 OAuth 账号的请求；官方 API Key 始终使用原生流程。空插槽沿用原生流程，套件组合固定。
             </span>
           </label>
           <button

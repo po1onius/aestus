@@ -32,7 +32,7 @@ pub async fn create(
     group_id: Uuid,
     name: String,
     allowed_models: Vec<String>,
-    plugin_release_id: Option<Uuid>,
+    plugin_suite_id: Option<Uuid>,
 ) -> AppResult<GatewayApiKeyWithModels> {
     use self::api_keys::dsl;
 
@@ -45,11 +45,11 @@ pub async fn create(
             let provider_group =
                 group::require_enabled_for_write(&mut *conn, tenant_id.clone(), group_id).await?;
             group_access::require_group_grant(&mut *conn, user, group_id).await?;
-            if let Some(plugin_release_id) = plugin_release_id {
-                crate::plugin::sql::require_enabled_release_for_provider_write(
+            if let Some(plugin_suite_id) = plugin_suite_id {
+                crate::plugin::sql::require_enabled_suite_for_provider_write(
                     &mut *conn,
                     tenant_id.clone(),
-                    plugin_release_id,
+                    plugin_suite_id,
                     &provider_group.provider,
                 )
                 .await?;
@@ -63,7 +63,7 @@ pub async fn create(
                 group_id,
                 name,
                 api_key: generate_api_key(),
-                plugin_release_id,
+                plugin_suite_id,
             };
             let api_key = diesel::insert_into(dsl::api_keys)
                 .values(&new_api_key)
@@ -114,7 +114,7 @@ pub async fn create(
         Err(source) => return Err(source),
     };
 
-    info!(api_key_id = %api_key.api_key.id, user_id = %api_key.api_key.user_id, provider_group_id = %api_key.api_key.group_id, api_key_name = %api_key.api_key.name, plugin_release_id = ?api_key.api_key.plugin_release_id, model_count = api_key.allowed_models.len(), allowed_models = ?api_key.allowed_models, "API Key、模型白名单及可选插件套件绑定创建成功");
+    info!(api_key_id = %api_key.api_key.id, user_id = %api_key.api_key.user_id, provider_group_id = %api_key.api_key.group_id, api_key_name = %api_key.api_key.name, plugin_suite_id = ?api_key.api_key.plugin_suite_id, model_count = api_key.allowed_models.len(), allowed_models = ?api_key.allowed_models, "API Key、模型白名单及可选插件套件绑定创建成功");
 
     Ok(api_key)
 }
@@ -415,13 +415,13 @@ fn ensure_models_within_group(
 
 /// 修改指定用户自己的 API Key 插件绑定。
 ///
-/// API Key 的 Provider 由其分组决定，因此非空绑定必须在同一事务内验证 release 仍处于
+/// API Key 的 Provider 由其分组决定，因此非空绑定必须在同一事务内验证套件仍处于
 /// 启用状态且 Provider 一致。传入 `None` 始终表示解除绑定，不依赖原插件当前是否启用。
 pub async fn update_plugin_for_user(
     conn: &mut AsyncPgConnection,
     user_id: Uuid,
     id: Uuid,
-    plugin_release_id: Option<Uuid>,
+    plugin_suite_id: Option<Uuid>,
 ) -> AppResult<GatewayApiKeyWithModels> {
     use self::api_keys::dsl;
 
@@ -441,7 +441,7 @@ pub async fn update_plugin_for_user(
                     message: format!("API Key 不存在: {id}"),
                 })?;
 
-            if let Some(release_id) = plugin_release_id {
+            if let Some(suite_id) = plugin_suite_id {
                 let provider_group = group::find_by_id(&mut *conn, current.group_id)
                     .await?
                     .ok_or_else(|| AppError::DbQuery {
@@ -450,10 +450,10 @@ pub async fn update_plugin_for_user(
                             current.group_id
                         ),
                     })?;
-                crate::plugin::sql::require_enabled_release_for_provider_write(
+                crate::plugin::sql::require_enabled_suite_for_provider_write(
                     &mut *conn,
                     current.tenant_id,
-                    release_id,
+                    suite_id,
                     &provider_group.provider,
                 )
                 .await?;
@@ -465,7 +465,7 @@ pub async fn update_plugin_for_user(
                     .filter(dsl::user_id.eq(user_id)),
             )
             .set((
-                dsl::plugin_release_id.eq(plugin_release_id),
+                dsl::plugin_suite_id.eq(plugin_suite_id),
                 dsl::updated_at.eq(chrono::Utc::now()),
             ))
             .returning(GatewayApiKey::as_returning())
@@ -483,7 +483,7 @@ pub async fn update_plugin_for_user(
         user_id = %api_key.user_id,
         provider_group_id = %api_key.group_id,
         api_key_name = %api_key.name,
-        plugin_release_id = ?api_key.plugin_release_id,
+        plugin_suite_id = ?api_key.plugin_suite_id,
         "API Key 插件绑定已更新"
     );
     Ok(GatewayApiKeyWithModels {

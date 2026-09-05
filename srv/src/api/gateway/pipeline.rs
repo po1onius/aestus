@@ -157,7 +157,7 @@ where
             service_tier = log_fields.service_tier.as_deref().unwrap_or("<none>"),
             fast_mode = ?log_fields.fast_mode,
             is_compaction = ?log_fields.is_compaction,
-            plugin_release_id = ?plugin_binding.as_ref().map(|binding| binding.release_id),
+            plugin_suite_id = ?plugin_binding.as_ref().map(|binding| binding.suite_id),
             body_cache_request_id = %body.request_id(),
             body_cache_storage = body.storage_kind(),
             body_bytes = body.len(),

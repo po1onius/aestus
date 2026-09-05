@@ -22,7 +22,7 @@ pub(crate) struct CurrentUser(pub User);
 /// 已通过租户 owner 角色校验的请求主体。
 pub(crate) struct AdminUser(pub User);
 
-/// 平台管理员只负责平台级租户生命周期，不隐式获得某个租户的资源写入作用域。
+/// 平台管理员负责平台级资源，不隐式获得某个租户的资源写入作用域。
 pub(crate) struct PlatformAdminUser(pub User);
 
 impl FromRequestParts<AppState> for CurrentUser {

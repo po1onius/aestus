@@ -1,115 +1,71 @@
 import { Loader2, Upload } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { Modal } from "../../components/Modal";
-import {
-  buttonPrimary,
-  fieldLabel,
-  fieldStack,
-  inputClass,
-  requiredMark,
-  spinnerClass,
-  textareaClass,
-} from "../../lib/ui";
-import type { UpstreamApiKeyProvider } from "../../types";
-import {
-  emptyPluginArtifactFiles,
-  hasPluginArtifact,
-  PluginArtifactFileFields,
-  type PluginArtifactFiles,
-} from "./PluginArtifactFileFields";
+import { buttonPrimary, fieldLabel, fieldStack, inputClass, spinnerClass, textareaClass } from "../../lib/ui";
+import type { PluginSlot, UpstreamApiKeyProvider } from "../../types";
+import { pluginSlotLabels } from "./slots";
 
-export interface CreatePluginInput extends PluginArtifactFiles {
+export interface CreatePluginInput {
   name: string;
   description: string;
   provider: UpstreamApiKeyProvider;
+  slot: PluginSlot;
+  file: File;
 }
 
-interface PluginCreateDialogProps {
+interface Props {
+  isPlatformAdmin: boolean;
   saving: boolean;
   onCreate: (input: CreatePluginInput) => Promise<boolean>;
   onClose: () => void;
 }
 
-/** 添加弹窗负责采集一个完整的插件初始版本，成功发布后再由列表刷新展示结果。 */
-export function PluginCreateDialog({ saving, onCreate, onClose }: PluginCreateDialogProps) {
+export function PluginCreateDialog({ saving, onCreate, onClose, isPlatformAdmin }: Props) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [provider, setProvider] = useState<UpstreamApiKeyProvider>("gpt");
-  const [files, setFiles] = useState<PluginArtifactFiles>(emptyPluginArtifactFiles);
+  const [slot, setSlot] = useState<PluginSlot>("request");
+  const [file, setFile] = useState<File | null>(null);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (saving || name.trim().length === 0 || !hasPluginArtifact(files)) {
-      return;
-    }
-    if (await onCreate({ name, description, provider, ...files })) {
-      onClose();
-    }
+    if (saving || !name.trim() || !file) return;
+    if (await onCreate({ name, description, provider, slot, file })) onClose();
   }
 
   return (
-    <Modal
-      titleId="pluginCreateTitle"
-      title="添加插件"
-      className="max-w-4xl"
-      closeDisabled={saving}
-      onClose={onClose}
-    >
+    <Modal titleId="pluginCreateTitle" title={isPlatformAdmin ? "上传平台公共插件" : "上传本租户插件"} closeDisabled={saving} onClose={onClose}>
       <form className="grid gap-4" onSubmit={submit}>
+        <label className={fieldStack}>
+          <span className={fieldLabel}>插件名称</span>
+          <input className={inputClass} value={name} disabled={saving} maxLength={128} required autoFocus onChange={(e) => setName(e.target.value)} />
+        </label>
         <div className="grid gap-4 sm:grid-cols-2">
           <label className={fieldStack}>
-            <span className={fieldLabel}>
-              插件名称<span className={requiredMark}>*</span>
-            </span>
-            <input
-              className={inputClass}
-              value={name}
-              disabled={saving}
-              maxLength={128}
-              required
-              autoFocus
-              onChange={(event) => setName(event.target.value)}
-              placeholder="例如 codex-wire-adapter"
-            />
-          </label>
-          <label className={fieldStack}>
-            <span className={fieldLabel}>
-              Provider<span className={requiredMark}>*</span>
-            </span>
-            <select
-              className={inputClass}
-              value={provider}
-              disabled={saving}
-              onChange={(event) => setProvider(event.target.value as UpstreamApiKeyProvider)}
-            >
+            <span className={fieldLabel}>Provider</span>
+            <select className={inputClass} value={provider} disabled={saving} onChange={(e) => setProvider(e.target.value as UpstreamApiKeyProvider)}>
               <option value="gpt">GPT · Responses</option>
               <option value="claude">Claude · Messages</option>
             </select>
           </label>
+          <label className={fieldStack}>
+            <span className={fieldLabel}>类型（插槽）</span>
+            <select className={inputClass} value={slot} disabled={saving} onChange={(e) => setSlot(e.target.value as PluginSlot)}>
+              {Object.entries(pluginSlotLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+            </select>
+          </label>
         </div>
         <label className={fieldStack}>
-          <span className={fieldLabel}>描述</span>
-          <textarea
-            className={textareaClass}
-            value={description}
-            disabled={saving}
-            maxLength={1024}
-            onChange={(event) => setDescription(event.target.value)}
-            placeholder="说明插件对请求、非流式响应和 SSE item 的转换规则"
-          />
+          <span className={fieldLabel}>WASM 文件</span>
+          <input className={inputClass} type="file" accept=".wasm,application/wasm" required disabled={saving} onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+          <span className="text-xs text-slate-500">文件最大 8 MiB。上传后可在多个套件中重复选择。</span>
         </label>
-        <PluginArtifactFileFields
-          files={files}
-          disabled={saving}
-          layout="wide"
-          onChange={setFiles}
-        />
-        <button
-          className={`${buttonPrimary} mt-1 w-full`}
-          disabled={saving || name.trim().length === 0 || !hasPluginArtifact(files)}
-        >
-          {saving ? <Loader2 className={spinnerClass} size={18} /> : <Upload size={18} />}
-          添加并发布
+        <label className={fieldStack}>
+          <span className={fieldLabel}>备注</span>
+          <textarea className={textareaClass} value={description} disabled={saving} maxLength={1024} onChange={(e) => setDescription(e.target.value)} />
+        </label>
+        <button className={`${buttonPrimary} w-full`} disabled={saving || !name.trim() || !file}>
+          {saving ? <Loader2 className={spinnerClass} size={18} /> : <Upload size={18} />}上传插件
         </button>
       </form>
     </Modal>

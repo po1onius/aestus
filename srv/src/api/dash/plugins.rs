@@ -1,34 +1,25 @@
-//! Admin 管理 WASM 插件套件的接口。
-//!
-//! 每个不可变 release 原子包含 request、buffered response、stream response 三个可空
-//! artifact。所有上传文件都在数据库事务前按 Provider 和插槽完成 Component ABI 实例化；
-//! 任一 artifact 无效时整套发布失败，不会留下部分版本。
-
-use std::{collections::HashMap, sync::Arc};
-
-use axum::{
-    Json, Router,
-    extract::{DefaultBodyLimit, Multipart, Path, State},
-    routing::{delete, get, post, put},
-};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use tracing::{info, warn};
-use uuid::Uuid;
-use wasmtime::component::Component;
-
+//! 独立 WASM 插件上传及固定套件组合。上传按 Provider/插槽校验 Component ABI。
 use crate::{
     api::dash::auth,
     err::{AdminResult, AppError, AppResult},
     plugin::{
         self,
-        model::{PluginArtifactUpload, PluginReleaseSummary, PluginSlot},
+        model::{NewPlugin, NewPluginSuite, PluginSlot, PluginSuiteSummary, PluginSummary},
     },
     state::AppState,
 };
+use axum::{
+    Json, Router,
+    extract::{DefaultBodyLimit, Multipart, Path, State},
+    routing::{delete, get, put},
+};
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
+use tracing::{info, warn};
+use uuid::Uuid;
 
 const MAX_WASM_BYTES: usize = 8 * 1024 * 1024;
-const MAX_PLUGIN_UPLOAD_BODY_BYTES: usize = MAX_WASM_BYTES * 3 + 1024 * 1024;
 const MAX_PLUGIN_NAME_BYTES: usize = 128;
 const MAX_PLUGIN_DESCRIPTION_BYTES: usize = 1024;
 
@@ -37,381 +28,256 @@ pub fn router() -> Router<AppState> {
         .route(
             "/",
             get(list_plugins)
-                .post(create_plugin)
-                .layer(DefaultBodyLimit::max(MAX_PLUGIN_UPLOAD_BODY_BYTES)),
+                .post(upload_plugin)
+                .layer(DefaultBodyLimit::max(MAX_WASM_BYTES + 1024 * 1024)),
         )
-        .route("/options", get(list_plugin_options))
         .route("/{id}", delete(delete_plugin))
-        .route(
-            "/{id}/releases",
-            post(publish_release).layer(DefaultBodyLimit::max(MAX_PLUGIN_UPLOAD_BODY_BYTES)),
-        )
-        .route("/{id}/enabled", put(update_plugin_enabled))
-}
-
-#[derive(Debug, Serialize)]
-struct DeletePluginResponse {
-    id: Uuid,
-    name: String,
-    provider: String,
-    deleted_release_count: usize,
-    deleted_artifact_count: usize,
-    unbound_gateway_api_key_count: usize,
+        .route("/{id}/deletion-impact", get(plugin_deletion_impact))
+        .route("/suites", get(list_suites).post(create_suite))
+        .route("/suites/options", get(list_suite_options))
+        .route("/suites/{id}", delete(delete_suite))
+        .route("/suites/{id}/deletion-impact", get(suite_deletion_impact))
+        .route("/suites/{id}/enabled", put(update_suite_enabled))
 }
 
 async fn list_plugins(
     State(state): State<AppState>,
-    auth::AdminUser(owner): auth::AdminUser,
-) -> AdminResult<Json<Vec<PluginReleaseSummary>>> {
-    let tenant_id = owner.tenant_id.clone().ok_or(AppError::Forbidden)?;
+    auth::CurrentUser(owner): auth::CurrentUser,
+) -> AdminResult<Json<Vec<PluginSummary>>> {
+    let scope = management_scope(&owner)?;
     let mut conn = state.db_conn().await?;
-    Ok(Json(plugin::sql::list(&mut conn, tenant_id).await?))
+    Ok(Json(plugin::sql::list_plugins(&mut conn, scope).await?))
 }
 
-async fn list_plugin_options(
+async fn list_suites(
     State(state): State<AppState>,
-    auth::CurrentUser(current_user): auth::CurrentUser,
-) -> AppResult<Json<Vec<PluginReleaseSummary>>> {
-    let tenant_id = current_user.tenant_id.clone().ok_or(AppError::Forbidden)?;
+    auth::CurrentUser(owner): auth::CurrentUser,
+) -> AdminResult<Json<Vec<PluginSuiteSummary>>> {
+    let scope = management_scope(&owner)?;
+    let mut conn = state.db_conn().await?;
+    Ok(Json(plugin::sql::list(&mut conn, scope).await?))
+}
+
+async fn list_suite_options(
+    State(state): State<AppState>,
+    auth::CurrentUser(user): auth::CurrentUser,
+) -> AppResult<Json<Vec<PluginSuiteSummary>>> {
     let mut conn = state.db_conn().await?;
     Ok(Json(
-        plugin::sql::list_enabled_options(&mut conn, tenant_id).await?,
+        plugin::sql::list_enabled_options(
+            &mut conn,
+            Some(user.tenant_id.ok_or(AppError::Forbidden)?),
+        )
+        .await?,
     ))
+}
+
+async fn upload_plugin(
+    State(state): State<AppState>,
+    auth::CurrentUser(owner): auth::CurrentUser,
+    mut multipart: Multipart,
+) -> AdminResult<Json<PluginSummary>> {
+    let tenant_id = management_scope(&owner)?;
+    let mut name = String::new();
+    let mut description = String::new();
+    let mut provider = String::new();
+    let mut slot = String::new();
+    let mut wasm_bytes = Vec::new();
+    let mut seen = HashSet::new();
+    while let Some(field) = multipart.next_field().await.map_err(multipart_error)? {
+        let field_name = field.name().unwrap_or_default().to_owned();
+        if !seen.insert(field_name.clone()) {
+            return Err(AppError::BadRequest {
+                message: format!("重复上传字段: {field_name}"),
+            }
+            .into());
+        }
+        match field_name.as_str() {
+            "name" => name = field.text().await.map_err(multipart_error)?,
+            "description" => description = field.text().await.map_err(multipart_error)?,
+            "provider" => provider = field.text().await.map_err(multipart_error)?,
+            "slot" => slot = field.text().await.map_err(multipart_error)?,
+            "wasm_file" => wasm_bytes = field.bytes().await.map_err(multipart_error)?.to_vec(),
+            _ => {
+                return Err(AppError::BadRequest {
+                    message: format!("不支持的上传字段: {field_name}"),
+                }
+                .into());
+            }
+        }
+    }
+    let name = normalize_text(name, "name", MAX_PLUGIN_NAME_BYTES, false)?;
+    let description = normalize_text(
+        description,
+        "description",
+        MAX_PLUGIN_DESCRIPTION_BYTES,
+        true,
+    )?;
+    let provider = normalize_provider(provider)?;
+    let slot = PluginSlot::parse(&slot).ok_or_else(|| AppError::BadRequest {
+        message: "slot 必须为 request、buffered_response 或 stream_response".to_owned(),
+    })?;
+    if wasm_bytes.is_empty() || wasm_bytes.len() > MAX_WASM_BYTES {
+        return Err(AppError::BadRequest {
+            message: "WASM 文件大小必须为 1 B 到 8 MiB".to_owned(),
+        }
+        .into());
+    }
+    let runtime = state.plugin_runtime().clone();
+    let compile_provider = provider.clone();
+    let (wasm_bytes, component) = tokio::task::spawn_blocking(move || {
+        let component = runtime.compile(&compile_provider, slot, &wasm_bytes)?;
+        Ok::<_, AppError>((wasm_bytes, component))
+    }).await.map_err(|e| AppError::Plugin { message: format!("插件编译任务失败: {e}") })?
+        .map_err(|e| {
+            warn!(admin_user_id = %owner.id, tenant_id = ?tenant_id, %provider, slot = slot.as_str(), error = %e, "拒绝无效 WASM 插件上传");
+            AppError::BadRequest { message: e.to_string() }
+        })?;
+    let wasm_sha256 = hex::encode(Sha256::digest(&wasm_bytes));
+    let mut conn = state.db_conn().await?;
+    let summary = plugin::sql::create_plugin(
+        &mut conn,
+        NewPlugin {
+            tenant_id,
+            provider,
+            slot: slot.as_str().to_owned(),
+            name,
+            description,
+            wasm_sha256: wasm_sha256.clone(),
+            wasm_size: wasm_bytes.len() as i64,
+            wasm_bytes,
+            created_by: owner.id,
+        },
+    )
+    .await?;
+    // 持久化已成功，预热失败只影响下次请求是否需要编译，不把上传误报为失败。
+    if let Err(error) = state
+        .plugin_runtime()
+        .cache_component(summary.id, wasm_sha256, component)
+    {
+        warn!(plugin_id = %summary.id, error = %error, "插件上传成功但编译缓存预热失败");
+    }
+    info!(admin_user_id = %owner.id, plugin_id = %summary.id, "插件管理者 上传插件成功");
+    Ok(Json(summary))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateSuiteRequest {
+    name: String,
+    #[serde(default)]
+    description: String,
+    provider: String,
+    request_plugin_id: Option<Uuid>,
+    buffered_response_plugin_id: Option<Uuid>,
+    stream_response_plugin_id: Option<Uuid>,
+}
+
+async fn create_suite(
+    State(state): State<AppState>,
+    auth::CurrentUser(owner): auth::CurrentUser,
+    Json(payload): Json<CreateSuiteRequest>,
+) -> AdminResult<Json<PluginSuiteSummary>> {
+    let mut conn = state.db_conn().await?;
+    let suite = plugin::sql::create_suite(
+        &mut conn,
+        NewPluginSuite {
+            tenant_id: management_scope(&owner)?,
+            created_by: owner.id,
+            name: normalize_text(payload.name, "name", MAX_PLUGIN_NAME_BYTES, false)?,
+            description: normalize_text(
+                payload.description,
+                "description",
+                MAX_PLUGIN_DESCRIPTION_BYTES,
+                true,
+            )?,
+            provider: normalize_provider(payload.provider)?,
+            request_plugin_id: payload.request_plugin_id,
+            buffered_response_plugin_id: payload.buffered_response_plugin_id,
+            stream_response_plugin_id: payload.stream_response_plugin_id,
+        },
+    )
+    .await?;
+    info!(admin_user_id = %owner.id, plugin_suite_id = %suite.id, "插件管理者 创建固定插件套件成功");
+    Ok(Json(suite))
 }
 
 async fn delete_plugin(
     State(state): State<AppState>,
-    auth::AdminUser(admin): auth::AdminUser,
-    Path(suite_id): Path<Uuid>,
-) -> AdminResult<Json<DeletePluginResponse>> {
-    let tenant_id = admin.tenant_id.clone().ok_or(AppError::Forbidden)?;
+    auth::CurrentUser(owner): auth::CurrentUser,
+    Path(id): Path<Uuid>,
+) -> AdminResult<Json<plugin::sql::DeletePluginResponse>> {
     let mut conn = state.db_conn().await?;
-    let deleted = plugin::sql::delete_suite(&mut conn, tenant_id, suite_id).await?;
-    drop(conn);
-
-    let deleted_artifact_count = deleted.artifact_ids.len();
-    match state
-        .plugin_runtime()
-        .evict_components(&deleted.artifact_ids)
-    {
-        Ok(evicted_component_count) => {
-            info!(
-                admin_user_id = %admin.id,
-                plugin_suite_id = %deleted.suite.id,
-                deleted_artifact_count,
-                evicted_component_count,
-                "Admin 删除插件套件后已清理当前进程的 WASM 编译缓存"
-            );
-        }
-        Err(error) => {
-            // 数据库事实已经提交，全部网关 Key也已解除绑定；缓存中的不可达 Component
-            // 只占用内存，不得把成功删除误报为可重试失败并诱导管理员重复操作。
-            warn!(
-                admin_user_id = %admin.id,
-                plugin_suite_id = %deleted.suite.id,
-                deleted_artifact_count,
-                error = %error,
-                "插件套件已删除，但当前进程清理不可达 WASM 编译缓存失败"
-            );
-        }
-    }
-
-    info!(
-        admin_user_id = %admin.id,
-        plugin_suite_id = %deleted.suite.id,
-        plugin_suite_name = %deleted.suite.name,
-        provider = %deleted.suite.provider,
-        deleted_release_count = deleted.release_count,
-        deleted_artifact_count,
-        unbound_gateway_api_key_count = deleted.unbound_gateway_api_key_count,
-        "Admin 已删除 WASM 插件套件；关联网关 Key保留并回落到 Provider 原生流程"
-    );
-    Ok(Json(DeletePluginResponse {
-        id: deleted.suite.id,
-        name: deleted.suite.name,
-        provider: deleted.suite.provider,
-        deleted_release_count: deleted.release_count,
-        deleted_artifact_count,
-        unbound_gateway_api_key_count: deleted.unbound_gateway_api_key_count,
-    }))
+    let deleted = plugin::sql::delete_plugin(&mut conn, management_scope(&owner)?, id).await?;
+    info!(admin_user_id = %owner.id, plugin_id = %id, "插件管理者 删除插件成功");
+    Ok(Json(deleted))
 }
 
-async fn create_plugin(
+async fn delete_suite(
     State(state): State<AppState>,
-    auth::AdminUser(admin): auth::AdminUser,
-    multipart: Multipart,
-) -> AdminResult<Json<PluginReleaseSummary>> {
-    let upload = read_create_upload(multipart).await?;
-    let compiled = compile_uploads(&state, &upload.provider, upload.artifacts).await?;
-    let manifest_sha256 = plugin::manifest_sha256(compiled.iter().map(|item| &item.upload));
-    let uploads = compiled
-        .iter()
-        .map(|item| clone_upload(&item.upload))
-        .collect::<Vec<_>>();
+    auth::CurrentUser(owner): auth::CurrentUser,
+    Path(id): Path<Uuid>,
+) -> AdminResult<Json<plugin::sql::DeletePluginResponse>> {
     let mut conn = state.db_conn().await?;
-    let tenant_id = admin.tenant_id.clone().ok_or(AppError::Forbidden)?;
-    let summary = plugin::sql::create_and_publish(
-        &mut conn,
-        tenant_id,
-        admin.id,
-        upload.name,
-        upload.description,
-        upload.provider,
-        manifest_sha256,
-        uploads,
-    )
-    .await?;
-    cache_compiled_release(&state, &summary, compiled)?;
-    info!(
-        admin_user_id = %admin.id,
-        plugin_suite_id = %summary.suite_id,
-        plugin_release_id = %summary.id,
-        artifact_count = summary.artifacts.len(),
-        "Admin 已加载并发布 WASM 插件套件"
-    );
-    Ok(Json(summary))
+    let deleted = plugin::sql::delete_suite(&mut conn, management_scope(&owner)?, id).await?;
+    info!(admin_user_id = %owner.id, plugin_suite_id = %id, "插件管理者 删除套件成功");
+    Ok(Json(deleted))
 }
 
-async fn publish_release(
-    State(state): State<AppState>,
-    auth::AdminUser(admin): auth::AdminUser,
-    Path(suite_id): Path<Uuid>,
-    multipart: Multipart,
-) -> AdminResult<Json<PluginReleaseSummary>> {
-    let tenant_id = admin.tenant_id.clone().ok_or(AppError::Forbidden)?;
-    let artifacts = read_artifact_fields(multipart).await?;
-    let mut conn = state.db_conn().await?;
-    let suite = plugin::sql::find_suite(&mut conn, tenant_id.clone(), suite_id)
-        .await?
-        .ok_or_else(|| AppError::BadRequest {
-            message: format!("插件套件不存在: {suite_id}"),
-        })?;
-    drop(conn);
-    let compiled = compile_uploads(&state, &suite.provider, artifacts).await?;
-    let manifest_sha256 = plugin::manifest_sha256(compiled.iter().map(|item| &item.upload));
-    let uploads = compiled
-        .iter()
-        .map(|item| clone_upload(&item.upload))
-        .collect::<Vec<_>>();
-    let mut conn = state.db_conn().await?;
-    let summary = plugin::sql::publish_release(
-        &mut conn,
-        tenant_id,
-        suite_id,
-        admin.id,
-        manifest_sha256,
-        uploads,
-    )
-    .await?;
-    cache_compiled_release(&state, &summary, compiled)?;
-    info!(
-        admin_user_id = %admin.id,
-        plugin_suite_id = %suite_id,
-        plugin_release_id = %summary.id,
-        plugin_version = summary.version,
-        artifact_count = summary.artifacts.len(),
-        "Admin 已发布 WASM 插件套件新版本"
-    );
-    Ok(Json(summary))
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct UpdatePluginEnabledRequest {
+struct UpdateEnabledRequest {
     enabled: bool,
 }
 
-async fn update_plugin_enabled(
+async fn update_suite_enabled(
     State(state): State<AppState>,
-    auth::AdminUser(admin): auth::AdminUser,
-    Path(suite_id): Path<Uuid>,
-    Json(payload): Json<UpdatePluginEnabledRequest>,
-) -> AdminResult<Json<Vec<PluginReleaseSummary>>> {
-    let tenant_id = admin.tenant_id.clone().ok_or(AppError::Forbidden)?;
+    auth::CurrentUser(owner): auth::CurrentUser,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<UpdateEnabledRequest>,
+) -> AdminResult<Json<Vec<PluginSuiteSummary>>> {
+    let tenant_id = management_scope(&owner)?;
     let mut conn = state.db_conn().await?;
-    plugin::sql::set_enabled(&mut conn, tenant_id.clone(), suite_id, payload.enabled).await?;
-    info!(admin_user_id = %admin.id, plugin_suite_id = %suite_id, enabled = payload.enabled, "Admin 已更新 WASM 插件套件状态");
+    plugin::sql::set_enabled(&mut conn, tenant_id.clone(), id, payload.enabled).await?;
+    info!(admin_user_id = %owner.id, plugin_suite_id = %id, enabled = payload.enabled, "插件管理者 更新套件状态");
     Ok(Json(plugin::sql::list(&mut conn, tenant_id).await?))
 }
 
-struct CreateUpload {
-    name: String,
-    description: String,
-    provider: String,
-    artifacts: Vec<PluginArtifactUpload>,
-}
-
-struct CompiledUpload {
-    upload: PluginArtifactUpload,
-    component: Arc<Component>,
-}
-
-async fn read_create_upload(mut multipart: Multipart) -> AppResult<CreateUpload> {
-    let mut name = None;
-    let mut description = String::new();
-    let mut provider = None;
-    let mut files = HashMap::<PluginSlot, Vec<u8>>::new();
-    while let Some(field) = multipart.next_field().await.map_err(multipart_error)? {
-        match field.name() {
-            Some("name") => name = Some(field.text().await.map_err(multipart_error)?),
-            Some("description") => description = field.text().await.map_err(multipart_error)?,
-            Some("provider") => provider = Some(field.text().await.map_err(multipart_error)?),
-            Some(field_name) => {
-                let slot = upload_field_slot(field_name).ok_or_else(|| AppError::BadRequest {
-                    message: format!("不支持的插件套件上传字段: {field_name}"),
-                })?;
-                insert_upload_file(
-                    &mut files,
-                    slot,
-                    field.bytes().await.map_err(multipart_error)?,
-                )?;
-            }
-            None => {}
-        }
-    }
-    let artifacts = uploads_from_files(files)?;
-    Ok(CreateUpload {
-        name: normalize_text(
-            name.unwrap_or_default(),
-            "name",
-            MAX_PLUGIN_NAME_BYTES,
-            false,
-        )?,
-        description: normalize_text(
-            description,
-            "description",
-            MAX_PLUGIN_DESCRIPTION_BYTES,
-            true,
-        )?,
-        provider: normalize_provider(provider.unwrap_or_default())?,
-        artifacts,
-    })
-}
-
-async fn read_artifact_fields(mut multipart: Multipart) -> AppResult<Vec<PluginArtifactUpload>> {
-    let mut files = HashMap::<PluginSlot, Vec<u8>>::new();
-    while let Some(field) = multipart.next_field().await.map_err(multipart_error)? {
-        let Some(field_name) = field.name() else {
-            continue;
-        };
-        let Some(slot) = upload_field_slot(field_name) else {
-            return Err(AppError::BadRequest {
-                message: format!("新版本上传不支持字段: {field_name}"),
-            });
-        };
-        insert_upload_file(
-            &mut files,
-            slot,
-            field.bytes().await.map_err(multipart_error)?,
-        )?;
-    }
-    uploads_from_files(files)
-}
-
-fn upload_field_slot(field: &str) -> Option<PluginSlot> {
-    match field {
-        "request_file" => Some(PluginSlot::Request),
-        "buffered_response_file" => Some(PluginSlot::BufferedResponse),
-        "stream_response_file" => Some(PluginSlot::StreamResponse),
-        _ => None,
+/// 管理权限不等同于资源可见性。平台只能写公共资源，owner 只能写自己租户。
+/// 不扩大通用 AdminUser 的权限，避免平台管理员因此获得其他租户管理接口的写入权。
+fn management_scope(user: &crate::user::User) -> AppResult<Option<String>> {
+    if user.is_platform_admin() {
+        Ok(None)
+    } else if user.is_tenant_owner() {
+        Ok(Some(user.tenant_id.clone().ok_or(AppError::Forbidden)?))
+    } else {
+        warn!(user_id = %user.id, role = %user.role, "非插件管理者访问插件写入或管理列表");
+        Err(AppError::Forbidden)
     }
 }
 
-fn insert_upload_file(
-    files: &mut HashMap<PluginSlot, Vec<u8>>,
-    slot: PluginSlot,
-    bytes: axum::body::Bytes,
-) -> AppResult<()> {
-    if bytes.is_empty() || bytes.len() > MAX_WASM_BYTES {
-        return Err(AppError::BadRequest {
-            message: format!(
-                "{} 插槽 WASM 文件必须为 1..={MAX_WASM_BYTES} 字节",
-                slot.as_str()
-            ),
-        });
-    }
-    if files.insert(slot, bytes.to_vec()).is_some() {
-        return Err(AppError::BadRequest {
-            message: format!("{} 插槽重复上传", slot.as_str()),
-        });
-    }
-    Ok(())
+async fn plugin_deletion_impact(
+    State(state): State<AppState>,
+    auth::CurrentUser(user): auth::CurrentUser,
+    Path(id): Path<Uuid>,
+) -> AdminResult<Json<plugin::sql::DeletionImpact>> {
+    let scope = management_scope(&user)?;
+    let mut conn = state.db_conn().await?;
+    Ok(Json(
+        plugin::sql::deletion_impact(&mut conn, scope, id, false).await?,
+    ))
 }
 
-fn uploads_from_files(
-    mut files: HashMap<PluginSlot, Vec<u8>>,
-) -> AppResult<Vec<PluginArtifactUpload>> {
-    let mut artifacts = Vec::new();
-    for slot in PluginSlot::ALL {
-        if let Some(wasm_bytes) = files.remove(&slot) {
-            artifacts.push(PluginArtifactUpload {
-                slot,
-                wasm_sha256: hex::encode(Sha256::digest(&wasm_bytes)),
-                wasm_bytes,
-            });
-        }
-    }
-    if artifacts.is_empty() {
-        return Err(AppError::BadRequest {
-            message: "插件套件至少需要上传一个 WASM Component".to_owned(),
-        });
-    }
-    Ok(artifacts)
-}
-
-async fn compile_uploads(
-    state: &AppState,
-    provider: &str,
-    artifacts: Vec<PluginArtifactUpload>,
-) -> AppResult<Vec<CompiledUpload>> {
-    let mut tasks = tokio::task::JoinSet::new();
-    for upload in artifacts {
-        let runtime = state.plugin_runtime().clone();
-        let provider = provider.to_owned();
-        tasks.spawn_blocking(move || {
-            let component = runtime.compile(&provider, upload.slot, &upload.wasm_bytes)?;
-            Ok::<_, AppError>(CompiledUpload { upload, component })
-        });
-    }
-    let mut compiled = Vec::new();
-    while let Some(result) = tasks.join_next().await {
-        compiled.push(result.map_err(|source| AppError::BadRequest {
-            message: format!("WASM 编译任务异常结束: {source}"),
-        })??);
-    }
-    compiled.sort_by_key(|item| item.upload.slot.as_str());
-    Ok(compiled)
-}
-
-fn cache_compiled_release(
-    state: &AppState,
-    summary: &PluginReleaseSummary,
-    compiled: Vec<CompiledUpload>,
-) -> AppResult<()> {
-    for item in compiled {
-        let Some(artifact) = summary
-            .artifacts
-            .iter()
-            .find(|artifact| artifact.slot == item.upload.slot)
-        else {
-            warn!(plugin_release_id = %summary.id, plugin_slot = item.upload.slot.as_str(), "已发布套件没有返回对应 artifact，跳过预热缓存");
-            continue;
-        };
-        state.plugin_runtime().cache_component(
-            artifact.id,
-            artifact.wasm_sha256.clone(),
-            item.component,
-        )?;
-    }
-    Ok(())
-}
-
-fn clone_upload(upload: &PluginArtifactUpload) -> PluginArtifactUpload {
-    PluginArtifactUpload {
-        slot: upload.slot,
-        wasm_sha256: upload.wasm_sha256.clone(),
-        wasm_bytes: upload.wasm_bytes.clone(),
-    }
+async fn suite_deletion_impact(
+    State(state): State<AppState>,
+    auth::CurrentUser(user): auth::CurrentUser,
+    Path(id): Path<Uuid>,
+) -> AdminResult<Json<plugin::sql::DeletionImpact>> {
+    let scope = management_scope(&user)?;
+    let mut conn = state.db_conn().await?;
+    Ok(Json(
+        plugin::sql::deletion_impact(&mut conn, scope, id, true).await?,
+    ))
 }
 
 fn normalize_provider(provider: String) -> AppResult<String> {
@@ -449,6 +315,6 @@ fn normalize_text(
 
 fn multipart_error(source: axum::extract::multipart::MultipartError) -> AppError {
     AppError::BadRequest {
-        message: format!("读取插件套件 multipart 上传失败: {source}"),
+        message: format!("读取插件 multipart 上传失败: {source}"),
     }
 }

@@ -1,463 +1,243 @@
-use std::collections::HashMap;
+//! 公共资源使用 NULL 归属。读取可见范围为“公共 + 当前租户”，写入只匹配精确归属。
+//! 传入 None 表示平台公共作用域，绝不表示忽略租户过滤。跨租户删除只从已授权插件的依赖展开。
+use std::collections::{HashMap, HashSet};
 
 use diesel::prelude::*;
 use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
+use serde::Serialize;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use super::model::{
+    NewPlugin, NewPluginSuite, PluginSuiteSummary, PluginSummary,
+    schema::{plugin_suites, plugins},
+};
 use crate::{
     err::{AppError, AppResult},
     gateway_key::schema::api_keys,
 };
 
-use super::{
-    ABI_VERSION,
-    model::{
-        NewPluginSuite, NewPluginSuiteArtifact, NewPluginSuiteRelease, PluginArtifact,
-        PluginArtifactBinding, PluginArtifactSummary, PluginArtifactUpload, PluginBinding,
-        PluginReleaseSummary, PluginSlot, PluginSuite,
-        schema::{plugin_suite_artifacts, plugin_suite_releases, plugin_suites},
-    },
-};
-
-type ReleaseRow = (
-    Uuid,
-    Uuid,
-    String,
-    String,
-    String,
-    String,
-    bool,
-    i64,
-    String,
-    chrono::DateTime<chrono::Utc>,
-);
-
-type ArtifactSummaryRow = (Uuid, Uuid, String, i32, String, i64);
-
-pub struct DeletedPluginSuite {
-    pub suite: PluginSuite,
-    pub release_count: usize,
-    pub artifact_ids: Vec<Uuid>,
-    pub unbound_gateway_api_key_count: usize,
-}
-
-macro_rules! release_select {
-    () => {
-        (
-            plugin_suite_releases::id,
-            plugin_suite_releases::suite_id,
-            plugin_suites::tenant_id,
-            plugin_suites::name,
-            plugin_suites::description,
-            plugin_suites::provider,
-            plugin_suites::enabled,
-            plugin_suite_releases::version,
-            plugin_suite_releases::manifest_sha256,
-            plugin_suite_releases::published_at,
-        )
-    };
-}
-
-macro_rules! suite_select {
-    () => {
-        (
-            plugin_suites::id,
-            plugin_suites::tenant_id,
-            plugin_suites::name,
-            plugin_suites::description,
-            plugin_suites::provider,
-            plugin_suites::enabled,
-        )
-    };
-}
-
-pub async fn create_and_publish(
+pub async fn create_plugin(
     conn: &mut AsyncPgConnection,
-    tenant_id: String,
-    created_by: Uuid,
-    name: String,
-    description: String,
-    provider: String,
-    manifest_sha256: String,
-    artifacts: Vec<PluginArtifactUpload>,
-) -> AppResult<PluginReleaseSummary> {
-    ensure_artifact_set(&artifacts)?;
-    let row = conn
-        .transaction::<ReleaseRow, AppError, _>(async |conn| {
-            let suite = diesel::insert_into(plugin_suites::table)
-                .values(NewPluginSuite {
-                    tenant_id,
-                    name,
-                    description,
-                    provider,
-                    created_by,
-                })
-                .returning(suite_select!())
-                .get_result::<PluginSuite>(&mut *conn)
-                .await
-                .map_err(map_suite_write_error)?;
-            insert_release(
-                &mut *conn,
-                &suite,
-                created_by,
-                1,
-                manifest_sha256,
-                artifacts,
-            )
-            .await
-        })
-        .await?;
-    let summary = load_summary_from_row(conn, row).await?;
-    log_published(&summary, "WASM 插件套件首个版本已持久化并发布");
-    Ok(summary)
-}
-
-pub async fn publish_release(
-    conn: &mut AsyncPgConnection,
-    tenant_id: String,
-    suite_id: Uuid,
-    created_by: Uuid,
-    manifest_sha256: String,
-    artifacts: Vec<PluginArtifactUpload>,
-) -> AppResult<PluginReleaseSummary> {
-    ensure_artifact_set(&artifacts)?;
-    let row = conn
-        .transaction::<ReleaseRow, AppError, _>(async |conn| {
-            let suite = plugin_suites::table
-                .filter(plugin_suites::id.eq(suite_id))
-                .filter(plugin_suites::tenant_id.eq(tenant_id.clone()))
-                .for_update()
-                .select(suite_select!())
-                .first::<PluginSuite>(&mut *conn)
-                .await
-                .optional()?
-                .ok_or_else(|| AppError::BadRequest {
-                    message: format!("插件套件不存在: {suite_id}"),
-                })?;
-            let current_version = plugin_suite_releases::table
-                .filter(plugin_suite_releases::suite_id.eq(suite_id))
-                .select(diesel::dsl::max(plugin_suite_releases::version))
-                .first::<Option<i64>>(&mut *conn)
-                .await?
-                .unwrap_or(0);
-            insert_release(
-                &mut *conn,
-                &suite,
-                created_by,
-                current_version.saturating_add(1),
-                manifest_sha256,
-                artifacts,
-            )
-            .await
-        })
-        .await?;
-    let summary = load_summary_from_row(conn, row).await?;
-    log_published(&summary, "WASM 插件套件新版本已发布");
-    Ok(summary)
-}
-
-async fn insert_release(
-    conn: &mut AsyncPgConnection,
-    suite: &PluginSuite,
-    created_by: Uuid,
-    version: i64,
-    manifest_sha256: String,
-    artifacts: Vec<PluginArtifactUpload>,
-) -> AppResult<ReleaseRow> {
-    let release = diesel::insert_into(plugin_suite_releases::table)
-        .values(NewPluginSuiteRelease {
-            suite_id: suite.id,
-            version,
-            manifest_sha256,
-            created_by,
-        })
-        .returning((
-            plugin_suite_releases::id,
-            plugin_suite_releases::suite_id,
-            plugin_suite_releases::version,
-            plugin_suite_releases::manifest_sha256,
-            plugin_suite_releases::published_at,
-        ))
-        .get_result::<(Uuid, Uuid, i64, String, chrono::DateTime<chrono::Utc>)>(conn)
+    input: NewPlugin,
+) -> AppResult<PluginSummary> {
+    let plugin = diesel::insert_into(plugins::table)
+        .values(input)
+        .returning(PluginSummary::as_returning())
+        .get_result::<PluginSummary>(conn)
         .await
-        .map_err(map_release_write_error)?;
+        .map_err(map_write_error)?;
+    info!(tenant_id = ?plugin.tenant_id, plugin_id = %plugin.id, provider = %plugin.provider,
+        slot = %plugin.slot, wasm_size = plugin.wasm_size, wasm_sha256 = %plugin.wasm_sha256, "WASM 插件已上传");
+    Ok(plugin)
+}
 
-    let artifact_rows = artifacts
-        .into_iter()
-        .map(|artifact| {
-            let wasm_size =
-                i64::try_from(artifact.wasm_bytes.len()).map_err(|_| AppError::BadRequest {
-                    message: format!("{} 插槽 WASM 文件大小超出支持范围", artifact.slot.as_str()),
-                })?;
-            Ok(NewPluginSuiteArtifact {
-                release_id: release.0,
-                slot: artifact.slot.as_str().to_owned(),
-                abi_version: ABI_VERSION,
-                wasm_sha256: artifact.wasm_sha256,
-                wasm_size,
-                wasm_bytes: artifact.wasm_bytes,
-            })
-        })
-        .collect::<AppResult<Vec<_>>>()?;
-    diesel::insert_into(plugin_suite_artifacts::table)
-        .values(&artifact_rows)
-        .execute(conn)
-        .await
-        .map_err(map_release_write_error)?;
+pub async fn list_plugins(
+    conn: &mut AsyncPgConnection,
+    tenant_id: Option<String>,
+) -> AppResult<Vec<PluginSummary>> {
+    Ok(plugins::table
+        .filter(
+            plugins::tenant_id
+                .is_null()
+                .or(plugins::tenant_id.eq(tenant_id)),
+        )
+        .order((plugins::created_at.desc(), plugins::id.desc()))
+        .select(PluginSummary::as_select())
+        .load(conn)
+        .await?)
+}
 
-    Ok((
-        release.0,
-        release.1,
-        suite.tenant_id.clone(),
-        suite.name.clone(),
-        suite.description.clone(),
-        suite.provider.clone(),
-        suite.enabled,
-        release.2,
-        release.3,
-        release.4,
-    ))
+/// 所有套件写入均先按 UUID 顺序锁定引用插件。删除插件持有同一行锁后才扫描套件，
+/// 因此不会漏掉并发创建的组合；套件创建后没有修改组合的入口。
+pub async fn create_suite(
+    conn: &mut AsyncPgConnection,
+    input: NewPluginSuite,
+) -> AppResult<PluginSuiteSummary> {
+    let suite = conn.transaction::<PluginSuiteSummary, AppError, _>(async |conn| {
+        let slots = [
+            ("request", input.request_plugin_id),
+            ("buffered_response", input.buffered_response_plugin_id),
+            ("stream_response", input.stream_response_plugin_id),
+        ];
+        let ids = slots.iter().filter_map(|(_, id)| *id).collect::<Vec<_>>();
+        if ids.is_empty() {
+            return Err(AppError::BadRequest { message: "套件至少需要选择一个插件".to_owned() });
+        }
+        let selected = plugins::table.filter(plugins::tenant_id.is_null().or(plugins::tenant_id.eq(&input.tenant_id)))
+            .filter(plugins::id.eq_any(&ids)).order(plugins::id.asc()).for_update()
+            .select(PluginSummary::as_select()).load::<PluginSummary>(&mut *conn).await?;
+        for (slot, id) in slots {
+            if let Some(id) = id {
+                if !selected.iter().any(|p| p.id == id && p.slot == slot && p.provider == input.provider) {
+                    warn!(tenant_id = ?input.tenant_id, plugin_id = %id, provider = %input.provider, slot, "套件插件不存在或类型不匹配");
+                    return Err(AppError::BadRequest { message: format!("{slot} 插件不可用或不符合套件归属、Provider 和插槽: {id}") });
+                }
+            }
+        }
+        Ok(diesel::insert_into(plugin_suites::table).values(input)
+            .returning(PluginSuiteSummary::as_returning()).get_result(&mut *conn)
+            .await.map_err(map_write_error)?)
+    }).await?;
+    info!(tenant_id = ?suite.tenant_id, plugin_suite_id = %suite.id, provider = %suite.provider,
+        request_plugin_id = ?suite.request_plugin_id, buffered_response_plugin_id = ?suite.buffered_response_plugin_id,
+        stream_response_plugin_id = ?suite.stream_response_plugin_id, "插件套件已创建，组合固定");
+    Ok(suite)
 }
 
 pub async fn list(
     conn: &mut AsyncPgConnection,
-    tenant_id: String,
-) -> AppResult<Vec<PluginReleaseSummary>> {
-    let rows = plugin_suite_releases::table
-        .inner_join(plugin_suites::table.on(plugin_suites::id.eq(plugin_suite_releases::suite_id)))
-        .filter(plugin_suites::tenant_id.eq(tenant_id.clone()))
-        .order((
-            plugin_suites::created_at.desc(),
-            plugin_suite_releases::version.desc(),
-        ))
-        .select(release_select!())
-        .load::<ReleaseRow>(conn)
-        .await?;
-    attach_artifacts(conn, rows).await
+    tenant_id: Option<String>,
+) -> AppResult<Vec<PluginSuiteSummary>> {
+    Ok(plugin_suites::table
+        .filter(
+            plugin_suites::tenant_id
+                .is_null()
+                .or(plugin_suites::tenant_id.eq(tenant_id)),
+        )
+        .order((plugin_suites::created_at.desc(), plugin_suites::id.desc()))
+        .select(PluginSuiteSummary::as_select())
+        .load(conn)
+        .await?)
 }
 
 pub async fn list_enabled_options(
     conn: &mut AsyncPgConnection,
-    tenant_id: String,
-) -> AppResult<Vec<PluginReleaseSummary>> {
-    let rows = plugin_suite_releases::table
-        .inner_join(plugin_suites::table.on(plugin_suites::id.eq(plugin_suite_releases::suite_id)))
+    tenant_id: Option<String>,
+) -> AppResult<Vec<PluginSuiteSummary>> {
+    Ok(plugin_suites::table
+        .filter(
+            plugin_suites::tenant_id
+                .is_null()
+                .or(plugin_suites::tenant_id.eq(tenant_id)),
+        )
         .filter(plugin_suites::enabled.eq(true))
-        .filter(plugin_suites::tenant_id.eq(tenant_id.clone()))
-        .order((
-            plugin_suites::provider.asc(),
-            plugin_suites::name.asc(),
-            plugin_suite_releases::version.desc(),
-        ))
-        .select(release_select!())
-        .load::<ReleaseRow>(conn)
-        .await?;
-    attach_artifacts(conn, rows).await
-}
-
-pub async fn find_suite(
-    conn: &mut AsyncPgConnection,
-    tenant_id: String,
-    suite_id: Uuid,
-) -> AppResult<Option<PluginSuite>> {
-    plugin_suites::table
-        .filter(plugin_suites::id.eq(suite_id))
-        .filter(plugin_suites::tenant_id.eq(tenant_id.clone()))
-        .select(suite_select!())
-        .first::<PluginSuite>(conn)
-        .await
-        .optional()
-        .map_err(Into::into)
+        .order((plugin_suites::provider.asc(), plugin_suites::name.asc()))
+        .select(PluginSuiteSummary::as_select())
+        .load(conn)
+        .await?)
 }
 
 pub async fn find_summaries_by_ids(
     conn: &mut AsyncPgConnection,
     tenant_id: String,
     ids: &[Uuid],
-) -> AppResult<HashMap<Uuid, PluginReleaseSummary>> {
+) -> AppResult<HashMap<Uuid, PluginSuiteSummary>> {
     if ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let rows = plugin_suite_releases::table
-        .inner_join(plugin_suites::table.on(plugin_suites::id.eq(plugin_suite_releases::suite_id)))
-        .filter(plugin_suite_releases::id.eq_any(ids))
-        .filter(plugin_suites::tenant_id.eq(tenant_id.clone()))
-        .select(release_select!())
-        .load::<ReleaseRow>(conn)
-        .await?;
-    Ok(attach_artifacts(conn, rows)
+    Ok(plugin_suites::table
+        .filter(
+            plugin_suites::tenant_id
+                .is_null()
+                .or(plugin_suites::tenant_id.eq(tenant_id)),
+        )
+        .filter(plugin_suites::id.eq_any(ids))
+        .select(PluginSuiteSummary::as_select())
+        .load::<PluginSuiteSummary>(conn)
         .await?
         .into_iter()
-        .map(|summary| (summary.id, summary))
+        .map(|s| (s.id, s))
         .collect())
 }
 
-pub async fn require_enabled_release_for_provider(
+pub async fn find_enabled_suite(
     conn: &mut AsyncPgConnection,
-    tenant_id: String,
-    release_id: Uuid,
+    tenant_id: &str,
+    suite_id: Uuid,
     provider: &str,
-) -> AppResult<PluginReleaseSummary> {
-    let row = plugin_suite_releases::table
-        .inner_join(plugin_suites::table.on(plugin_suites::id.eq(plugin_suite_releases::suite_id)))
-        .filter(plugin_suite_releases::id.eq(release_id))
-        .filter(plugin_suites::enabled.eq(true))
-        .filter(plugin_suites::tenant_id.eq(tenant_id.clone()))
+) -> AppResult<Option<PluginSuiteSummary>> {
+    Ok(plugin_suites::table
+        .filter(
+            plugin_suites::tenant_id
+                .is_null()
+                .or(plugin_suites::tenant_id.eq(tenant_id)),
+        )
+        .filter(plugin_suites::id.eq(suite_id))
         .filter(plugin_suites::provider.eq(provider))
-        .select(release_select!())
-        .first::<ReleaseRow>(conn)
+        .filter(plugin_suites::enabled.eq(true))
+        .select(PluginSuiteSummary::as_select())
+        .first(conn)
         .await
-        .optional()?;
-    let row = row.ok_or_else(|| AppError::BadRequest {
-        message: format!("插件套件发布版本不存在、已停用或不属于 {provider}: {release_id}"),
-    })?;
-    load_summary_from_row(conn, row).await
+        .optional()?)
 }
 
-/// 为网关 Key绑定写入锁定 release 所属套件，并返回仍启用且 Provider 匹配的版本。
-///
-/// 普通请求鉴权只读插件元数据，不能承担长事务行锁；绑定写入单独使用本入口，统一与
-/// 套件删除保持“套件 -> 网关 Key”的锁序。删除先取得套件锁时，本次绑定会在等待后发现
-/// 套件已经不存在；绑定先取得套件锁时，删除会在其提交后解除刚写入的绑定。
-pub async fn require_enabled_release_for_provider_write(
+/// Key 写入事务锁定目标套件，删除事务也按套件 UUID 顺序取得行锁。
+/// 删除之后不清空 Key 的 suite_id；保留失效引用供鉴权拒绝及 Dashboard 修复。
+pub async fn require_enabled_suite_for_provider_write(
     conn: &mut AsyncPgConnection,
     tenant_id: String,
-    release_id: Uuid,
+    suite_id: Uuid,
     provider: &str,
-) -> AppResult<PluginReleaseSummary> {
-    let suite_id = plugin_suite_releases::table
-        .filter(plugin_suite_releases::id.eq(release_id))
-        .select(plugin_suite_releases::suite_id)
-        .first::<Uuid>(&mut *conn)
+) -> AppResult<PluginSuiteSummary> {
+    plugin_suites::table
+        .filter(
+            plugin_suites::tenant_id
+                .is_null()
+                .or(plugin_suites::tenant_id.eq(tenant_id)),
+        )
+        .filter(plugin_suites::id.eq(suite_id))
+        .filter(plugin_suites::provider.eq(provider))
+        .filter(plugin_suites::enabled.eq(true))
+        .for_update()
+        .select(PluginSuiteSummary::as_select())
+        .first(conn)
         .await
         .optional()?
         .ok_or_else(|| AppError::BadRequest {
-            message: format!("插件套件发布版本不存在、已停用或不属于 {provider}: {release_id}"),
-        })?;
-    let suite_exists = plugin_suites::table
-        .filter(plugin_suites::id.eq(suite_id))
-        .filter(plugin_suites::tenant_id.eq(tenant_id.clone()))
-        .filter(plugin_suites::enabled.eq(true))
-        .filter(plugin_suites::provider.eq(provider))
-        .for_update()
-        .select(plugin_suites::id)
-        .first::<Uuid>(&mut *conn)
-        .await
-        .optional()?
-        .is_some();
-    if !suite_exists {
-        return Err(AppError::BadRequest {
-            message: format!("插件套件发布版本不存在、已停用或不属于 {provider}: {release_id}"),
-        });
-    }
-    require_enabled_release_for_provider(&mut *conn, tenant_id, release_id, provider).await
+            message: format!("插件套件不存在、已停用或不属于 {provider}: {suite_id}"),
+        })
 }
 
-pub async fn load_binding(
+pub async fn load_plugin_metadata(
     conn: &mut AsyncPgConnection,
-    tenant_id: String,
-    release_id: Uuid,
-    provider: &str,
-) -> AppResult<PluginBinding> {
-    // 网关热路径只需要不可变 release 与 artifact 元数据，不读取 WASM BYTEA。这里把原来
-    // 的 release/suite 查询和 artifact 元数据查询合并成一次 JOIN；每个 release 最多三个
-    // artifact，重复少量 release 列比额外一次数据库往返更便宜。
-    let rows = plugin_suite_releases::table
-        .inner_join(plugin_suites::table.on(plugin_suites::id.eq(plugin_suite_releases::suite_id)))
-        .inner_join(
-            plugin_suite_artifacts::table
-                .on(plugin_suite_artifacts::release_id.eq(plugin_suite_releases::id)),
+    tenant_id: Option<&str>,
+    ids: &[Uuid],
+) -> AppResult<Vec<PluginSummary>> {
+    Ok(plugins::table
+        .filter(
+            plugins::tenant_id
+                .is_null()
+                .or(plugins::tenant_id.eq(tenant_id)),
         )
-        .filter(plugin_suite_releases::id.eq(release_id))
-        .filter(plugin_suites::enabled.eq(true))
-        .filter(plugin_suites::tenant_id.eq(tenant_id.clone()))
-        .filter(plugin_suites::provider.eq(provider))
-        .order(plugin_suite_artifacts::slot.asc())
-        .select((
-            release_select!(),
-            (
-                plugin_suite_artifacts::id,
-                plugin_suite_artifacts::release_id,
-                plugin_suite_artifacts::slot,
-                plugin_suite_artifacts::abi_version,
-                plugin_suite_artifacts::wasm_sha256,
-                plugin_suite_artifacts::wasm_size,
-            ),
-        ))
-        .load::<(ReleaseRow, ArtifactSummaryRow)>(conn)
-        .await?;
-    let mut rows = rows.into_iter();
-    let Some((release, first_artifact)) = rows.next() else {
-        return Err(AppError::BadRequest {
-            message: format!(
-                "插件套件发布版本不存在、已停用、不属于 {provider} 或缺少 artifact: {release_id}"
-            ),
-        });
-    };
-    let artifacts = std::iter::once(first_artifact)
-        .chain(rows.map(|(_, artifact)| artifact))
-        .map(artifact_summary_from_row)
-        .collect::<AppResult<Vec<_>>>()?;
-    let summary = summary_from_parts(release, artifacts);
-    binding_from_summary(summary)
+        .filter(plugins::id.eq_any(ids))
+        .select(PluginSummary::as_select())
+        .load(conn)
+        .await?)
 }
 
-pub async fn load_artifact(
+/// 只能在准备请求的同一个数据库快照内调用；冷缓存字节必须在删除可见性变化前取得。
+pub async fn load_wasm(
     conn: &mut AsyncPgConnection,
-    suite_binding: &PluginBinding,
-    artifact_id: Uuid,
-) -> AppResult<PluginArtifact> {
-    let artifact_binding = suite_binding
-        .artifacts
-        .iter()
-        .find(|artifact| artifact.id == artifact_id)
-        .cloned()
-        .ok_or_else(|| AppError::Plugin {
-            message: format!("artifact 不属于鉴权套件快照: {artifact_id}"),
-        })?;
-    let row = plugin_suite_artifacts::table
-        .inner_join(
-            plugin_suite_releases::table
-                .on(plugin_suite_releases::id.eq(plugin_suite_artifacts::release_id)),
+    tenant_id: Option<&str>,
+    id: Uuid,
+) -> AppResult<Vec<u8>> {
+    plugins::table
+        .filter(
+            plugins::tenant_id
+                .is_null()
+                .or(plugins::tenant_id.eq(tenant_id)),
         )
-        .inner_join(plugin_suites::table.on(plugin_suites::id.eq(plugin_suite_releases::suite_id)))
-        .filter(plugin_suite_artifacts::id.eq(artifact_id))
-        .filter(plugin_suite_artifacts::release_id.eq(suite_binding.release_id))
-        .filter(plugin_suites::enabled.eq(true))
-        .filter(plugin_suites::tenant_id.eq(&suite_binding.tenant_id))
-        .select((
-            plugin_suite_artifacts::wasm_sha256,
-            plugin_suite_artifacts::wasm_bytes,
-        ))
-        .first::<(String, Vec<u8>)>(conn)
+        .filter(plugins::id.eq(id))
+        .select(plugins::wasm_bytes)
+        .first(conn)
         .await
         .optional()?
         .ok_or_else(|| AppError::Plugin {
-            message: format!("插件 artifact 不存在、套件已停用或绑定已失效: {artifact_id}"),
-        })?;
-    if row.0 != artifact_binding.wasm_sha256 {
-        return Err(AppError::Plugin {
-            message: format!("插件 artifact 摘要与鉴权快照不一致: {artifact_id}"),
-        });
-    }
-    Ok(PluginArtifact {
-        binding: artifact_binding,
-        suite_binding: suite_binding.clone(),
-        wasm_bytes: row.1,
-    })
+            message: format!("插件文件不存在: {id}"),
+        })
 }
 
 pub async fn set_enabled(
     conn: &mut AsyncPgConnection,
-    tenant_id: String,
+    tenant_id: Option<String>,
     suite_id: Uuid,
     enabled: bool,
 ) -> AppResult<()> {
     let changed = diesel::update(
         plugin_suites::table
-            .filter(plugin_suites::id.eq(suite_id))
-            .filter(plugin_suites::tenant_id.eq(tenant_id.clone())),
+            .filter(plugin_suites::tenant_id.is_not_distinct_from(tenant_id.as_deref()))
+            .filter(plugin_suites::id.eq(suite_id)),
     )
     .set((
         plugin_suites::enabled.eq(enabled),
@@ -470,334 +250,208 @@ pub async fn set_enabled(
             message: format!("插件套件不存在: {suite_id}"),
         });
     }
-    info!(plugin_suite_id = %suite_id, enabled, "WASM 插件套件启停状态已更新");
+    info!(tenant_id = ?tenant_id, plugin_suite_id = %suite_id, enabled, "插件套件状态已更新");
     Ok(())
 }
 
-/// 永久删除插件套件的全部 release 和 artifact，并解除所有网关 Key绑定。
-///
-/// 项目不使用数据库外键，因此必须显式按依赖顺序清理。网关 Key 本身及其模型白名单、
-/// 分组归属和启用状态全部保留，只把 `plugin_release_id` 设为空并推进更新时间；后续请求
-/// 自动回落到 Provider 原生流程。
-pub async fn delete_suite(
+/// 删除预览和实际删除共用统计。包含引用公共插件的租户私有套件，以及绑定公共套件的租户。
+#[derive(Serialize)]
+pub struct DeletionImpact {
+    pub suite_count: usize,
+    pub affected_tenant_count: usize,
+    pub affected_gateway_api_key_count: i64,
+}
+
+#[derive(Serialize)]
+pub struct DeletePluginResponse {
+    pub id: Uuid,
+    pub deleted_suite_count: usize,
+    pub affected_tenant_count: usize,
+    pub affected_gateway_api_key_count: i64,
+}
+
+async fn impact_for_suites(
     conn: &mut AsyncPgConnection,
-    tenant_id: String,
-    suite_id: Uuid,
-) -> AppResult<DeletedPluginSuite> {
+    suites: &[(Uuid, Option<String>)],
+) -> AppResult<DeletionImpact> {
+    let ids = suites.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+    let keys_by_tenant = api_keys::table
+        .filter(api_keys::plugin_suite_id.eq_any(&ids))
+        .group_by(api_keys::tenant_id)
+        .select((api_keys::tenant_id, diesel::dsl::count_star()))
+        .load::<(String, i64)>(conn)
+        .await?;
+    let mut tenants = suites
+        .iter()
+        .filter_map(|(_, tenant)| tenant.clone())
+        .collect::<HashSet<_>>();
+    let mut key_count = 0;
+    for (tenant, count) in keys_by_tenant {
+        tenants.insert(tenant);
+        key_count += count;
+    }
+    Ok(DeletionImpact {
+        suite_count: suites.len(),
+        affected_tenant_count: tenants.len(),
+        affected_gateway_api_key_count: key_count,
+    })
+}
+
+/// 预览只向资源的管理者开放。只读快照保证三个计数来自同一时点，实际删除时重新统计。
+pub async fn deletion_impact(
+    conn: &mut AsyncPgConnection,
+    tenant_id: Option<String>,
+    id: Uuid,
+    is_suite: bool,
+) -> AppResult<DeletionImpact> {
+    conn.build_transaction()
+        .repeatable_read()
+        .read_only()
+        .run::<_, AppError, _>(async |conn| {
+            let suites = if is_suite {
+                let suite = plugin_suites::table
+                    .filter(plugin_suites::tenant_id.is_not_distinct_from(tenant_id.as_deref()))
+                    .filter(plugin_suites::id.eq(id))
+                    .select((plugin_suites::id, plugin_suites::tenant_id))
+                    .first::<(Uuid, Option<String>)>(conn)
+                    .await
+                    .optional()?
+                    .ok_or_else(resource_unavailable)?;
+                vec![suite]
+            } else {
+                plugins::table
+                    .filter(plugins::tenant_id.is_not_distinct_from(tenant_id.as_deref()))
+                    .filter(plugins::id.eq(id))
+                    .select(plugins::id)
+                    .first::<Uuid>(conn)
+                    .await
+                    .optional()?
+                    .ok_or_else(resource_unavailable)?;
+                // 授权发生在插件本身，依赖扫描必须跨租户，不能复用列表的可见范围。
+                plugin_suites::table
+                    .filter(
+                        plugin_suites::request_plugin_id
+                            .eq(id)
+                            .or(plugin_suites::buffered_response_plugin_id.eq(id))
+                            .or(plugin_suites::stream_response_plugin_id.eq(id)),
+                    )
+                    .select((plugin_suites::id, plugin_suites::tenant_id))
+                    .load(conn)
+                    .await?
+            };
+            impact_for_suites(conn, &suites).await
+        })
+        .await
+}
+
+pub async fn delete_plugin(
+    conn: &mut AsyncPgConnection,
+    tenant_id: Option<String>,
+    id: Uuid,
+) -> AppResult<DeletePluginResponse> {
     let deleted = conn
-        .transaction::<DeletedPluginSuite, AppError, _>(async |conn| {
-            let suite = plugin_suites::table
-                .filter(plugin_suites::id.eq(suite_id))
-                .filter(plugin_suites::tenant_id.eq(tenant_id.clone()))
+        .transaction::<DeletePluginResponse, AppError, _>(async |conn| {
+            plugins::table
+                .filter(plugins::tenant_id.is_not_distinct_from(tenant_id.as_deref()))
+                .filter(plugins::id.eq(id))
                 .for_update()
-                .select(suite_select!())
-                .first::<PluginSuite>(&mut *conn)
+                .select(plugins::id)
+                .first::<Uuid>(&mut *conn)
                 .await
                 .optional()?
-                .ok_or_else(|| AppError::BadRequest {
-                    message: format!("插件套件不存在: {suite_id}"),
-                })?;
-            let release_ids = plugin_suite_releases::table
-                .filter(plugin_suite_releases::suite_id.eq(suite.id))
-                .order(plugin_suite_releases::version.asc())
-                .select(plugin_suite_releases::id)
-                .load::<Uuid>(&mut *conn)
+                .ok_or_else(resource_unavailable)?;
+            // 与创建组合共用插件行锁，锁定后再跨租户扫描依赖，避免遗漏并发创建的私有套件。
+            let suites = plugin_suites::table
+                .filter(
+                    plugin_suites::request_plugin_id
+                        .eq(id)
+                        .or(plugin_suites::buffered_response_plugin_id.eq(id))
+                        .or(plugin_suites::stream_response_plugin_id.eq(id)),
+                )
+                .order(plugin_suites::id.asc())
+                .for_update()
+                .select((plugin_suites::id, plugin_suites::tenant_id))
+                .load::<(Uuid, Option<String>)>(&mut *conn)
                 .await?;
-            let artifact_ids = if release_ids.is_empty() {
-                Vec::new()
-            } else {
-                plugin_suite_artifacts::table
-                    .filter(plugin_suite_artifacts::release_id.eq_any(&release_ids))
-                    .select(plugin_suite_artifacts::id)
-                    .load::<Uuid>(&mut *conn)
-                    .await?
-            };
-
-            // 分组删除也会批量锁定网关 Key。两条删除链路都先按稳定 UUID 顺序取得全部
-            // 行锁，再执行 DELETE/UPDATE，避免不同索引扫描顺序造成交叉持锁和死锁。
-            let bound_gateway_api_key_ids = if release_ids.is_empty() {
-                Vec::new()
-            } else {
-                api_keys::table
-                    .filter(api_keys::plugin_release_id.eq_any(&release_ids))
-                    .order(api_keys::id.asc())
-                    .for_update()
-                    .select(api_keys::id)
-                    .load::<Uuid>(&mut *conn)
-                    .await?
-            };
-            let unbound_gateway_api_key_count = if bound_gateway_api_key_ids.is_empty() {
-                0
-            } else {
-                diesel::update(
-                    api_keys::table.filter(api_keys::id.eq_any(&bound_gateway_api_key_ids)),
-                )
-                .set((
-                    api_keys::plugin_release_id.eq(None::<Uuid>),
-                    api_keys::updated_at.eq(diesel::dsl::now),
-                ))
-                .execute(&mut *conn)
-                .await?
-            };
-            if unbound_gateway_api_key_count != bound_gateway_api_key_ids.len() {
-                return Err(AppError::DbQuery {
-                    message: format!(
-                        "删除插件套件时网关 Key 数量发生并发变化: suite_id={}, expected={}, actual={unbound_gateway_api_key_count}",
-                        suite.id,
-                        bound_gateway_api_key_ids.len(),
-                    ),
-                });
-            }
-            let deleted_artifact_count = if release_ids.is_empty() {
-                0
-            } else {
-                diesel::delete(
-                    plugin_suite_artifacts::table
-                        .filter(plugin_suite_artifacts::release_id.eq_any(&release_ids)),
-                )
-                .execute(&mut *conn)
-                .await?
-            };
-            if deleted_artifact_count != artifact_ids.len() {
-                return Err(AppError::DbQuery {
-                    message: format!(
-                        "删除插件套件时 artifact 数量发生并发变化: suite_id={}, expected={}, actual={deleted_artifact_count}",
-                        suite.id,
-                        artifact_ids.len(),
-                    ),
-                });
-            }
-            let deleted_release_count = diesel::delete(
-                plugin_suite_releases::table
-                    .filter(plugin_suite_releases::suite_id.eq(suite.id)),
+            let impact = impact_for_suites(&mut *conn, &suites).await?;
+            let ids = suites.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+            let deleted_suite_count =
+                diesel::delete(plugin_suites::table.filter(plugin_suites::id.eq_any(ids)))
+                    .execute(&mut *conn)
+                    .await?;
+            diesel::delete(
+                plugins::table
+                    .filter(plugins::tenant_id.is_not_distinct_from(tenant_id.as_deref()))
+                    .filter(plugins::id.eq(id)),
             )
             .execute(&mut *conn)
             .await?;
-            if deleted_release_count != release_ids.len() {
-                return Err(AppError::DbQuery {
-                    message: format!(
-                        "删除插件套件时 release 数量发生并发变化: suite_id={}, expected={}, actual={deleted_release_count}",
-                        suite.id,
-                        release_ids.len(),
-                    ),
-                });
-            }
-            let deleted_suite_count =
-                diesel::delete(plugin_suites::table.filter(plugin_suites::id.eq(suite.id)))
-                    .execute(&mut *conn)
-                    .await?;
-            if deleted_suite_count != 1 {
-                return Err(AppError::DbQuery {
-                    message: format!("删除插件套件主记录失败: {}", suite.id),
-                });
-            }
-
-            Ok(DeletedPluginSuite {
-                suite,
-                release_count: release_ids.len(),
-                artifact_ids,
-                unbound_gateway_api_key_count,
+            Ok(DeletePluginResponse {
+                id,
+                deleted_suite_count,
+                affected_tenant_count: impact.affected_tenant_count,
+                affected_gateway_api_key_count: impact.affected_gateway_api_key_count,
             })
         })
         .await?;
-
-    info!(
-        plugin_suite_id = %deleted.suite.id,
-        plugin_suite_name = %deleted.suite.name,
-        provider = %deleted.suite.provider,
-        release_count = deleted.release_count,
-        artifact_count = deleted.artifact_ids.len(),
-        unbound_gateway_api_key_count = deleted.unbound_gateway_api_key_count,
-        "WASM 插件套件已永久删除，关联网关 Key已解除插件绑定"
-    );
+    info!(tenant_id = ?tenant_id, plugin_id = %id, deleted_suite_count = deleted.deleted_suite_count,
+        affected_tenant_count = deleted.affected_tenant_count, affected_gateway_api_key_count = deleted.affected_gateway_api_key_count,
+        "插件及全部引用套件已删除，跨租户 Key 保留失效引用，编译缓存保留");
     Ok(deleted)
 }
 
-fn ensure_artifact_set(artifacts: &[PluginArtifactUpload]) -> AppResult<()> {
-    if artifacts.is_empty() {
-        return Err(AppError::BadRequest {
-            message: "插件套件至少需要上传一个 WASM Component".to_owned(),
-        });
-    }
-    for slot in PluginSlot::ALL {
-        if artifacts
-            .iter()
-            .filter(|artifact| artifact.slot == slot)
-            .count()
-            > 1
-        {
-            return Err(AppError::BadRequest {
-                message: format!("插件套件 {} 插槽重复", slot.as_str()),
-            });
-        }
-    }
-    Ok(())
-}
-
-async fn attach_artifacts(
+pub async fn delete_suite(
     conn: &mut AsyncPgConnection,
-    rows: Vec<ReleaseRow>,
-) -> AppResult<Vec<PluginReleaseSummary>> {
-    let release_ids = rows.iter().map(|row| row.0).collect::<Vec<_>>();
-    let artifact_rows = if release_ids.is_empty() {
-        Vec::new()
-    } else {
-        plugin_suite_artifacts::table
-            .filter(plugin_suite_artifacts::release_id.eq_any(&release_ids))
-            .order((
-                plugin_suite_artifacts::release_id.asc(),
-                plugin_suite_artifacts::slot.asc(),
-            ))
-            .select((
-                plugin_suite_artifacts::id,
-                plugin_suite_artifacts::release_id,
-                plugin_suite_artifacts::slot,
-                plugin_suite_artifacts::abi_version,
-                plugin_suite_artifacts::wasm_sha256,
-                plugin_suite_artifacts::wasm_size,
-            ))
-            .load::<ArtifactSummaryRow>(conn)
-            .await?
-    };
-    let mut artifacts_by_release = HashMap::<Uuid, Vec<PluginArtifactSummary>>::new();
-    for row in artifact_rows {
-        let release_id = row.1;
-        artifacts_by_release
-            .entry(release_id)
-            .or_default()
-            .push(artifact_summary_from_row(row)?);
-    }
-    rows.into_iter()
-        .map(|row| {
-            let artifacts = artifacts_by_release.remove(&row.0).unwrap_or_default();
-            if artifacts.is_empty() {
-                return Err(AppError::DbQuery {
-                    message: format!("插件套件 release 缺少 artifact: {}", row.0),
-                });
-            }
-            Ok(summary_from_parts(row, artifacts))
+    tenant_id: Option<String>,
+    id: Uuid,
+) -> AppResult<DeletePluginResponse> {
+    let deleted = conn
+        .transaction::<DeletePluginResponse, AppError, _>(async |conn| {
+            let suite = plugin_suites::table
+                .filter(plugin_suites::tenant_id.is_not_distinct_from(tenant_id.as_deref()))
+                .filter(plugin_suites::id.eq(id))
+                .for_update()
+                .select((plugin_suites::id, plugin_suites::tenant_id))
+                .first::<(Uuid, Option<String>)>(&mut *conn)
+                .await
+                .optional()?
+                .ok_or_else(resource_unavailable)?;
+            let impact = impact_for_suites(&mut *conn, &[suite]).await?;
+            let deleted_suite_count = diesel::delete(
+                plugin_suites::table
+                    .filter(plugin_suites::tenant_id.is_not_distinct_from(tenant_id.as_deref()))
+                    .filter(plugin_suites::id.eq(id)),
+            )
+            .execute(&mut *conn)
+            .await?;
+            Ok(DeletePluginResponse {
+                id,
+                deleted_suite_count,
+                affected_tenant_count: impact.affected_tenant_count,
+                affected_gateway_api_key_count: impact.affected_gateway_api_key_count,
+            })
         })
-        .collect()
+        .await?;
+    info!(tenant_id = ?tenant_id, plugin_suite_id = %id, affected_tenant_count = deleted.affected_tenant_count,
+        affected_gateway_api_key_count = deleted.affected_gateway_api_key_count,
+        "套件已删除，独立插件及所有租户 Key 的套件引用保留");
+    Ok(deleted)
 }
 
-fn artifact_summary_from_row(row: ArtifactSummaryRow) -> AppResult<PluginArtifactSummary> {
-    let slot = PluginSlot::parse(&row.2).ok_or_else(|| AppError::DbQuery {
-        message: format!("插件 artifact slot 非法: {}", row.2),
-    })?;
-    if row.3 != ABI_VERSION {
-        return Err(AppError::DbQuery {
-            message: format!("插件 artifact ABI 不受支持: id={}, abi={}", row.0, row.3),
-        });
-    }
-    Ok(PluginArtifactSummary {
-        id: row.0,
-        slot,
-        abi_version: row.3,
-        wasm_sha256: row.4,
-        wasm_size: usize::try_from(row.5).map_err(|_| AppError::DbQuery {
-            message: format!("插件 artifact 大小非法: {}", row.5),
-        })?,
-    })
-}
-
-async fn load_summary_from_row(
-    conn: &mut AsyncPgConnection,
-    row: ReleaseRow,
-) -> AppResult<PluginReleaseSummary> {
-    attach_artifacts(conn, vec![row])
-        .await?
-        .pop()
-        .ok_or_else(|| AppError::DbQuery {
-            message: "插件套件发布查询没有返回结果".to_owned(),
-        })
-}
-
-fn summary_from_parts(
-    row: ReleaseRow,
-    artifacts: Vec<PluginArtifactSummary>,
-) -> PluginReleaseSummary {
-    PluginReleaseSummary {
-        id: row.0,
-        suite_id: row.1,
-        tenant_id: row.2,
-        suite_name: row.3,
-        description: row.4,
-        provider: row.5,
-        suite_enabled: row.6,
-        version: row.7,
-        manifest_sha256: row.8,
-        artifacts,
-        published_at: row.9,
+fn resource_unavailable() -> AppError {
+    AppError::BadRequest {
+        message: "插件或套件不存在，或不属于当前管理范围".to_owned(),
     }
 }
 
-fn binding_from_summary(summary: PluginReleaseSummary) -> AppResult<PluginBinding> {
-    let artifacts = summary
-        .artifacts
-        .into_iter()
-        .map(|artifact| PluginArtifactBinding {
-            id: artifact.id,
-            slot: artifact.slot,
-            abi_version: artifact.abi_version,
-            wasm_sha256: artifact.wasm_sha256,
-        })
-        .collect::<Vec<_>>();
-    if artifacts.is_empty() {
-        return Err(AppError::Plugin {
-            message: format!("插件套件 release 缺少 artifact: {}", summary.id),
-        });
-    }
-    Ok(PluginBinding {
-        release_id: summary.id,
-        suite_id: summary.suite_id,
-        tenant_id: summary.tenant_id,
-        suite_name: summary.suite_name,
-        provider: summary.provider,
-        version: summary.version,
-        manifest_sha256: summary.manifest_sha256,
-        artifacts,
-    })
-}
-
-fn log_published(summary: &PluginReleaseSummary, message: &'static str) {
-    info!(
-        plugin_suite_id = %summary.suite_id,
-        plugin_release_id = %summary.id,
-        plugin_suite_name = %summary.suite_name,
-        provider = %summary.provider,
-        version = summary.version,
-        manifest_sha256 = %summary.manifest_sha256,
-        artifact_count = summary.artifacts.len(),
-        "{message}"
-    );
-}
-
-fn map_suite_write_error(source: diesel::result::Error) -> AppError {
+fn map_write_error(source: diesel::result::Error) -> AppError {
     if matches!(
         source,
         diesel::result::Error::DatabaseError(diesel::result::DatabaseErrorKind::UniqueViolation, _)
     ) {
-        warn!("同一 Provider 下插件套件名称重复，拒绝创建");
         return AppError::BadRequest {
-            message: "同一 Provider 下插件套件名称已存在".to_owned(),
+            message: "当前归属、Provider 下套件名称或同一插槽下插件名称已存在".to_owned(),
         };
     }
-    AppError::DbQuery {
-        message: source.to_string(),
-    }
-}
-
-fn map_release_write_error(source: diesel::result::Error) -> AppError {
-    if matches!(
-        source,
-        diesel::result::Error::DatabaseError(diesel::result::DatabaseErrorKind::UniqueViolation, _)
-    ) {
-        warn!("插件套件版本、manifest 或 artifact 插槽重复，拒绝发布");
-        return AppError::BadRequest {
-            message: "相同插件套件内容已经发布，不能重复创建版本".to_owned(),
-        };
-    }
-    AppError::DbQuery {
-        message: source.to_string(),
-    }
+    source.into()
 }

@@ -273,7 +273,7 @@ impl PluginRuntime {
         })
     }
 
-    /// 发布和冷加载共用这个严格 ABI 入口。Linker 不注册 WASI、网络、文件或 host callback；
+    /// 上传和冷加载共用这个严格 ABI 入口。Linker 不注册 WASI、网络、文件或 host callback；
     /// feedback/usage 只能作为一次成功调用的返回值交给宿主，插件无法产生半完成副作用。
     pub fn compile(
         &self,
@@ -353,23 +353,6 @@ impl PluginRuntime {
             },
         );
         Ok(())
-    }
-
-    /// 删除插件套件后清理当前进程中已经编译的 artifact。
-    ///
-    /// 正在执行的请求持有独立 `Arc<Component>`，从缓存移除不会中断其收尾；后续请求因
-    /// 网关 Key绑定已经在数据库事务中解除，不会再取得这些 artifact。
-    pub fn evict_components(&self, artifact_ids: &[Uuid]) -> AppResult<usize> {
-        let mut cache = self.inner.compiled.write().map_err(|_| AppError::Plugin {
-            message: "插件编译缓存写锁已损坏".to_owned(),
-        })?;
-        let mut removed = 0;
-        for artifact_id in artifact_ids {
-            if cache.remove(artifact_id).is_some() {
-                removed += 1;
-            }
-        }
-        Ok(removed)
     }
 
     pub fn cached_component(

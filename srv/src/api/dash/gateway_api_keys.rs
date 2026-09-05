@@ -19,7 +19,7 @@ use crate::{
     api::dash::{auth, pagination::ListPageQuery},
     err::{AppError, AppResult},
     gateway_key::{self, GatewayApiKeyWithModels},
-    plugin::{self, model::PluginReleaseSummary},
+    plugin::{self, model::PluginSuiteSummary},
     provider::group::{self, ProviderGroup, ProviderGroupWithModels},
     state::AppState,
     user::{User, group_access},
@@ -35,13 +35,13 @@ struct CreateApiKeyRequest {
     #[serde(default)]
     allowed_models: Vec<String>,
     #[serde(default)]
-    plugin_release_id: Option<Uuid>,
+    plugin_suite_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UpdateApiKeyPluginRequest {
-    plugin_release_id: Option<Uuid>,
+    plugin_suite_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,7 +67,8 @@ struct ApiKeyResponse {
     group: ProviderGroup,
     group_allowed_models: Vec<String>,
     allowed_models: Vec<String>,
-    plugin: Option<PluginReleaseSummary>,
+    plugin_suite_id: Option<Uuid>,
+    plugin: Option<PluginSuiteSummary>,
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
     disabled_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -101,14 +102,14 @@ async fn create_api_key(
         payload.group_id,
         name,
         payload.allowed_models,
-        payload.plugin_release_id,
+        payload.plugin_suite_id,
     )
     .await?;
     let group = load_group(&mut conn, api_key.api_key.group_id).await?;
     let plugin = load_plugin_summary(
         &mut conn,
         api_key.api_key.tenant_id.clone(),
-        api_key.api_key.plugin_release_id,
+        api_key.api_key.plugin_suite_id,
     )
     .await?;
 
@@ -141,12 +142,12 @@ async fn list_api_keys(
     let tenant_id = current_user.tenant_id.clone().ok_or(AppError::Forbidden)?;
     let groups = group::find_by_ids(&mut conn, tenant_id.clone(), &group_ids).await?;
     let group_models = group::load_models_by_group_ids(&mut conn, &group_ids).await?;
-    let plugin_release_ids = api_keys
+    let plugin_suite_ids = api_keys
         .iter()
-        .filter_map(|item| item.api_key.plugin_release_id)
+        .filter_map(|item| item.api_key.plugin_suite_id)
         .collect::<Vec<_>>();
     let plugins =
-        plugin::sql::find_summaries_by_ids(&mut conn, tenant_id, &plugin_release_ids).await?;
+        plugin::sql::find_summaries_by_ids(&mut conn, tenant_id, &plugin_suite_ids).await?;
     let authorized_group_ids = group_access::granted_group_ids(&mut conn, &current_user)
         .await?
         .map(|ids| ids.into_iter().collect::<HashSet<_>>());
@@ -173,13 +174,8 @@ async fn list_api_keys(
                 })?;
             let plugin = api_key
                 .api_key
-                .plugin_release_id
-                .map(|id| {
-                    plugins.get(&id).cloned().ok_or_else(|| AppError::DbQuery {
-                        message: format!("API Key 关联的插件发布版本不存在: {id}"),
-                    })
-                })
-                .transpose()?;
+                .plugin_suite_id
+                .and_then(|id| plugins.get(&id).cloned());
             let group_authorized = authorized_group_ids
                 .as_ref()
                 .is_none_or(|ids| ids.contains(&api_key.api_key.group_id));
@@ -230,7 +226,7 @@ async fn update_api_key_enabled(
     let plugin = load_plugin_summary(
         &mut conn,
         api_key.api_key.tenant_id.clone(),
-        api_key.api_key.plugin_release_id,
+        api_key.api_key.plugin_suite_id,
     )
     .await?;
     info!(api_key_id = %api_key.api_key.id, user_id = %current_user.id, enabled = api_key.api_key.enabled, "管理端已修改 API Key 启用状态");
@@ -254,7 +250,7 @@ async fn update_api_key_models(
     let plugin = load_plugin_summary(
         &mut conn,
         api_key.api_key.tenant_id.clone(),
-        api_key.api_key.plugin_release_id,
+        api_key.api_key.plugin_suite_id,
     )
     .await?;
     info!(api_key_id = %api_key.api_key.id, user_id = %current_user.id, model_count = api_key.allowed_models.len(), "管理端已修改 API Key 模型白名单");
@@ -275,21 +271,21 @@ async fn update_api_key_plugin(
         &mut conn,
         current_user.id,
         id,
-        payload.plugin_release_id,
+        payload.plugin_suite_id,
     )
     .await?;
     let group = load_group(&mut conn, api_key.api_key.group_id).await?;
     let plugin = load_plugin_summary(
         &mut conn,
         api_key.api_key.tenant_id.clone(),
-        api_key.api_key.plugin_release_id,
+        api_key.api_key.plugin_suite_id,
     )
     .await?;
 
     info!(
         api_key_id = %api_key.api_key.id,
         user_id = %current_user.id,
-        plugin_release_id = ?api_key.api_key.plugin_release_id,
+        plugin_suite_id = ?api_key.api_key.plugin_suite_id,
         "管理端已修改 API Key 插件绑定"
     );
 
@@ -323,7 +319,7 @@ impl ApiKeyResponse {
     fn from_parts(
         api_key: GatewayApiKeyWithModels,
         group: ProviderGroupWithModels,
-        plugin: Option<PluginReleaseSummary>,
+        plugin: Option<PluginSuiteSummary>,
         group_authorized: bool,
     ) -> Self {
         let GatewayApiKeyWithModels {
@@ -343,6 +339,7 @@ impl ApiKeyResponse {
             group,
             group_allowed_models,
             allowed_models,
+            plugin_suite_id: api_key.plugin_suite_id,
             plugin,
             created_at: api_key.created_at,
             updated_at: api_key.updated_at,
@@ -367,18 +364,16 @@ async fn require_api_key_group_grant(
 async fn load_plugin_summary(
     conn: &mut diesel_async::AsyncPgConnection,
     tenant_id: String,
-    release_id: Option<Uuid>,
-) -> AppResult<Option<PluginReleaseSummary>> {
-    let Some(release_id) = release_id else {
+    suite_id: Option<Uuid>,
+) -> AppResult<Option<PluginSuiteSummary>> {
+    let Some(suite_id) = suite_id else {
         return Ok(None);
     };
-    plugin::sql::find_summaries_by_ids(conn, tenant_id, &[release_id])
-        .await?
-        .remove(&release_id)
-        .ok_or_else(|| AppError::DbQuery {
-            message: format!("API Key 关联的插件发布版本不存在: {release_id}"),
-        })
-        .map(Some)
+    Ok(
+        plugin::sql::find_summaries_by_ids(conn, tenant_id, &[suite_id])
+            .await?
+            .remove(&suite_id),
+    )
 }
 
 async fn load_group(

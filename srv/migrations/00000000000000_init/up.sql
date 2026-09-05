@@ -134,64 +134,48 @@ CREATE INDEX idx_tenant_user_group_permissions_tenant_user_permission
 CREATE INDEX idx_tenant_user_group_permissions_group
     ON tenant_user_group_permissions (group_id);
 
--- 插件套件按 Provider 挂载。套件主记录只保存稳定身份和全局启停开关；每个不可变发布
--- 版本由 request、buffered_response、stream_response 三种可空 artifact 组成。API Key
--- 固定绑定具体 release，空插槽明确表示回落到 provider 原生流程，不从旧版本隐式继承。
--- 项目统一不使用数据库外键，关联完整性由发布、绑定和请求鉴权路径显式校验。
+-- 插件独立上传，套件只保存固定的三个可空插槽引用。关联完整性由业务事务维护，禁止外键。
+CREATE TABLE plugins (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id TEXT,
+    provider TEXT NOT NULL CHECK (provider IN ('gpt', 'claude')),
+    slot TEXT NOT NULL CHECK (slot IN ('request', 'buffered_response', 'stream_response')),
+    name TEXT NOT NULL CHECK (octet_length(name) BETWEEN 1 AND 128),
+    description TEXT NOT NULL DEFAULT '' CHECK (octet_length(description) <= 1024),
+    wasm_sha256 TEXT NOT NULL CHECK (wasm_sha256 ~ '^[0-9a-f]{64}$'),
+    wasm_size BIGINT NOT NULL CHECK (wasm_size BETWEEN 1 AND 8388608),
+    wasm_bytes BYTEA NOT NULL CHECK (octet_length(wasm_bytes) = wasm_size),
+    created_by UUID NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (tenant_id IS NULL OR tenant_id <> '')
+);
+-- NULL 归属表示平台公共资源；公共和租户名称分别约束，避免 NULL 绕过唯一性。
+CREATE UNIQUE INDEX idx_plugins_public_name ON plugins (provider, slot, name) WHERE tenant_id IS NULL;
+CREATE UNIQUE INDEX idx_plugins_tenant_name ON plugins (tenant_id, provider, slot, name) WHERE tenant_id IS NOT NULL;
+CREATE INDEX idx_plugins_tenant_provider_slot ON plugins (tenant_id, provider, slot);
+
 CREATE TABLE plugin_suites (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    description TEXT NOT NULL DEFAULT '',
-    provider TEXT NOT NULL,
+    tenant_id TEXT,
+    name TEXT NOT NULL CHECK (octet_length(name) BETWEEN 1 AND 128),
+    description TEXT NOT NULL DEFAULT '' CHECK (octet_length(description) <= 1024),
+    provider TEXT NOT NULL CHECK (provider IN ('gpt', 'claude')),
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    request_plugin_id UUID,
+    buffered_response_plugin_id UUID,
+    stream_response_plugin_id UUID,
     created_by UUID NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CHECK (name <> ''),
-    CHECK (octet_length(name) <= 128),
-    CHECK (octet_length(description) <= 1024),
-    CHECK (provider IN ('gpt', 'claude')),
-    UNIQUE (tenant_id, provider, name)
+    CHECK (request_plugin_id IS NOT NULL OR buffered_response_plugin_id IS NOT NULL OR stream_response_plugin_id IS NOT NULL),
+    CHECK (tenant_id IS NULL OR tenant_id <> '')
 );
-
+CREATE UNIQUE INDEX idx_plugin_suites_public_name ON plugin_suites (provider, name) WHERE tenant_id IS NULL;
+CREATE UNIQUE INDEX idx_plugin_suites_tenant_name ON plugin_suites (tenant_id, provider, name) WHERE tenant_id IS NOT NULL;
 CREATE INDEX idx_plugin_suites_tenant_provider_enabled ON plugin_suites (tenant_id, provider, enabled);
-
-CREATE TABLE plugin_suite_releases (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    suite_id UUID NOT NULL,
-    version BIGINT NOT NULL,
-    manifest_sha256 TEXT NOT NULL,
-    created_by UUID NOT NULL,
-    published_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CHECK (version > 0),
-    CHECK (manifest_sha256 ~ '^[0-9a-f]{64}$'),
-    UNIQUE (suite_id, version),
-    UNIQUE (suite_id, manifest_sha256)
-);
-
-CREATE INDEX idx_plugin_suite_releases_suite_published
-    ON plugin_suite_releases (suite_id, version DESC);
-
-CREATE TABLE plugin_suite_artifacts (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    release_id UUID NOT NULL,
-    slot TEXT NOT NULL,
-    abi_version INTEGER NOT NULL DEFAULT 1,
-    wasm_sha256 TEXT NOT NULL,
-    wasm_size BIGINT NOT NULL,
-    wasm_bytes BYTEA NOT NULL,
-    CHECK (slot IN ('request', 'buffered_response', 'stream_response')),
-    CHECK (abi_version = 1),
-    CHECK (wasm_sha256 ~ '^[0-9a-f]{64}$'),
-    CHECK (wasm_size > 0),
-    CHECK (octet_length(wasm_bytes) > 0),
-    CHECK (wasm_size = octet_length(wasm_bytes)),
-    UNIQUE (release_id, slot)
-);
-
-CREATE INDEX idx_plugin_suite_artifacts_release_id
-    ON plugin_suite_artifacts (release_id);
+CREATE INDEX idx_plugin_suites_request_plugin ON plugin_suites (request_plugin_id);
+CREATE INDEX idx_plugin_suites_buffered_plugin ON plugin_suites (buffered_response_plugin_id);
+CREATE INDEX idx_plugin_suites_stream_plugin ON plugin_suites (stream_response_plugin_id);
 
 CREATE TABLE api_keys (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -200,7 +184,7 @@ CREATE TABLE api_keys (
     group_id UUID NOT NULL,
     name TEXT NOT NULL,
     api_key TEXT NOT NULL UNIQUE,
-    plugin_release_id UUID,
+    plugin_suite_id UUID,
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -212,7 +196,7 @@ CREATE INDEX idx_api_keys_user_id ON api_keys (user_id);
 CREATE INDEX idx_api_keys_tenant_id ON api_keys (tenant_id);
 CREATE INDEX idx_api_keys_group_id ON api_keys (group_id);
 CREATE INDEX idx_api_keys_enabled ON api_keys (enabled);
-CREATE INDEX idx_api_keys_plugin_release_id ON api_keys (plugin_release_id);
+CREATE INDEX idx_api_keys_plugin_suite_id ON api_keys (plugin_suite_id);
 CREATE INDEX idx_api_keys_user_created_at_id ON api_keys (user_id, created_at DESC, id DESC);
 CREATE UNIQUE INDEX idx_api_keys_user_name ON api_keys (user_id, name);
 

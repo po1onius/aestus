@@ -77,7 +77,7 @@ where
         provider = P::provider_name(),
         provider_group_id = %group_id,
         has_sticky_key = sticky_key.is_some(),
-        plugin_release_id = ?plugin_binding.as_ref().map(|binding| binding.release_id),
+        plugin_suite_id = ?plugin_binding.as_ref().map(|binding| binding.suite_id),
         "provider 请求进入通用调度与重试流程"
     );
 
@@ -146,7 +146,7 @@ where
                     provider = P::provider_name(),
                     resource_type = allocation.resource_type(),
                     resource_id = %allocation.resource.id,
-                    plugin_release_id = %binding.release_id,
+                    plugin_suite_id = %binding.suite_id,
                     attempt_number,
                     "官方 API Key attempt 跳过全部插件插槽，使用 Provider 原生请求与响应流程"
                 );
@@ -177,7 +177,7 @@ where
                         provider = P::provider_name(),
                         resource_type = allocation.resource_type(),
                         resource_id = %allocation.resource.id,
-                        plugin_release_id = %binding.release_id,
+                        plugin_suite_id = %binding.suite_id,
                         attempt_number,
                         error = %error,
                         "插件构造上游请求失败，本次请求不进入网络发送且不提交资源回执"
@@ -546,8 +546,6 @@ async fn prepare_plugin_upstream_request<P: ProviderProtocol>(
         resource_type = allocation.resource_type(),
         resource_id = %allocation.resource.id,
         plugin_suite_id = %binding.suite_id,
-        plugin_release_id = %binding.release_id,
-        plugin_version = binding.version,
         upstream_url = %url,
         method = %method,
         upstream_header_count = output.headers.len(),
@@ -751,7 +749,7 @@ async fn handle_response<P: ProviderProtocol>(
             provider = attempt.provider,
             resource_type = attempt.resource_kind.as_str(),
             resource_id = %attempt.resource_id,
-            plugin_release_id = %binding.release_id,
+            plugin_suite_id = %binding.suite_id,
             plugin_slot = response_slot.as_str(),
             upstream_status = status.as_u16(),
             downstream_status = output.status.as_u16(),
@@ -783,7 +781,7 @@ async fn handle_response<P: ProviderProtocol>(
             runtime_revision = attempt.runtime_revision,
             attempt_number = attempt.attempt_number,
             max_attempts = attempt.max_attempts,
-            plugin_release_id = %binding.release_id,
+            plugin_suite_id = %binding.suite_id,
             upstream_status = status.as_u16(),
             response_bytes = body.len(),
             upstream_response_body_encoding = tracing_body.encoding(),
@@ -810,7 +808,7 @@ async fn handle_response<P: ProviderProtocol>(
         provider = attempt.provider,
         resource_type = attempt.resource_kind.as_str(),
         resource_id = %attempt.resource_id,
-        plugin_release_id = %binding.release_id,
+        plugin_suite_id = %binding.suite_id,
         plugin_slot = response_slot.as_str(),
         response_context_present = response_context.is_some(),
         response_context_mode = response_context.map(PluginResponseContext::response_mode_str),
@@ -836,7 +834,7 @@ async fn handle_response<P: ProviderProtocol>(
                     provider = attempt.provider,
                     resource_type = attempt.resource_kind.as_str(),
                     resource_id = %attempt.resource_id,
-                    plugin_release_id = %binding.release_id,
+                    plugin_suite_id = %binding.suite_id,
                     plugin_slot = response_slot.as_str(),
                     upstream_status = status.as_u16(),
                     usage_total_tokens = usage.total_tokens,
@@ -852,7 +850,7 @@ async fn handle_response<P: ProviderProtocol>(
                 provider = attempt.provider,
                 resource_type = attempt.resource_kind.as_str(),
                 resource_id = %attempt.resource_id,
-                plugin_release_id = %binding.release_id,
+                plugin_suite_id = %binding.suite_id,
                 exclude_current_resource,
                 retry_reason = %reason,
                 "buffered 响应插件要求通用 executor 重试"

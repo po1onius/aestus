@@ -58,7 +58,7 @@ struct GatewayAuthRow {
     #[diesel(sql_type = Bool)]
     group_granted: bool,
     #[diesel(sql_type = Nullable<SqlUuid>)]
-    plugin_release_ref: Option<Uuid>,
+    plugin_suite_ref: Option<Uuid>,
 }
 
 /// 网关后续请求链路使用的最小鉴权上下文。
@@ -183,7 +183,7 @@ pub async fn authenticate_gateway_key(
                    AND group_grant.user_id = gateway_key.user_id \
                    AND group_grant.group_id = gateway_key.group_id \
              ) AS group_granted, \
-             gateway_key.plugin_release_id AS plugin_release_ref \
+             gateway_key.plugin_suite_id AS plugin_suite_ref \
          FROM api_keys AS gateway_key \
          LEFT JOIN tenants AS tenant \
            ON tenant.id = gateway_key.tenant_id \
@@ -226,7 +226,7 @@ pub async fn authenticate_gateway_key(
         user_quota,
         user_max_concurrency,
         group_granted,
-        plugin_release_ref,
+        plugin_suite_ref,
     } = row;
 
     if !api_key_enabled {
@@ -320,23 +320,21 @@ pub async fn authenticate_gateway_key(
         return Err(AppError::UserQuotaExceeded);
     }
 
-    // 插件 artifact 使用独立逐行表，避免让模型白名单与三个插槽做笛卡尔积。只有绑定了
-    // 套件的模型端点才追加一次小查询，并在这里完整验证 provider、启停状态和 ABI。
+    // 只有绑定套件的 Responses / Messages 挂载端点才准备全部组件；组合和冷缓存
+    // 文件在同一数据库快照中取得，响应及重试阶段不再查询插件是否存在。
     let plugin = if !plugin_endpoint {
         // 绑定只对 provider 的模型生成端点生效。其他端点不因为插件被禁用、删除或 ABI
         // 变化而失败，确保插件不会间接扩大到 count_tokens 等接口。
         None
     } else {
-        match plugin_release_ref {
+        match plugin_suite_ref {
             None => None,
-            Some(release_id) => Some(
-                plugin::sql::load_binding(&mut conn, tenant_id.clone(), release_id, &group_provider)
+            Some(suite_id) => Some(
+                plugin::prepare_binding(state, &mut conn, tenant_id.clone(), suite_id, &group_provider)
                     .await
                     .map_err(|error| {
-                        warn!(api_key_id = %api_key_id, plugin_release_id = %release_id, error = %error, "API Key 插件套件绑定不可用，拒绝请求");
-                        AppError::Plugin {
-                            message: format!("API Key 插件套件绑定不可用: release_id={release_id}"),
-                        }
+                        warn!(api_key_id = %api_key_id, plugin_suite_id = %suite_id, error = %error, "API Key 插件套件绑定不可用，拒绝请求");
+                        error
                     })?,
             ),
         }
@@ -352,7 +350,7 @@ pub async fn authenticate_gateway_key(
         provider = %group_provider,
         quota = user_quota,
         max_concurrency = ?user_max_concurrency,
-        plugin_release_id = ?plugin.as_ref().map(|binding| binding.release_id),
+        plugin_suite_id = ?plugin.as_ref().map(|binding| binding.suite_id),
         plugin_artifact_count = plugin.as_ref().map_or(0, |binding| binding.artifacts.len()),
         api_key_model_count = api_key_allowed_models.len(),
         group_model_count = group_allowed_models.len(),

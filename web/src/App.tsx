@@ -47,12 +47,13 @@ import {
 } from "./features/accounts/utils";
 import { ApiKeyCreateDialog } from "./features/api-keys/ApiKeyCreateDialog";
 import { ApiKeyPluginDialog } from "./features/api-keys/ApiKeyPluginDialog";
-import type { PluginArtifactFiles } from "./features/plugins/PluginArtifactFileFields";
 import {
   PluginCreateDialog,
   type CreatePluginInput,
 } from "./features/plugins/PluginCreateDialog";
-import { PluginReleaseDialog } from "./features/plugins/PluginReleaseDialog";
+import { PluginSuiteCreateDialog, type CreatePluginSuiteInput } from "./features/plugins/PluginSuiteCreateDialog";
+import { canManagePlugin } from "./features/plugins/access";
+import { suiteSlotFields } from "./features/plugins/slots";
 import { requestLogAutoLoadKey } from "./features/request-logs/utils";
 import { UserConcurrencyDialog } from "./features/users/UserConcurrencyDialog";
 import { UserCreateDialog } from "./features/users/UserCreateDialog";
@@ -105,7 +106,9 @@ import type {
   MeResponse,
   OauthAuthorizationResponse,
   OverrideEntry,
-  PluginReleaseSummary,
+  PluginSuiteSummary,
+  PluginSummary,
+  PluginDeletionImpact,
   RateLimitResetCredit,
   RateLimitResetCreditsResponse,
   RequestLogCursor,
@@ -176,8 +179,9 @@ export function App() {
   const [rateLimitResetError, setRateLimitResetError] = useState<string | null>(null);
   const [applyingResetCreditId, setApplyingResetCreditId] = useState<string | null>(null);
   const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
-  const [plugins, setPlugins] = useState<PluginReleaseSummary[]>([]);
-  const [pluginOptions, setPluginOptions] = useState<PluginReleaseSummary[]>([]);
+  const [plugins, setPlugins] = useState<PluginSummary[]>([]);
+  const [pluginSuites, setPluginSuites] = useState<PluginSuiteSummary[]>([]);
+  const [pluginOptions, setPluginOptions] = useState<PluginSuiteSummary[]>([]);
   const [providerGroups, setProviderGroups] = useState<ProviderGroupSummary[]>([]);
   const [providerGroupOptions, setProviderGroupOptions] = useState<ProviderGroup[]>([]);
   const [unassignedProviderResources, setUnassignedProviderResources] = useState<
@@ -239,10 +243,10 @@ export function App() {
   const [apiKeyCreateOpen, setApiKeyCreateOpen] = useState(false);
   const [apiKeyModelsTarget, setApiKeyModelsTarget] = useState<ApiKey | null>(null);
   const [apiKeyPluginTarget, setApiKeyPluginTarget] = useState<ApiKey | null>(null);
-  const [apiKeyPluginReleaseId, setApiKeyPluginReleaseId] = useState("");
+  const [apiKeyPluginSuiteId, setApiKeyPluginSuiteId] = useState("");
   const [apiKeyPluginSaving, setApiKeyPluginSaving] = useState(false);
   const [pluginCreateOpen, setPluginCreateOpen] = useState(false);
-  const [pluginReleaseTarget, setPluginReleaseTarget] = useState<PluginReleaseSummary | null>(null);
+  const [pluginSuiteCreateOpen, setPluginSuiteCreateOpen] = useState(false);
   const [userQuotaDialogUser, setUserQuotaDialogUser] = useState<DashboardUser | null>(null);
   const [userQuotaValue, setUserQuotaValue] = useState("");
   const [userConcurrencyDialogUser, setUserConcurrencyDialogUser] =
@@ -264,7 +268,7 @@ export function App() {
   const [officialBaseUrl, setOfficialBaseUrl] = useState("https://api.openai.com/v1");
   const [apiKeyName, setApiKeyName] = useState("");
   const [apiKeyAllowedModels, setApiKeyAllowedModels] = useState<string[]>([]);
-  const [selectedPluginReleaseId, setSelectedPluginReleaseId] = useState("");
+  const [selectedPluginSuiteId, setSelectedPluginSuiteId] = useState("");
   const [selectedProviderGroupId, setSelectedProviderGroupId] = useState("");
   const [confirmationRequest, setConfirmationRequest] = useState<ConfirmationRequest | null>(null);
   const [confirmationSubmitting, setConfirmationSubmitting] = useState(false);
@@ -355,6 +359,7 @@ export function App() {
       void loadApiKeys(0);
       void loadPluginOptions();
     } else {
+      void loadPlugins();
       setLoading(false);
       setUsersLoading(false);
       setApiKeysLoading(false);
@@ -601,6 +606,7 @@ export function App() {
     setApplyingResetCreditId(null);
     setApiKeys([]);
     setPlugins([]);
+    setPluginSuites([]);
     setPluginOptions([]);
     setProviderGroups([]);
     setProviderGroupOptions([]);
@@ -628,7 +634,7 @@ export function App() {
     setConfirmationSubmitting(false);
     setApiKeyName("");
     setApiKeyAllowedModels([]);
-    setSelectedPluginReleaseId("");
+    setSelectedPluginSuiteId("");
     setSelectedProviderGroupId("");
     setApiKeyUpdatingId(null);
     setAccountImportOpen(false);
@@ -640,10 +646,10 @@ export function App() {
     setApiKeyCreateOpen(false);
     setApiKeyModelsTarget(null);
     setApiKeyPluginTarget(null);
-    setApiKeyPluginReleaseId("");
+    setApiKeyPluginSuiteId("");
     setApiKeyPluginSaving(false);
     setPluginCreateOpen(false);
-    setPluginReleaseTarget(null);
+    setPluginSuiteCreateOpen(false);
     setUserQuotaDialogUser(null);
     setUserQuotaValue("");
     setUserCreateOpen(false);
@@ -884,16 +890,23 @@ export function App() {
 
   async function loadPlugins() {
     const token = authToken;
-    if (!token || currentUser?.role !== "tenant_owner") {
+    if (!token || (currentUser?.role !== "tenant_owner" && currentUser?.role !== "platform_admin")) {
       setPlugins([]);
+      setPluginSuites([]);
       setPluginsLoading(false);
       return;
     }
 
     setPluginsLoading(true);
     try {
-      const data = await requestJson<PluginReleaseSummary[]>(pluginsPath, undefined, token);
-      if (isActiveAuthToken(token)) setPlugins(data);
+      const [data, suites] = await Promise.all([
+        requestJson<PluginSummary[]>(pluginsPath, undefined, token),
+        requestJson<PluginSuiteSummary[]>(`${pluginsPath}/suites`, undefined, token),
+      ]);
+      if (isActiveAuthToken(token)) {
+        setPlugins(data);
+        setPluginSuites(suites);
+      }
     } catch (error) {
       if (isActiveAuthToken(token)) showErrorToast("插件加载失败", error);
     } finally {
@@ -903,13 +916,13 @@ export function App() {
 
   async function loadPluginOptions() {
     const token = authToken;
-    if (!token) {
+    if (!token || currentUser?.role === "platform_admin") {
       setPluginOptions([]);
       return;
     }
     try {
-      const data = await requestJson<PluginReleaseSummary[]>(
-        `${pluginsPath}/options`,
+      const data = await requestJson<PluginSuiteSummary[]>(
+        `${pluginsPath}/suites/options`,
         undefined,
         token,
       );
@@ -1221,7 +1234,7 @@ export function App() {
   function openApiKeyCreateDialog() {
     setApiKeyName("");
     setApiKeyAllowedModels([]);
-    setSelectedPluginReleaseId("");
+    setSelectedPluginSuiteId("");
     setSelectedProviderGroupId(providerGroupOptions[0]?.id ?? "");
     setApiKeyCreateOpen(true);
   }
@@ -1233,7 +1246,7 @@ export function App() {
     setApiKeyCreateOpen(false);
     setApiKeyName("");
     setApiKeyAllowedModels([]);
-    setSelectedPluginReleaseId("");
+    setSelectedPluginSuiteId("");
     setSelectedProviderGroupId("");
   }
 
@@ -1253,7 +1266,7 @@ export function App() {
 
   function openApiKeyPluginDialog(apiKey: ApiKey) {
     setApiKeyPluginTarget(apiKey);
-    setApiKeyPluginReleaseId(apiKey.plugin?.id ?? "");
+    setApiKeyPluginSuiteId(apiKey.plugin_suite_id ?? "");
   }
 
   function closeApiKeyPluginDialog() {
@@ -1261,7 +1274,7 @@ export function App() {
       return;
     }
     setApiKeyPluginTarget(null);
-    setApiKeyPluginReleaseId("");
+    setApiKeyPluginSuiteId("");
   }
 
   function closePluginCreateDialog() {
@@ -1271,18 +1284,18 @@ export function App() {
     setPluginCreateOpen(false);
   }
 
-  function closePluginReleaseDialog() {
+  function closePluginSuiteCreateDialog() {
     if (pluginSavingId !== null) {
       return;
     }
-    setPluginReleaseTarget(null);
+    setPluginSuiteCreateOpen(false);
   }
 
   function selectApiKeyProviderGroup(groupId: string) {
     setSelectedProviderGroupId(groupId);
     // 不保留上一个分组的模型选择，确保前端状态始终来自当前分组的候选集合。
     setApiKeyAllowedModels([]);
-    setSelectedPluginReleaseId("");
+    setSelectedPluginSuiteId("");
   }
 
   function openUserQuotaDialog(user: DashboardUser) {
@@ -1711,7 +1724,7 @@ export function App() {
       (group) => group.id === selectedProviderGroupId,
     );
     const selectedPlugin = pluginOptions.find(
-      (plugin) => plugin.id === selectedPluginReleaseId,
+      (plugin) => plugin.id === selectedPluginSuiteId,
     );
     if (utf8ByteLength(name) > 128) {
       toast.error("API Key 创建失败", { description: "名称不能超过 128 字节。" });
@@ -1737,13 +1750,13 @@ export function App() {
       return;
     }
     if (
-      selectedPluginReleaseId &&
+      selectedPluginSuiteId &&
       (!selectedPlugin ||
-        !selectedPlugin.suite_enabled ||
+        !selectedPlugin.enabled ||
         selectedPlugin.provider !== selectedGroup.provider)
     ) {
       toast.error("API Key 创建失败", {
-        description: "插件套件必须是当前 Provider 已启用的发布版本。",
+        description: "插件套件必须属于当前 Provider 且处于启用状态。",
       });
       return;
     }
@@ -1756,7 +1769,7 @@ export function App() {
           name,
           group_id: selectedProviderGroupId,
           allowed_models: allowedModels,
-          plugin_release_id: selectedPluginReleaseId || null,
+          plugin_suite_id: selectedPluginSuiteId || null,
         }),
       }, token);
       if (!isActiveAuthToken(token)) {
@@ -1765,7 +1778,7 @@ export function App() {
       setApiKeyCreateOpen(false);
       setApiKeyName("");
       setApiKeyAllowedModels([]);
-      setSelectedPluginReleaseId("");
+      setSelectedPluginSuiteId("");
       setSelectedProviderGroupId("");
       await loadApiKeys(0);
       if (currentUser?.role === "tenant_owner") {
@@ -1792,16 +1805,16 @@ export function App() {
     }
 
     const selectedPlugin = pluginOptions.find(
-      (plugin) => plugin.id === apiKeyPluginReleaseId,
+      (plugin) => plugin.id === apiKeyPluginSuiteId,
     );
     if (
-      apiKeyPluginReleaseId &&
+      apiKeyPluginSuiteId &&
       (!selectedPlugin ||
-        !selectedPlugin.suite_enabled ||
+        !selectedPlugin.enabled ||
         selectedPlugin.provider !== target.group.provider)
     ) {
       toast.error("插件绑定更新失败", {
-        description: "请选择与 API Key Provider 一致的启用插件版本。",
+        description: "请选择与 API Key Provider 一致的启用套件。",
       });
       return;
     }
@@ -1810,14 +1823,14 @@ export function App() {
     try {
       const updated = await requestJson<ApiKey>(`${apiKeysPath}/${target.id}/plugin`, {
         method: "PUT",
-        body: JSON.stringify({ plugin_release_id: apiKeyPluginReleaseId || null }),
+        body: JSON.stringify({ plugin_suite_id: apiKeyPluginSuiteId || null }),
       }, token);
       if (!isActiveAuthToken(token)) {
         return;
       }
       setApiKeys((items) => items.map((item) => (item.id === updated.id ? updated : item)));
       setApiKeyPluginTarget(null);
-      setApiKeyPluginReleaseId("");
+      setApiKeyPluginSuiteId("");
       toast.success(updated.plugin ? "插件绑定已更新" : "插件绑定已解除");
     } catch (error) {
       if (isActiveAuthToken(token)) {
@@ -1871,138 +1884,122 @@ export function App() {
   async function createPlugin(input: CreatePluginInput): Promise<boolean> {
     const token = authToken;
     if (!token) return false;
-    if (utf8ByteLength(input.name.trim()) > 128 || utf8ByteLength(input.description.trim()) > 1024) {
-      toast.error("插件发布失败", {
-        description: "名称最多 128 字节，描述最多 1024 字节。",
-      });
+    if (!validPluginText(input.name, input.description)) return false;
+    if (input.file.size === 0 || input.file.size > 8 * 1024 * 1024) {
+      toast.error("插件上传失败", { description: "WASM 文件大小必须在 1 B 到 8 MiB 之间。" });
       return false;
     }
-    const artifactFiles = selectedPluginArtifactFiles(input);
-    if (artifactFiles.length === 0) {
-      toast.error("插件发布失败", { description: "请至少上传一个 WASM Component。" });
-      return false;
-    }
-    if (artifactFiles.some(([, file]) => file.size === 0 || file.size > 8 * 1024 * 1024)) {
-      toast.error("插件发布失败", {
-        description: "每个 WASM 文件大小必须在 1 B 到 8 MiB 之间。",
-      });
-      return false;
-    }
-
     const formData = new FormData();
     formData.set("name", input.name.trim());
     formData.set("description", input.description.trim());
     formData.set("provider", input.provider);
-    for (const [field, file] of artifactFiles) formData.set(field, file);
+    formData.set("slot", input.slot);
+    formData.set("wasm_file", input.file);
     setPluginSavingId("create");
     try {
-      await requestFormData<PluginReleaseSummary>(pluginsPath, formData, { method: "POST" }, token);
+      await requestFormData<PluginSummary>(pluginsPath, formData, { method: "POST" }, token);
       if (!isActiveAuthToken(token)) return false;
-      await Promise.all([loadPlugins(), loadPluginOptions()]);
-      toast.success("插件已添加并发布");
+      await loadPlugins();
+      toast.success("WASM 插件已上传，可以创建套件");
       return true;
     } catch (error) {
-      if (isActiveAuthToken(token)) showErrorToast("插件发布失败", error);
+      if (isActiveAuthToken(token)) showErrorToast("插件上传失败", error);
       return false;
     } finally {
       if (isActiveAuthToken(token)) setPluginSavingId(null);
     }
   }
 
-  async function publishPluginRelease(
-    suiteId: string,
-    files: PluginArtifactFiles,
-  ): Promise<boolean> {
+  async function createPluginSuite(input: CreatePluginSuiteInput): Promise<boolean> {
     const token = authToken;
-    if (!token) return false;
-    const artifactFiles = selectedPluginArtifactFiles(files);
-    if (artifactFiles.length === 0) {
-      toast.error("插件版本发布失败", { description: "请至少上传一个 WASM Component。" });
+    if (!token || !validPluginText(input.name, input.description)) return false;
+    if (!suiteSlotFields.some(({ field }) => input[field])) {
+      toast.error("套件至少需要选择一个插件");
       return false;
     }
-    if (artifactFiles.some(([, file]) => file.size === 0 || file.size > 8 * 1024 * 1024)) {
-      toast.error("插件版本发布失败", {
-        description: "每个 WASM 文件大小必须在 1 B 到 8 MiB 之间。",
-      });
-      return false;
-    }
-    const formData = new FormData();
-    for (const [field, file] of artifactFiles) formData.set(field, file);
-    setPluginSavingId(suiteId);
+    setPluginSavingId("create-suite");
     try {
-      await requestFormData<PluginReleaseSummary>(
-        `${pluginsPath}/${suiteId}/releases`,
-        formData,
-        { method: "POST" },
-        token,
-      );
+      await requestJson<PluginSuiteSummary>(`${pluginsPath}/suites`, {
+        method: "POST",
+        body: JSON.stringify({ ...input, name: input.name.trim(), description: input.description.trim() }),
+      }, token);
       if (!isActiveAuthToken(token)) return false;
       await Promise.all([loadPlugins(), loadPluginOptions()]);
-      toast.success("插件新版本已发布");
+      toast.success("套件已创建");
       return true;
     } catch (error) {
-      if (isActiveAuthToken(token)) showErrorToast("插件版本发布失败", error);
+      if (isActiveAuthToken(token)) showErrorToast("套件创建失败", error);
       return false;
     } finally {
       if (isActiveAuthToken(token)) setPluginSavingId(null);
     }
   }
 
-  async function togglePluginEnabled(plugin: PluginReleaseSummary) {
+  async function togglePluginEnabled(suite: PluginSuiteSummary) {
     const token = authToken;
-    if (!token) return;
-    setPluginSavingId(plugin.suite_id);
+    if (!token || !canManagePlugin(currentUser, suite.tenant_id)) return;
+    setPluginSavingId(suite.id);
     try {
-      const updated = await requestJson<PluginReleaseSummary[]>(
-        `${pluginsPath}/${plugin.suite_id}/enabled`,
-        { method: "PUT", body: JSON.stringify({ enabled: !plugin.suite_enabled }) },
-        token,
-      );
+      const updated = await requestJson<PluginSuiteSummary[]>(`${pluginsPath}/suites/${suite.id}/enabled`, {
+        method: "PUT", body: JSON.stringify({ enabled: !suite.enabled }),
+      }, token);
       if (!isActiveAuthToken(token)) return;
-      setPlugins(updated);
-      await loadPluginOptions();
-      toast.success(plugin.suite_enabled ? "插件已停用" : "插件已启用");
+      setPluginSuites(updated);
+      await Promise.all([loadPluginOptions(), currentUser?.role === "platform_admin" ? Promise.resolve() : loadApiKeys(apiKeysPage.offset)]);
+      toast.success(suite.enabled ? "套件已停用" : "套件已启用");
     } catch (error) {
-      if (isActiveAuthToken(token)) showErrorToast("插件状态更新失败", error);
+      if (isActiveAuthToken(token)) showErrorToast("套件状态更新失败", error);
     } finally {
       if (isActiveAuthToken(token)) setPluginSavingId(null);
     }
   }
 
-  function requestDeletePlugin(plugin: PluginReleaseSummary) {
-    setConfirmationRequest({
-      title: "删除插件套件",
-      description: `将永久删除插件“${plugin.suite_name}”的全部历史版本和 WASM Artifact。所有关联的网关 API Key都会保留，但会解除插件绑定，后续请求回落到 ${providerLabel(plugin.provider)} Provider 原生流程；历史请求日志不受影响。`,
-      confirmLabel: "删除插件",
-      pendingLabel: "正在删除",
-      onConfirm: () => deletePlugin(plugin),
-    });
+  function requestDeletePlugin(plugin: PluginSummary) {
+    void previewPluginDeletion(plugin, false);
   }
 
-  async function deletePlugin(plugin: PluginReleaseSummary) {
-    const token = authToken;
-    if (!token || currentUser?.role !== "tenant_owner") {
-      return;
-    }
+  function requestDeletePluginSuite(suite: PluginSuiteSummary) {
+    void previewPluginDeletion(suite, true);
+  }
 
-    setPluginSavingId(plugin.suite_id);
+  async function previewPluginDeletion(resource: PluginSummary | PluginSuiteSummary, isSuite: boolean) {
+    const token = authToken;
+    if (!token || !canManagePlugin(currentUser, resource.tenant_id)) return;
+    setPluginSavingId(resource.id);
+    try {
+      const base = isSuite ? `${pluginsPath}/suites/${resource.id}` : `${pluginsPath}/${resource.id}`;
+      const impact = await requestJson<PluginDeletionImpact>(`${base}/deletion-impact`, undefined, token);
+      if (!isActiveAuthToken(token)) return;
+      setConfirmationRequest({
+        title: isSuite ? "删除套件" : "删除 WASM 插件",
+        description: `将永久删除${resource.tenant_id === null ? "平台公共" : "本租户"}${isSuite ? "套件" : "插件"}“${resource.name}”。${isSuite ? "独立插件会保留。" : "所有引用它的套件也会删除，包括各租户的私有套件。"}当前影响 ${impact.suite_count} 个套件、${impact.affected_tenant_count} 个租户、${impact.affected_gateway_api_key_count} 个网关 Key。Key 会保留失效引用，后续 Responses / Messages 请求将被拒绝，需要重新绑定或解除绑定。删除时按最新依赖执行。`,
+        confirmLabel: isSuite ? "删除套件" : "删除插件及关联套件",
+        pendingLabel: "正在删除",
+        onConfirm: () => deletePluginResource(resource.id, isSuite),
+      });
+    } catch (error) {
+      if (isActiveAuthToken(token)) showErrorToast("删除影响加载失败", error);
+    } finally {
+      if (isActiveAuthToken(token)) setPluginSavingId(null);
+    }
+  }
+
+  async function deletePluginResource(id: string, isSuite: boolean) {
+    const token = authToken;
+    if (!token || (currentUser?.role !== "tenant_owner" && currentUser?.role !== "platform_admin")) return;
+    setPluginSavingId(id);
     try {
       const deleted = await requestJson<DeletePluginResponse>(
-        `${pluginsPath}/${plugin.suite_id}`,
-        { method: "DELETE" },
-        token,
+        isSuite ? `${pluginsPath}/suites/${id}` : `${pluginsPath}/${id}`,
+        { method: "DELETE" }, token,
       );
       if (!isActiveAuthToken(token)) return;
-      await Promise.all([
-        loadPlugins(),
-        loadPluginOptions(),
-        loadApiKeys(apiKeysPage.offset),
-      ]);
-      toast.success("插件已删除", {
-        description: `已删除 ${deleted.deleted_release_count} 个版本和 ${deleted.deleted_artifact_count} 个 Artifact，${deleted.unbound_gateway_api_key_count} 个网关 API Key已解除插件绑定。`,
+      await Promise.all([loadPlugins(), loadPluginOptions(), currentUser?.role === "platform_admin" ? Promise.resolve() : loadApiKeys(apiKeysPage.offset)]);
+      toast.success(isSuite ? "套件已删除" : "插件已删除", {
+        description: `已删除 ${deleted.deleted_suite_count} 个套件，影响 ${deleted.affected_tenant_count} 个租户，${deleted.affected_gateway_api_key_count} 个网关 Key 的套件绑定失效。`,
       });
     } catch (error) {
-      if (isActiveAuthToken(token)) showErrorToast("插件删除失败", error);
+      if (isActiveAuthToken(token)) showErrorToast("删除失败", error);
     } finally {
       if (isActiveAuthToken(token)) setPluginSavingId(null);
     }
@@ -2923,11 +2920,11 @@ export function App() {
               groups={providerGroupOptions}
               groupId={selectedProviderGroupId}
               plugins={pluginOptions}
-              pluginReleaseId={selectedPluginReleaseId}
+              pluginSuiteId={selectedPluginSuiteId}
               onNameChange={setApiKeyName}
               onModelsChange={setApiKeyAllowedModels}
               onGroupChange={selectApiKeyProviderGroup}
-              onPluginChange={setSelectedPluginReleaseId}
+              onPluginChange={setSelectedPluginSuiteId}
               onSubmit={submitApiKey}
               onClose={closeApiKeyCreateDialog}
             />
@@ -2950,28 +2947,29 @@ export function App() {
               key={`api-key-plugin-${apiKeyPluginTarget.id}`}
               apiKey={apiKeyPluginTarget}
               plugins={pluginOptions}
-              pluginReleaseId={apiKeyPluginReleaseId}
+              pluginSuiteId={apiKeyPluginSuiteId}
               saving={apiKeyPluginSaving}
-              onPluginChange={setApiKeyPluginReleaseId}
+              onPluginChange={setApiKeyPluginSuiteId}
               onSubmit={submitApiKeyPlugin}
               onClose={closeApiKeyPluginDialog}
             />
           )}
           {pluginCreateOpen && activePage === "plugins" && (
             <PluginCreateDialog
+              isPlatformAdmin={currentUser.role === "platform_admin"}
               key="plugin-create"
               saving={pluginSavingId === "create"}
               onCreate={createPlugin}
               onClose={closePluginCreateDialog}
             />
           )}
-          {pluginReleaseTarget && activePage === "plugins" && (
-            <PluginReleaseDialog
-              key={`plugin-release-${pluginReleaseTarget.suite_id}`}
-              plugin={pluginReleaseTarget}
-              saving={pluginSavingId === pluginReleaseTarget.suite_id}
-              onPublish={publishPluginRelease}
-              onClose={closePluginReleaseDialog}
+          {pluginSuiteCreateOpen && activePage === "plugins" && (
+            <PluginSuiteCreateDialog
+              isPlatformAdmin={currentUser.role === "platform_admin"}
+              plugins={plugins}
+              saving={pluginSavingId === "create-suite"}
+              onCreate={createPluginSuite}
+              onClose={closePluginSuiteCreateDialog}
             />
           )}
           {userQuotaDialogUser && activePage === "users" && (
@@ -3112,13 +3110,16 @@ export function App() {
         />
       ) : activePage === "plugins" ? (
         <PluginsPage
+          user={currentUser}
           plugins={plugins}
+          suites={pluginSuites}
           loading={pluginsLoading}
           savingId={pluginSavingId}
-          onAdd={() => setPluginCreateOpen(true)}
-          onOpenPublish={setPluginReleaseTarget}
+          onAddPlugin={() => setPluginCreateOpen(true)}
+          onAddSuite={() => setPluginSuiteCreateOpen(true)}
           onToggleEnabled={togglePluginEnabled}
-          onDelete={requestDeletePlugin}
+          onDeletePlugin={requestDeletePlugin}
+          onDeleteSuite={requestDeletePluginSuite}
         />
       ) : activePage === "users" ? (
         <UsersPage
@@ -3214,17 +3215,12 @@ function utf8ByteLength(value: string) {
   return new TextEncoder().encode(value).byteLength;
 }
 
-/** 将三插槽表单归一化为后端 multipart 字段；未选择的插槽不发送。 */
-function selectedPluginArtifactFiles(files: PluginArtifactFiles): Array<[string, File]> {
-  const selected: Array<[string, File]> = [];
-  if (files.requestFile) selected.push(["request_file", files.requestFile]);
-  if (files.bufferedResponseFile) {
-    selected.push(["buffered_response_file", files.bufferedResponseFile]);
+function validPluginText(name: string, description: string) {
+  if (!name.trim() || utf8ByteLength(name.trim()) > 128 || utf8ByteLength(description.trim()) > 1024) {
+    toast.error("名称不能为空且最多 128 字节，备注最多 1024 字节。");
+    return false;
   }
-  if (files.streamResponseFile) {
-    selected.push(["stream_response_file", files.streamResponseFile]);
-  }
-  return selected;
+  return true;
 }
 
 function isAscii(value: string) {

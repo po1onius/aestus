@@ -1,3 +1,4 @@
+import { pluginSourceLabel } from "../features/plugins/access";
 import { RowActions } from "../components/RowActions";
 import { useState } from "react";
 import { Ban, Copy, Eye, EyeOff, KeyRound, ListChecks, Loader2, Pencil, Plus, Power, Trash2 } from "lucide-react";
@@ -96,7 +97,7 @@ export function ApiKeysPage({
                   <th>名称</th>
                   <th>Provider 分组</th>
                   <th>API Key</th>
-                  <th>插件</th>
+                  <th>插件套件</th>
                   <th>状态</th>
                   <th>更新</th>
                   <th className="w-20 text-right">操作</th>
@@ -120,7 +121,7 @@ export function ApiKeysPage({
                       )}
                     </td>
                     <td>
-                      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2">
+                      <div className="grid min-w-0 grid-cols-1 gap-2">
                         <code
                           className="truncate font-mono text-xs text-slate-700 dark:text-slate-300"
                           aria-label={
@@ -131,44 +132,50 @@ export function ApiKeysPage({
                             ? apiKey.api_key
                             : "••••••••••••••••••••••••"}
                         </code>
-                        <button
-                          type="button"
-                          className={iconButtonSmall}
-                          onClick={() => toggleApiKeyVisibility(apiKey.id)}
-                          aria-label={
-                            visibleApiKeyIds.has(apiKey.id) ? "隐藏 API Key" : "显示 API Key"
-                          }
-                          aria-pressed={visibleApiKeyIds.has(apiKey.id)}
-                          title={visibleApiKeyIds.has(apiKey.id) ? "隐藏 API Key" : "显示 API Key"}
-                        >
-                          {visibleApiKeyIds.has(apiKey.id) ? (
-                            <EyeOff size={15} />
-                          ) : (
-                            <Eye size={15} />
-                          )}
-                        </button>
-                        <button
-                          type="button"
-                          className={buttonSmall}
-                          onClick={() => onCopy(apiKey)}
-                          title="复制 API Key"
-                        >
-                          <Copy size={14} />
-                          复制
-                        </button>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            className={iconButtonSmall}
+                            onClick={() => toggleApiKeyVisibility(apiKey.id)}
+                            aria-label={
+                              visibleApiKeyIds.has(apiKey.id) ? "隐藏 API Key" : "显示 API Key"
+                            }
+                            aria-pressed={visibleApiKeyIds.has(apiKey.id)}
+                            title={visibleApiKeyIds.has(apiKey.id) ? "隐藏 API Key" : "显示 API Key"}
+                          >
+                            {visibleApiKeyIds.has(apiKey.id) ? (
+                              <EyeOff size={15} />
+                            ) : (
+                              <Eye size={15} />
+                            )}
+                          </button>
+                          <button
+                            type="button"
+                            className={buttonSmall}
+                            onClick={() => onCopy(apiKey)}
+                            title="复制 API Key"
+                          >
+                            <Copy size={14} />
+                            复制
+                          </button>
+                        </div>
                       </div>
                     </td>
                     <td>
                       {apiKey.plugin ? (
                         <div>
-                          <div className={cellMainClass}>{apiKey.plugin.suite_name}</div>
+                          <div className={cellMainClass}>{apiKey.plugin.name}</div>
                           <p className={cellNoteClass}>
-                            v{apiKey.plugin.version} · {apiKey.plugin.provider.toUpperCase()}
-                            {!apiKey.plugin.suite_enabled && " · 已停用"}
+                            {pluginSourceLabel(apiKey.plugin.tenant_id)} · {apiKey.plugin.provider.toUpperCase()}
+                            {!apiKey.plugin.enabled && " · 已停用，绑定失效"}
                           </p>
                         </div>
                       ) : (
-                        <span className={cellNoteClass}>未绑定</span>
+                        apiKey.plugin_suite_id ? (
+                          <span className="text-xs font-medium text-red-600 dark:text-red-400" title={apiKey.plugin_suite_id}>
+                            套件已删除，绑定失效
+                          </span>
+                        ) : <span className={cellNoteClass}>未绑定</span>
                       )}
                     </td>
                     <td>
@@ -193,9 +200,9 @@ export function ApiKeysPage({
                             onSelect: () => onEditModels(apiKey),
                           },
                           {
-                            id: "edit-plugin", label: "修改插件", icon: Pencil,
+                            id: "edit-plugin", label: "修改套件", icon: Pencil,
                             disabled: !apiKey.group_authorized, opensDialog: true,
-                            description: apiKey.group_authorized ? "修改插件绑定" : "分组授权已撤销",
+                            description: apiKey.group_authorized ? "修改套件绑定" : "分组授权已撤销",
                             onSelect: () => onEditPlugin(apiKey),
                           },
                           {

@@ -375,7 +375,8 @@ export interface ApiKey {
   group: ProviderGroupReference;
   group_allowed_models: string[];
   allowed_models: string[];
-  plugin: PluginReleaseSummary | null;
+  plugin_suite_id: string | null;
+  plugin: PluginSuiteSummary | null;
   created_at: string;
   updated_at: string;
   disabled_at: string | null;
@@ -385,36 +386,44 @@ export interface DeleteApiKeyResponse {
   id: string;
 }
 
-export interface PluginReleaseSummary {
+export type PluginSlot = "request" | "buffered_response" | "stream_response";
+
+export interface PluginSummary {
   id: string;
-  suite_id: string;
-  suite_name: string;
+  tenant_id: string | null;
+  name: string;
   description: string;
   provider: UpstreamApiKeyProvider;
-  suite_enabled: boolean;
-  version: number;
-  manifest_sha256: string;
-  artifacts: PluginArtifactSummary[];
-  published_at: string;
+  slot: PluginSlot;
+  wasm_sha256: string;
+  wasm_size: number;
+  created_at: string;
+}
+
+export interface PluginSuiteSummary {
+  id: string;
+  tenant_id: string | null;
+  name: string;
+  description: string;
+  provider: UpstreamApiKeyProvider;
+  enabled: boolean;
+  request_plugin_id: string | null;
+  buffered_response_plugin_id: string | null;
+  stream_response_plugin_id: string | null;
+  created_at: string;
+}
+
+export interface PluginDeletionImpact {
+  suite_count: number;
+  affected_tenant_count: number;
+  affected_gateway_api_key_count: number;
 }
 
 export interface DeletePluginResponse {
   id: string;
-  name: string;
-  provider: UpstreamApiKeyProvider;
-  deleted_release_count: number;
-  deleted_artifact_count: number;
-  unbound_gateway_api_key_count: number;
-}
-
-export type PluginSlot = "request" | "buffered_response" | "stream_response";
-
-export interface PluginArtifactSummary {
-  id: string;
-  slot: PluginSlot;
-  abi_version: number;
-  wasm_sha256: string;
-  wasm_size: number;
+  deleted_suite_count: number;
+  affected_tenant_count: number;
+  affected_gateway_api_key_count: number;
 }
 
 export interface ListApiKeysResponse extends ListPageResponse<ApiKey> {
