@@ -1,3 +1,4 @@
+import { RowActions } from "../../components/RowActions";
 import { Archive, FolderTree, ListChecks, Loader2, Pencil, RotateCcw, Save, Trash2, X } from "lucide-react";
 import { useState } from "react";
 import type { FormEvent } from "react";
@@ -19,6 +20,7 @@ import type { ProviderGroupSummary } from "../../types";
 
 interface ProviderGroupsTableProps {
   groups: ProviderGroupSummary[];
+  compactActions: boolean;
   savingId: string | null;
   onRename: (group: ProviderGroupSummary, name: string) => Promise<boolean>;
   onEditModels: (group: ProviderGroupSummary) => void;
@@ -34,6 +36,7 @@ interface ProviderGroupsTableProps {
  */
 export function ProviderGroupsTable({
   groups,
+  compactActions,
   savingId,
   onRename,
   onEditModels,
@@ -66,14 +69,14 @@ export function ProviderGroupsTable({
 
   return (
     <div className={tableScrollClass}>
-      <table className={`${tableClass} min-w-[82rem]`}>
+      <table className={`${tableClass} ${compactActions ? "min-w-[74rem]" : "min-w-[82rem]"}`}>
         <thead>
           <tr>
             <th>名称</th>
             <th>限制模型</th>
             <th>关联资源</th>
             <th>更新时间</th>
-            <th>操作</th>
+            <th className={compactActions ? "w-20 text-right" : undefined}>操作</th>
           </tr>
         </thead>
         <tbody>
@@ -85,7 +88,7 @@ export function ProviderGroupsTable({
                 <td>
                   {editing ? (
                     <form
-                      className="grid min-w-64 gap-2"
+                      className={compactActions ? "grid min-w-0 gap-2" : "grid min-w-64 gap-2"}
                       onSubmit={(event) => submitRename(event, group)}
                     >
                       <input
@@ -154,50 +157,82 @@ export function ProviderGroupsTable({
                 </td>
                 <td>
                   {!editing && (
-                    <div className="grid max-w-64 grid-cols-2 gap-2">
-                      <button
-                        className={buttonSmall}
-                        disabled={Boolean(savingId)}
-                        onClick={() => {
-                          setEditingId(group.id);
-                          setEditingName(group.name);
-                        }}
-                      >
-                        <Pencil size={14} />
-                        重命名
-                      </button>
-                      <button
-                        className={buttonSmall}
-                        disabled={Boolean(savingId)}
-                        onClick={() => onEditModels(group)}
-                      >
-                        <ListChecks size={14} />
-                        模型
-                      </button>
-                      <button
-                        className={group.enabled ? buttonSmallDanger : buttonSmall}
-                        disabled={Boolean(savingId)}
-                        onClick={() => void onToggleEnabled(group)}
-                      >
-                        {saving ? (
-                          <Loader2 className={spinnerClass} size={14} />
-                        ) : group.enabled ? (
-                          <Archive size={14} />
-                        ) : (
-                          <RotateCcw size={14} />
-                        )}
-                        {group.enabled ? "停用" : "恢复"}
-                      </button>
-                      <button
-                        className={buttonSmallDanger}
-                        disabled={Boolean(savingId)}
-                        onClick={() => onDelete(group)}
-                        title="删除分组"
-                      >
-                        {saving ? <Loader2 className={spinnerClass} size={14} /> : <Trash2 size={14} />}
-                        删除
-                      </button>
-                    </div>
+                    compactActions ? (
+                      <RowActions
+                        resourceLabel={group.name}
+                        busy={saving}
+                        actions={[
+                          {
+                            id: "edit-models", label: "修改模型", icon: ListChecks,
+                            disabled: Boolean(savingId), onSelect: () => onEditModels(group),
+                            opensDialog: true,
+                          },
+                          {
+                            id: "rename", label: "重命名", icon: Pencil,
+                            disabled: Boolean(savingId), opensDialog: true,
+                            onSelect: () => {
+                              setEditingId(group.id);
+                              setEditingName(group.name);
+                            },
+                          },
+                          {
+                            id: "toggle-enabled", label: group.enabled ? "停用" : "恢复",
+                            icon: group.enabled ? Archive : RotateCcw,
+                            disabled: Boolean(savingId), onSelect: () => void onToggleEnabled(group),
+                          },
+                          {
+                            id: "delete", label: "删除分组", icon: Trash2,
+                            disabled: Boolean(savingId), danger: true, opensDialog: true,
+                            onSelect: () => onDelete(group),
+                          },
+                        ]}
+                      />
+                    ) : (
+                      <div className="grid max-w-64 grid-cols-2 gap-2">
+                        <button
+                          className={buttonSmall}
+                          disabled={Boolean(savingId)}
+                          onClick={() => {
+                            setEditingId(group.id);
+                            setEditingName(group.name);
+                          }}
+                        >
+                          <Pencil size={14} />
+                          重命名
+                        </button>
+                        <button
+                          className={buttonSmall}
+                          disabled={Boolean(savingId)}
+                          onClick={() => onEditModels(group)}
+                        >
+                          <ListChecks size={14} />
+                          模型
+                        </button>
+                        <button
+                          className={group.enabled ? buttonSmallDanger : buttonSmall}
+                          disabled={Boolean(savingId)}
+                          onClick={() => void onToggleEnabled(group)}
+                        >
+                          {saving ? (
+                            <Loader2 className={spinnerClass} size={14} />
+                          ) : group.enabled ? (
+                            <Archive size={14} />
+                          ) : (
+                            <RotateCcw size={14} />
+                          )}
+                          {group.enabled ? "停用" : "恢复"}
+                        </button>
+                        <button
+                          className={buttonSmallDanger}
+                          disabled={Boolean(savingId)}
+                          onClick={() => onDelete(group)}
+                          title="删除分组"
+                        >
+                          {saving ? <Loader2 className={spinnerClass} size={14} /> : <Trash2 size={14} />}
+                          删除
+                        </button>
+                      </div>
+                    )
                   )}
                 </td>
               </tr>

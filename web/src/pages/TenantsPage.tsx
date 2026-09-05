@@ -1,6 +1,7 @@
+import { RowActions } from "../components/RowActions";
 import { AnimatePresence } from "motion/react";
 import { type FormEvent, useEffect, useState } from "react";
-import { Boxes, Loader2, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { Boxes, Loader2, Plus, Power, RefreshCw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { requestJson } from "../api/client";
 import { tenantsPath } from "../config";
@@ -12,9 +13,7 @@ import { TenantCreateDialog } from "../features/tenants/TenantCreateDialog";
 import { TenantResourcesDialog } from "../features/tenants/TenantResourcesDialog";
 import { showErrorToast } from "../lib/errors";
 import {
-  buttonDangerSolid,
   buttonPrimary,
-  buttonSecondary,
   panelHeaderClass,
   panelTitleClass,
   spinnerClass,
@@ -167,9 +166,9 @@ export function TenantsPage({ token, refreshSignal }: TenantsPageProps) {
           <div className="p-10 text-center text-sm text-slate-500">还没有租户</div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[900px] text-left text-sm">
+            <table className="w-full min-w-[720px] text-left text-sm">
               <thead className="border-b border-slate-200 bg-slate-50 text-slate-500 dark:border-slate-800 dark:bg-slate-950/50">
-                <tr><th className="px-4 py-3 font-medium">租户</th><th className="px-4 py-3 font-medium">租户码</th><th className="px-4 py-3 font-medium">状态</th><th className="px-4 py-3 text-right font-medium">操作</th></tr>
+                <tr><th className="px-4 py-3 font-medium">租户</th><th className="px-4 py-3 font-medium">租户码</th><th className="px-4 py-3 font-medium">状态</th><th className="w-20 px-4 py-3 text-right font-medium">操作</th></tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                 {tenants.map((tenant) => {
@@ -179,12 +178,32 @@ export function TenantsPage({ token, refreshSignal }: TenantsPageProps) {
                       <td className="px-4 py-3 font-medium">{tenant.id}</td>
                       <td className="px-4 py-3 font-mono">{tenant.code ?? <span className="font-sans text-slate-400">已撤销</span>}</td>
                       <td className="px-4 py-3"><span className={tenant.enabled ? "text-emerald-600" : "text-slate-400"}>{tenant.enabled ? "启用" : "停用"}</span></td>
-                      <td className="px-4 py-3"><div className="flex justify-end gap-2">
-                        <button className={buttonSecondary} type="button" disabled={updating} onClick={() => setResourcesTenant(tenant)}><Boxes size={15} />查看资源</button>
-                        <button className={buttonSecondary} type="button" disabled={updating} onClick={() => openCodeDialog(tenant, "regenerate")}><RefreshCw size={15} />{tenant.code ? "修改租户码" : "设置租户码"}</button>
-                        {tenant.code && <button className={buttonDangerSolid} type="button" disabled={updating} onClick={() => openCodeDialog(tenant, "revoke")}><Trash2 size={15} />撤销租户码</button>}
-                        <button className={buttonSecondary} type="button" disabled={updating} onClick={() => void toggleTenant(tenant)}>{updating ? <Loader2 className={spinnerClass} size={15} /> : null}{tenant.enabled ? "停用" : "启用"}</button>
-                      </div></td>
+                      <td className="px-4 py-3">
+                        <RowActions
+                          resourceLabel={tenant.id}
+                          busy={updating}
+                          actions={[
+                            {
+                              id: "view-resources", label: "查看资源", icon: Boxes,
+                              onSelect: () => setResourcesTenant(tenant),
+                              opensDialog: true,
+                            },
+                            {
+                              id: "regenerate-code", label: tenant.code ? "修改租户码" : "设置租户码", icon: RefreshCw,
+                              opensDialog: true, onSelect: () => openCodeDialog(tenant, "regenerate"),
+                            },
+                            {
+                              id: "toggle-enabled", label: tenant.enabled ? "停用" : "启用", icon: Power,
+                              onSelect: () => void toggleTenant(tenant),
+                            },
+                            {
+                              id: "revoke-code", label: "撤销租户码", icon: Trash2,
+                              hidden: !tenant.code, danger: true, opensDialog: true,
+                              onSelect: () => openCodeDialog(tenant, "revoke"),
+                            },
+                          ]}
+                        />
+                      </td>
                     </tr>
                   );
                 })}

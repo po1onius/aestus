@@ -53,3 +53,45 @@
     font-variant-numeric: tabular-nums;
   }
 }
+
+/* Radix 在收起动画结束后卸载菜单；变换原点随弹层实际方向定位。 */
+.row-actions-menu {
+  transform-origin: var(--radix-dropdown-menu-content-transform-origin);
+}
+
+.row-actions-menu[data-state="open"] {
+  animation: row-actions-expand 160ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.row-actions-menu[data-state="closed"] {
+  pointer-events: none;
+  animation: row-actions-collapse 120ms cubic-bezier(0.4, 0, 1, 1) forwards;
+}
+
+@keyframes row-actions-expand {
+  from {
+    opacity: 0;
+    transform: scale(0.96, 0.85);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes row-actions-collapse {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.96, 0.85);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .row-actions-menu[data-state] {
+    animation: none;
+  }
+}

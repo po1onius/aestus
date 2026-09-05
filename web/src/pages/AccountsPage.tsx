@@ -315,6 +315,7 @@ export function AccountsPage({
             </div>
           ) : (
             <ProviderGroupsTable
+              compactActions={activeApiKeyProvider !== "claude"}
               groups={activeProviderGroups}
               savingId={providerGroupSavingId}
               onRename={onRenameProviderGroup}

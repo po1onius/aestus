@@ -1,4 +1,5 @@
-import { Loader2, Settings, Trash2 } from "lucide-react";
+import { RowActions } from "../../components/RowActions";
+import { Loader2, Power, Settings, Trash2 } from "lucide-react";
 import { RuntimeBadge } from "../../components/RuntimeBadge";
 import { StatusBadge } from "../../components/StatusBadge";
 import { formatOptionalDateTime } from "../../lib/format";
@@ -56,7 +57,7 @@ export function ProviderUpstreamApiKeysTable({
 }: ProviderUpstreamApiKeysTableProps) {
   return (
     <div className={tableScrollClass}>
-      <table className={`${tableClass} min-w-[92rem]`}>
+      <table className={`${tableClass} ${provider === "claude" ? "min-w-[92rem]" : "min-w-[82rem]"}`}>
         <thead>
           <tr>
             <th>{providerLabel} 官方 Key</th>
@@ -65,7 +66,7 @@ export function ProviderUpstreamApiKeysTable({
             <th>状态</th>
             <th>调度</th>
             <th>检测</th>
-            <th>操作</th>
+            <th className={provider === "claude" ? undefined : "w-20 text-right"}>操作</th>
           </tr>
         </thead>
         <tbody>
@@ -140,42 +141,67 @@ export function ProviderUpstreamApiKeysTable({
                   </p>
                 </td>
                 <td>
-                  <div className={actionStackClass}>
-                    {access.isOwner && <button
-                      className={buttonSmall}
-                      disabled={busy}
-                      onClick={() => onUpdateEnabled(apiKey, !apiKey.enabled)}
-                      title={apiKey.enabled ? "禁用官方 Key 调度" : "启用官方 Key 调度"}
-                    >
-                      {enabledUpdatingId === apiKey.id ? (
-                        <Loader2 className={spinnerClass} size={14} />
-                      ) : (
-                        enabledToggleLabel(apiKey.enabled)
-                      )}
-                    </button>}
-                    <button
-                      className={buttonSmall}
-                      disabled={busy || !canViewOverride}
-                      onClick={() => onOpenOverride(apiKey)}
-                      title={canViewOverride ? "查看请求覆盖" : "未获得查看官方 Key 覆盖权限"}
-                    >
-                      <Settings size={14} />
-                      覆盖
-                    </button>
-                    {access.isOwner && <button
-                      className={buttonSmallDanger}
-                      disabled={busy}
-                      onClick={() => onDelete(apiKey)}
-                      title="删除官方 Key"
-                    >
-                      {deletingId === apiKey.id ? (
-                        <Loader2 className={spinnerClass} size={14} />
-                      ) : (
-                        <Trash2 size={14} />
-                      )}
-                      删除
-                    </button>}
-                  </div>
+                  {provider === "claude" ? (
+                    <div className={actionStackClass}>
+                      {access.isOwner && <button
+                        className={buttonSmall}
+                        disabled={busy}
+                        onClick={() => onUpdateEnabled(apiKey, !apiKey.enabled)}
+                        title={apiKey.enabled ? "禁用官方 Key 调度" : "启用官方 Key 调度"}
+                      >
+                        {enabledUpdatingId === apiKey.id ? (
+                          <Loader2 className={spinnerClass} size={14} />
+                        ) : (
+                          enabledToggleLabel(apiKey.enabled)
+                        )}
+                      </button>}
+                      <button
+                        className={buttonSmall}
+                        disabled={busy || !canViewOverride}
+                        onClick={() => onOpenOverride(apiKey)}
+                        title={canViewOverride ? "查看请求覆盖" : "未获得查看官方 Key 覆盖权限"}
+                      >
+                        <Settings size={14} />
+                        覆盖
+                      </button>
+                      {access.isOwner && <button
+                        className={buttonSmallDanger}
+                        disabled={busy}
+                        onClick={() => onDelete(apiKey)}
+                        title="删除官方 Key"
+                      >
+                        {deletingId === apiKey.id ? (
+                          <Loader2 className={spinnerClass} size={14} />
+                        ) : (
+                          <Trash2 size={14} />
+                        )}
+                        删除
+                      </button>}
+                    </div>
+                  ) : (
+                    <RowActions
+                      resourceLabel={apiKey.masked_api_key}
+                      busy={busy}
+                      actions={[
+                        {
+                          id: "request-override", label: "请求覆盖", icon: Settings,
+                          disabled: !canViewOverride, opensDialog: true,
+                          description: canViewOverride ? "查看请求覆盖" : "未获得查看官方 Key 覆盖权限",
+                          onSelect: () => onOpenOverride(apiKey),
+                        },
+                        {
+                          id: "toggle-enabled", label: enabledToggleLabel(apiKey.enabled), icon: Power,
+                          hidden: !access.isOwner,
+                          onSelect: () => onUpdateEnabled(apiKey, !apiKey.enabled),
+                        },
+                        {
+                          id: "delete", label: "删除官方 Key", icon: Trash2,
+                          hidden: !access.isOwner, danger: true, opensDialog: true,
+                          onSelect: () => onDelete(apiKey),
+                        },
+                      ]}
+                    />
+                  )}
                 </td>
               </tr>
             );

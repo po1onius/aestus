@@ -1,18 +1,15 @@
-import { Loader2, RotateCcw, Search, Settings, Trash2 } from "lucide-react";
+import { RowActions } from "../../components/RowActions";
+import { Power, RotateCcw, Search, Settings, Trash2 } from "lucide-react";
 import { RuntimeBadge } from "../../components/RuntimeBadge";
 import { StatusBadge } from "../../components/StatusBadge";
 import { formatDateTime, formatOptionalDateTime } from "../../lib/format";
 import type { ProviderAccess } from "../group-access/access";
 import {
-  actionStackClass,
-  buttonSmall,
-  buttonSmallDanger,
   cellMainClass,
   cellNoteClass,
   disabledRowClass,
   entryStackClass,
   entryTitleClass,
-  spinnerClass,
   tableClass,
   tableScrollClass,
 } from "../../lib/ui";
@@ -56,7 +53,7 @@ export function GptAccountsTable({
 }: GptAccountsTableProps) {
   return (
     <div className={tableScrollClass}>
-      <table className={`${tableClass} min-w-[108rem]`}>
+      <table className={`${tableClass} min-w-[104rem]`}>
         <thead>
           <tr>
             <th>账号</th>
@@ -67,7 +64,7 @@ export function GptAccountsTable({
             <th>调度</th>
             <th>凭证</th>
             <th>更新</th>
-            <th>操作</th>
+            <th className="w-20 text-right">操作</th>
           </tr>
         </thead>
         <tbody>
@@ -153,70 +150,41 @@ export function GptAccountsTable({
                   <p className={cellNoteClass}>创建：{formatDateTime(account.created_at)}</p>
                 </td>
                 <td>
-                  <div className={actionStackClass}>
-                    <button
-                      className={buttonSmall}
-                      disabled={busy || !canViewQuota}
-                      onClick={() => onOpenQuota(account)}
-                      title={canViewQuota ? "查询账号额度" : "未获得查看账号额度权限"}
-                    >
-                      {quotaOperationAccountId === account.id ? (
-                        <Loader2 className={spinnerClass} size={14} />
-                      ) : (
-                        <Search size={14} />
-                      )}
-                      查询额度
-                    </button>
-                    <button
-                      className={buttonSmall}
-                      disabled={busy || !canViewReset}
-                      onClick={() => onOpenRateLimitReset(account)}
-                      title={canViewReset ? "查询账号额度重置信息" : "未获得查看重置信息权限"}
-                    >
-                      {resetOperationAccountId === account.id ? (
-                        <Loader2 className={spinnerClass} size={14} />
-                      ) : (
-                        <RotateCcw size={14} />
-                      )}
-                      重置
-                    </button>
-                    {access.isOwner && (
-                      <button
-                        className={buttonSmall}
-                        disabled={busy}
-                        onClick={() => onUpdateEnabled(account, !account.enabled)}
-                        title={account.enabled ? "禁用账号调度" : "启用账号调度"}
-                      >
-                        {enabledUpdatingId === account.id ? (
-                          <Loader2 className={spinnerClass} size={14} />
-                        ) : (
-                          enabledToggleLabel(account.enabled)
-                        )}
-                      </button>
-                    )}
-                    <button
-                      className={buttonSmall}
-                      disabled={busy || !canViewOverride}
-                      onClick={() => onOpenOverride(account)}
-                      title={canViewOverride ? "查看请求覆盖" : "未获得查看账号覆盖权限"}
-                    >
-                      <Settings size={14} />
-                      覆盖
-                    </button>
-                    {access.isOwner && <button
-                      className={buttonSmallDanger}
-                      disabled={busy}
-                      onClick={() => onDelete(account)}
-                      title="删除账号"
-                    >
-                      {deletingId === account.id ? (
-                        <Loader2 className={spinnerClass} size={14} />
-                      ) : (
-                        <Trash2 size={14} />
-                      )}
-                      删除
-                    </button>}
-                  </div>
+                  <RowActions
+                    resourceLabel={account.email || account.id}
+                    busy={busy}
+                    actions={[
+                      {
+                        id: "query-quota", label: "查询额度", icon: Search,
+                        disabled: !canViewQuota,
+                        description: canViewQuota ? "查询账号额度" : "未获得查看账号额度权限",
+                        onSelect: () => onOpenQuota(account),
+                        opensDialog: true,
+                      },
+                      {
+                        id: "reset-info", label: "重置信息", icon: RotateCcw,
+                        disabled: !canViewReset, opensDialog: true,
+                        description: canViewReset ? "查询账号额度重置信息" : "未获得查看重置信息权限",
+                        onSelect: () => onOpenRateLimitReset(account),
+                      },
+                      {
+                        id: "request-override", label: "请求覆盖", icon: Settings,
+                        disabled: !canViewOverride, opensDialog: true,
+                        description: canViewOverride ? "查看请求覆盖" : "未获得查看账号覆盖权限",
+                        onSelect: () => onOpenOverride(account),
+                      },
+                      {
+                        id: "toggle-enabled", label: enabledToggleLabel(account.enabled), icon: Power,
+                        hidden: !access.isOwner,
+                        onSelect: () => onUpdateEnabled(account, !account.enabled),
+                      },
+                      {
+                        id: "delete", label: "删除账号", icon: Trash2,
+                        hidden: !access.isOwner, danger: true, opensDialog: true,
+                        onSelect: () => onDelete(account),
+                      },
+                    ]}
+                  />
                 </td>
               </tr>
             );

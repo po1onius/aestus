@@ -1,17 +1,15 @@
+import { RowActions } from "../components/RowActions";
 import { useMemo } from "react";
 import { FileUp, Loader2, PlugZap, Plus, Power, Trash2 } from "lucide-react";
 import { StatusBadge } from "../components/StatusBadge";
 import { formatDateTime } from "../lib/format";
 import {
   buttonPrimary,
-  buttonSmall,
-  buttonSmallDanger,
   cellMainClass,
   cellNoteClass,
   disabledRowClass,
   emptyStateClass,
   panelClass,
-  panelDescriptionClass,
   panelHeaderClass,
   panelTitleClass,
   spinnerClass,
@@ -86,7 +84,7 @@ export function PluginsPage({
           </div>
         ) : (
           <div className={tableScrollClass}>
-            <table className={`${tableClass} min-w-[96rem]`}>
+            <table className={`${tableClass} min-w-[92rem]`}>
               <thead>
                 <tr>
                   <th>插件</th>
@@ -96,7 +94,7 @@ export function PluginsPage({
                   <th>Manifest</th>
                   <th>发布于</th>
                   <th>状态</th>
-                  <th>操作</th>
+                  <th className="w-24 text-right">操作</th>
                 </tr>
               </thead>
               <tbody>
@@ -137,43 +135,30 @@ export function PluginsPage({
                       <td><StatusBadge status={plugin.suite_enabled ? "active" : "disabled"} /></td>
                       <td>
                         {isLatest ? (
-                          <div className="grid min-w-36 gap-2">
-                            <button
-                              className={buttonSmall}
-                              disabled={savingId !== null}
-                              onClick={() => onOpenPublish(plugin)}
-                            >
-                              <FileUp size={14} />
-                              发布新版本
-                            </button>
-                            <button
-                              className={buttonSmall}
-                              disabled={savingId !== null}
-                              onClick={() => void onToggleEnabled(plugin)}
-                            >
-                              {savingId === plugin.suite_id ? (
-                                <Loader2 className={spinnerClass} size={14} />
-                              ) : (
-                                <Power size={14} />
-                              )}
-                              {plugin.suite_enabled ? "停用插件" : "启用插件"}
-                            </button>
-                            <button
-                              className={buttonSmallDanger}
-                              disabled={savingId !== null}
-                              onClick={() => onDelete(plugin)}
-                              title="删除插件套件"
-                            >
-                              {savingId === plugin.suite_id ? (
-                                <Loader2 className={spinnerClass} size={14} />
-                              ) : (
-                                <Trash2 size={14} />
-                              )}
-                              删除插件
-                            </button>
-                          </div>
+                          <RowActions
+                            resourceLabel={plugin.suite_name}
+                            busy={savingId === plugin.suite_id}
+                            actions={[
+                              {
+                                id: "publish", label: "发布新版本", icon: FileUp,
+                                disabled: savingId !== null,
+                                onSelect: () => onOpenPublish(plugin),
+                                opensDialog: true,
+                              },
+                              {
+                                id: "toggle-enabled", label: plugin.suite_enabled ? "停用插件" : "启用插件", icon: Power,
+                                disabled: savingId !== null,
+                                onSelect: () => void onToggleEnabled(plugin),
+                              },
+                              {
+                                id: "delete", label: "删除插件", icon: Trash2,
+                                disabled: savingId !== null, danger: true, opensDialog: true,
+                                onSelect: () => onDelete(plugin),
+                              },
+                            ]}
+                          />
                         ) : (
-                          <span className={cellNoteClass}>历史版本</span>
+                          <span className={`${cellNoteClass} block text-right`}>历史版本</span>
                         )}
                       </td>
                     </tr>

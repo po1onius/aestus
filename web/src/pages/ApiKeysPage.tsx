@@ -1,3 +1,4 @@
+import { RowActions } from "../components/RowActions";
 import { useState } from "react";
 import { Ban, Copy, Eye, EyeOff, KeyRound, ListChecks, Loader2, Pencil, Plus, Power, Trash2 } from "lucide-react";
 import { ListPager } from "../components/ListPager";
@@ -6,7 +7,6 @@ import { formatDateTime } from "../lib/format";
 import {
   buttonPrimary,
   buttonSmall,
-  buttonSmallDanger,
   cellMainClass,
   cellNoteClass,
   disabledRowClass,
@@ -90,7 +90,7 @@ export function ApiKeysPage({
           </div>
         ) : (
           <div className={tableScrollClass}>
-            <table className={`${tableClass} min-w-[104rem]`}>
+            <table className={`${tableClass} min-w-[96rem]`}>
               <thead>
                 <tr>
                   <th>名称</th>
@@ -100,7 +100,7 @@ export function ApiKeysPage({
                   <th>插件</th>
                   <th>状态</th>
                   <th>更新</th>
-                  <th>操作</th>
+                  <th className="w-20 text-right">操作</th>
                 </tr>
               </thead>
               <tbody>
@@ -206,54 +206,33 @@ export function ApiKeysPage({
                       <p className={cellNoteClass}>创建：{formatDateTime(apiKey.created_at)}</p>
                     </td>
                     <td>
-                      <div className="grid gap-2">
-                        <button
-                          className={buttonSmall}
-                          disabled={updatingId === apiKey.id || !apiKey.group_authorized}
-                          onClick={() => onEditModels(apiKey)}
-                          title={apiKey.group_authorized ? "修改模型白名单" : "分组授权已撤销"}
-                        >
-                          <ListChecks size={14} />
-                          修改模型
-                        </button>
-                        <button
-                          className={buttonSmall}
-                          disabled={updatingId === apiKey.id || !apiKey.group_authorized}
-                          onClick={() => onEditPlugin(apiKey)}
-                          title={apiKey.group_authorized ? "修改插件绑定" : "分组授权已撤销"}
-                        >
-                          <Pencil size={14} />
-                          修改插件
-                        </button>
-                        <button
-                          className={buttonSmall}
-                          disabled={updatingId === apiKey.id || !apiKey.group_authorized}
-                          onClick={() => onToggleEnabled(apiKey)}
-                          title={apiKey.enabled ? "禁用 API Key" : "启用 API Key"}
-                        >
-                          {updatingId === apiKey.id ? (
-                            <Loader2 className={spinnerClass} size={14} />
-                          ) : apiKey.enabled ? (
-                            <Ban size={14} />
-                          ) : (
-                            <Power size={14} />
-                          )}
-                          {apiKey.enabled ? "禁用" : "启用"}
-                        </button>
-                        <button
-                          className={buttonSmallDanger}
-                          disabled={updatingId === apiKey.id}
-                          onClick={() => onDelete(apiKey)}
-                          title="删除 API Key"
-                        >
-                          {updatingId === apiKey.id ? (
-                            <Loader2 className={spinnerClass} size={14} />
-                          ) : (
-                            <Trash2 size={14} />
-                          )}
-                          删除
-                        </button>
-                      </div>
+                      <RowActions
+                        resourceLabel={apiKey.name}
+                        busy={updatingId === apiKey.id}
+                        actions={[
+                          {
+                            id: "edit-models", label: "修改模型", icon: ListChecks,
+                            disabled: !apiKey.group_authorized, opensDialog: true,
+                            description: apiKey.group_authorized ? "修改模型白名单" : "分组授权已撤销",
+                            onSelect: () => onEditModels(apiKey),
+                          },
+                          {
+                            id: "edit-plugin", label: "修改插件", icon: Pencil,
+                            disabled: !apiKey.group_authorized, opensDialog: true,
+                            description: apiKey.group_authorized ? "修改插件绑定" : "分组授权已撤销",
+                            onSelect: () => onEditPlugin(apiKey),
+                          },
+                          {
+                            id: "toggle-enabled", label: apiKey.enabled ? "禁用" : "启用",
+                            icon: apiKey.enabled ? Ban : Power, disabled: !apiKey.group_authorized,
+                            onSelect: () => onToggleEnabled(apiKey),
+                          },
+                          {
+                            id: "delete", label: "删除 API Key", icon: Trash2,
+                            danger: true, opensDialog: true, onSelect: () => onDelete(apiKey),
+                          },
+                        ]}
+                      />
                     </td>
                   </tr>
                 ))}

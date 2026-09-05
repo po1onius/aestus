@@ -1,11 +1,10 @@
-import { Activity, Gauge, Loader2, Plus, ShieldCheck, UserCog } from "lucide-react";
+import { RowActions } from "../components/RowActions";
+import { Activity, Gauge, Loader2, Plus, Power, ShieldCheck, UserCog } from "lucide-react";
 import { ListPager } from "../components/ListPager";
 import { StatusBadge } from "../components/StatusBadge";
 import { formatDateTime } from "../lib/format";
 import {
-  actionStackClass,
   buttonPrimary,
-  buttonSmall,
   cellMainClass,
   cellNoteClass,
   disabledRowClass,
@@ -83,7 +82,7 @@ export function UsersPage({
                   <th>Provider 并发</th>
                   <th>状态</th>
                   <th>更新</th>
-                  <th>操作</th>
+                  <th className="w-20 text-right">操作</th>
                 </tr>
               </thead>
               <tbody>
@@ -124,51 +123,31 @@ export function UsersPage({
                       <p className={cellNoteClass}>创建：{formatDateTime(user.created_at)}</p>
                     </td>
                     <td>
-                      <div className={actionStackClass}>
-                        <button
-                          className={buttonSmall}
-                          disabled={updatingId === user.id || user.role !== "tenant_user"}
-                          onClick={() => onOpenGroupGrants(user)}
-                        >
-                          <ShieldCheck size={14} />
-                          分组授权
-                        </button>
-                        <button
-                          className={buttonSmall}
-                          disabled={updatingId === user.id}
-                          onClick={() => onOpenQuota(user)}
-                        >
-                          {updatingId === user.id ? (
-                            <Loader2 className={spinnerClass} size={14} />
-                          ) : (
-                            <Gauge size={14} />
-                          )}
-                          改额度
-                        </button>
-                        <button
-                          className={buttonSmall}
-                          disabled={updatingId === user.id}
-                          onClick={() => onOpenConcurrency(user)}
-                        >
-                          {updatingId === user.id ? (
-                            <Loader2 className={spinnerClass} size={14} />
-                          ) : (
-                            <Activity size={14} />
-                          )}
-                          改并发
-                        </button>
-                        <button
-                          className={buttonSmall}
-                          disabled={
-                            updatingId === user.id ||
-                            user.id === currentUserId ||
-                            user.role !== "tenant_user"
-                          }
-                          onClick={() => onToggleStatus(user)}
-                        >
-                          {user.enabled ? "禁用" : "启用"}
-                        </button>
-                      </div>
+                      <RowActions
+                        resourceLabel={user.username}
+                        busy={updatingId === user.id}
+                        actions={[
+                          {
+                            id: "edit-quota", label: "修改额度", icon: Gauge,
+                            onSelect: () => onOpenQuota(user),
+                            opensDialog: true,
+                          },
+                          {
+                            id: "group-grants", label: "分组授权", icon: ShieldCheck,
+                            disabled: user.role !== "tenant_user", opensDialog: true,
+                            onSelect: () => onOpenGroupGrants(user),
+                          },
+                          {
+                            id: "edit-concurrency", label: "修改并发", icon: Activity,
+                            opensDialog: true, onSelect: () => onOpenConcurrency(user),
+                          },
+                          {
+                            id: "toggle-enabled", label: user.enabled ? "禁用" : "启用", icon: Power,
+                            disabled: user.id === currentUserId || user.role !== "tenant_user",
+                            onSelect: () => onToggleStatus(user),
+                          },
+                        ]}
+                      />
                     </td>
                   </tr>
                 ))}
