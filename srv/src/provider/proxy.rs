@@ -22,9 +22,9 @@ use crate::{
         self, StreamPluginBatchOutput,
         model::{PluginBinding, PluginSlot},
         runtime::{
-            BufferedPluginDisposition, BufferedPluginInput, PluginEffects, PluginResponseContext,
-            RawPluginResponse, RequestPluginInput, StreamPluginFinishOutput,
-            StreamPluginItemOutput, StreamPluginSession,
+            BufferedPluginDisposition, BufferedPluginInput, PluginEffects, RawPluginResponse,
+            RequestPluginInput, StreamPluginFinishOutput, StreamPluginItemOutput,
+            StreamPluginSession,
         },
     },
     provider::{
@@ -498,18 +498,13 @@ struct PreparedUpstreamRequest {
     url: reqwest::Url,
     headers: HeaderMap,
     body: reqwest::Body,
-    plugin_response_input: Option<PluginAttemptResponseInput>,
+    /// 与实际发出的请求绑定；内容由插件自行解释，重试不复用上一 attempt 的值。
+    plugin_context: Option<Vec<u8>>,
 }
 
 struct ReceivedUpstreamResponse {
     response: reqwest::Response,
-    plugin_response_input: Option<PluginAttemptResponseInput>,
-}
-
-/// 请求插件为响应阶段生成的 attempt-local context。外层 `Option` 直接表达是否执行了请求
-/// 插件；该值始终和实际发出的请求一起移动，重试或切换资源不会串用上一 attempt 的模式。
-struct PluginAttemptResponseInput {
-    response_context: PluginResponseContext,
+    plugin_context: Option<Vec<u8>>,
 }
 
 /// 插件模式只复用 provider 的目标地址选择；原生 header 白名单、资源 override 和
@@ -550,9 +545,9 @@ async fn prepare_plugin_upstream_request<P: ProviderProtocol>(
         method = %method,
         upstream_header_count = output.headers.len(),
         upstream_body_bytes = output.body.len(),
-        plugin_response_mode = output.response_context.response_mode_str(),
+        plugin_context_bytes = output.plugin_context.len(),
         http_client_profile = client_profile.as_str(),
-        "插件输出已成为本次 attempt 的最终上游 header/body，响应 context 已绑定到该 attempt"
+        "插件输出已成为本次 attempt 的最终上游 header/body，plugin-context 已绑定到该 attempt"
     );
 
     Ok(PreparedUpstreamRequest {
@@ -561,9 +556,7 @@ async fn prepare_plugin_upstream_request<P: ProviderProtocol>(
         url,
         headers: output.headers,
         body: reqwest::Body::from(output.body),
-        plugin_response_input: Some(PluginAttemptResponseInput {
-            response_context: output.response_context,
-        }),
+        plugin_context: Some(output.plugin_context),
     })
 }
 
@@ -644,7 +637,7 @@ async fn finalize_upstream_request<P: ProviderProtocol>(
         url,
         headers: draft.headers,
         body,
-        plugin_response_input: None,
+        plugin_context: None,
     })
 }
 
@@ -658,7 +651,7 @@ async fn send_upstream_request<P: ProviderProtocol>(
         url,
         headers,
         body,
-        plugin_response_input,
+        plugin_context,
     } = request;
     let timeout_seconds = state.config().provider_upstream_timeout_seconds.max(1);
     let send = state
@@ -679,14 +672,12 @@ async fn send_upstream_request<P: ProviderProtocol>(
         })?;
     Ok(ReceivedUpstreamResponse {
         response,
-        plugin_response_input,
+        plugin_context,
     })
 }
 
-/// 成功响应优先使用请求插件声明的下游交付模式选择响应插槽；没有请求插件声明时
-/// 才沿用原生 Content-Type 判断。非成功 HTTP 响应固定 buffered，确保错误正文完整交给
-/// buffered 插件。命中插槽时完全绕过 provider `handle_response`；空插槽才调用原生
-/// adapter，二者最终归一化为相同 ProtocolResponse。
+/// 成功响应按上游 Content-Type 选择插槽，非成功响应固定 buffered。
+/// plugin-context 仅作为不透明字节传给响应插件。空插槽调用 provider 原生 adapter。
 async fn handle_response<P: ProviderProtocol>(
     state: &AppState,
     resource: &crate::provider::resource::UpstreamResource,
@@ -696,20 +687,18 @@ async fn handle_response<P: ProviderProtocol>(
 ) -> Result<(ProtocolResponse, Option<StreamPluginSession>), ProtocolFailure> {
     let ReceivedUpstreamResponse {
         response: upstream_response,
-        plugin_response_input,
+        plugin_context,
     } = upstream;
-    let response_context = plugin_response_input.map(|input| input.response_context);
-    let response_mode = response_context.map(|context| context.response_mode);
+    let plugin_context_present = plugin_context.is_some();
+    let plugin_context_bytes = plugin_context.as_ref().map_or(0, Vec::len);
     let status = upstream_response.status();
     let raw_headers = upstream_response.headers().clone();
     let upstream_declares_sse = is_sse_response(&raw_headers);
-    let is_stream = should_use_stream_response(status, response_mode, &raw_headers);
+    let is_stream = status.is_success() && upstream_declares_sse;
     let response_mode_source = if !status.is_success() {
         "http_status"
-    } else if response_mode.is_some() {
-        "request_plugin"
     } else {
-        "content_type_fallback"
+        "content_type"
     };
     let response_slot = if is_stream {
         PluginSlot::StreamResponse
@@ -717,8 +706,6 @@ async fn handle_response<P: ProviderProtocol>(
         PluginSlot::BufferedResponse
     };
 
-    // Content-Type 只作为无请求模式时的兼容回退和诊断字段。buffered 模式配合 SSE
-    // 上游是合法场景：宿主完整收集 body 后，响应插件可将事件流转换成单个 JSON。
     if plugin_binding.is_some() {
         info!(
             request_id = %attempt.request_id,
@@ -726,7 +713,6 @@ async fn handle_response<P: ProviderProtocol>(
             resource_type = attempt.resource_kind.as_str(),
             resource_id = %attempt.resource_id,
             upstream_status = status.as_u16(),
-            request_plugin_response_mode = response_mode.map(response_mode_as_str),
             response_mode_source,
             upstream_declares_sse,
             selected_plugin_slot = response_slot.as_str(),
@@ -741,7 +727,7 @@ async fn handle_response<P: ProviderProtocol>(
     };
 
     if is_stream {
-        let output = plugin::start_stream(state, binding, status, raw_headers, response_context)
+        let output = plugin::start_stream(state, binding, status, raw_headers, plugin_context)
             .await
             .map_err(ProtocolFailure::adapter)?;
         info!(
@@ -754,8 +740,8 @@ async fn handle_response<P: ProviderProtocol>(
             upstream_status = status.as_u16(),
             downstream_status = output.status.as_u16(),
             downstream_header_count = output.headers.len(),
-            response_context_present = response_context.is_some(),
-            response_context_mode = response_context.map(PluginResponseContext::response_mode_str),
+            plugin_context_present,
+            plugin_context_bytes,
             "stream 响应插件已完全接管响应头和原始 SSE item"
         );
         return Ok((
@@ -798,7 +784,7 @@ async fn handle_response<P: ProviderProtocol>(
                 headers: raw_headers,
                 body,
             },
-            response_context,
+            plugin_context,
         },
     )
     .await
@@ -810,8 +796,8 @@ async fn handle_response<P: ProviderProtocol>(
         resource_id = %attempt.resource_id,
         plugin_suite_id = %binding.suite_id,
         plugin_slot = response_slot.as_str(),
-        response_context_present = response_context.is_some(),
-        response_context_mode = response_context.map(PluginResponseContext::response_mode_str),
+        plugin_context_present,
+        plugin_context_bytes,
         "buffered 响应插件已完成本次 attempt 的响应转换"
     );
     let feedback = output.effects.feedback;
@@ -871,26 +857,6 @@ fn is_sse_response(headers: &HeaderMap) -> bool {
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.split(';').next())
         .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/event-stream"))
-}
-
-/// 插件声明只约束成功响应；401/429/5xx 等响应永远需要先完整读取，才能把 status、header
-/// 和 body 一次性交给 buffered 插件产生 maintenance 回执、重试指令或最终错误响应。
-fn should_use_stream_response(
-    status: StatusCode,
-    response_mode: Option<bool>,
-    headers: &HeaderMap,
-) -> bool {
-    if !status.is_success() {
-        return false;
-    }
-    match response_mode {
-        Some(response_mode) => response_mode,
-        None => is_sse_response(headers),
-    }
-}
-
-const fn response_mode_as_str(response_mode: bool) -> &'static str {
-    if response_mode { "stream" } else { "buffered" }
 }
 
 fn finish_buffered_response(

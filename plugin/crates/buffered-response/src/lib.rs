@@ -79,15 +79,37 @@ pub struct HttpResponse {
     pub body: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ResponseContext {
-    pub response_mode: bool,
+/// 当前套件约定的上下文字段；额外 JSON 字段由插件自行扩展。
+fn parse_context_stream(context: Option<&[u8]>) -> Result<Option<bool>, PluginError> {
+    let Some(context) = context else {
+        return Ok(None);
+    };
+    let value: serde_json::Value = serde_json::from_slice(context).map_err(|error| {
+        PluginError::new(
+            "invalid_plugin_context",
+            format!(
+                "plugin-context 不是合法 JSON（行 {}，列 {}）",
+                error.line(),
+                error.column()
+            ),
+        )
+    })?;
+    value
+        .get("stream")
+        .and_then(serde_json::Value::as_bool)
+        .map(Some)
+        .ok_or_else(|| {
+            PluginError::new(
+                "invalid_plugin_context",
+                "plugin-context.stream 必须是布尔值",
+            )
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BufferedTransformInput {
     pub response: HttpResponse,
-    pub response_context: Option<ResponseContext>,
+    pub plugin_context: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,13 +129,15 @@ pub fn transform_buffered_response(
 ) -> Result<BufferedTransformOutput, PluginError> {
     let BufferedTransformInput {
         response,
-        response_context: _,
+        plugin_context,
     } = input;
     let HttpResponse {
         status: upstream_status,
         headers,
         body,
     } = response;
+    // 读取本套件的私有字段；不据此限制宿主选槽或补齐上游 Response。
+    let _stream = parse_context_stream(plugin_context.as_deref())?;
     let mut converted_from_sse = false;
     let parsed_json = serde_json::from_slice::<Value>(&body).ok();
     let (mut parsed, effects) = if let Some(value) = parsed_json {

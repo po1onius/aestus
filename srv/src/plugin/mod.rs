@@ -21,8 +21,8 @@ use crate::{
 use self::{
     model::{PluginArtifactBinding, PluginBinding, PluginSlot},
     runtime::{
-        BufferedPluginInput, BufferedPluginOutput, PluginResponseContext, RequestPluginInput,
-        RequestPluginOutput, StreamPluginFinishOutput, StreamPluginItemOutput, StreamPluginSession,
+        BufferedPluginInput, BufferedPluginOutput, RequestPluginInput, RequestPluginOutput,
+        StreamPluginFinishOutput, StreamPluginItemOutput, StreamPluginSession,
         StreamPluginStartOutput,
     },
 };
@@ -161,7 +161,7 @@ pub async fn start_stream(
     binding: &PluginBinding,
     status: axum::http::StatusCode,
     headers: axum::http::HeaderMap,
-    response_context: Option<PluginResponseContext>,
+    plugin_context: Option<Vec<u8>>,
 ) -> AppResult<StreamPluginStartOutput> {
     let artifact = require_artifact(binding, PluginSlot::StreamResponse)?;
     let component = component_for_artifact(binding, artifact)?;
@@ -170,7 +170,7 @@ pub async fn start_stream(
     let binding = binding.clone();
     let started_at = Instant::now();
     let result = tokio::task::spawn_blocking(move || {
-        runtime.start_stream(&binding, &component, status, &headers, response_context)
+        runtime.start_stream(&binding, &component, status, &headers, plugin_context)
     })
     .await
     .map_err(|source| AppError::Plugin {

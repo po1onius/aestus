@@ -17,7 +17,7 @@ wit_bindgen::generate!({
     },
 });
 
-use aestus::request_transformer::common_types::{Header, ResponseContext};
+use aestus::request_transformer::common_types::Header;
 
 struct GptCodexRequestPlugin;
 
@@ -32,9 +32,7 @@ impl Guest for GptCodexRequestPlugin {
                 .map(from_common_header)
                 .collect(),
             body: transformed.body,
-            response_context: ResponseContext {
-                response_mode: transformed.response_context.response_mode,
-            },
+            plugin_context: transformed.plugin_context,
         })
     }
 }

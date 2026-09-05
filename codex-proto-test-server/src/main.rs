@@ -26,16 +26,15 @@ use chrono::{SecondsFormat, Utc};
 use clap::Parser;
 use gpt_codex_buffered_response_plugin::{
     BufferedDisposition, BufferedTransformInput, Effects as BufferedEffects,
-    Header as BufferedHeader, HttpResponse as BufferedHttpResponse,
-    ResponseContext as BufferedResponseContext, transform_buffered_response,
+    Header as BufferedHeader, HttpResponse as BufferedHttpResponse, transform_buffered_response,
 };
 use gpt_codex_plugin_utils::sse::{JsonSseItem, body_has_sse_framing, split_sse_items};
 use gpt_codex_request_plugin::{
     AccountResource, Header as RequestHeader, RequestTransformInput, transform_request,
 };
 use gpt_codex_stream_response_plugin::{
-    Effects as StreamEffects, Header as StreamHeader, ResponseContext as StreamResponseContext,
-    ResponseHead, StreamResponseTransformer, StreamStartInput,
+    Effects as StreamEffects, Header as StreamHeader, ResponseHead, StreamResponseTransformer,
+    StreamStartInput,
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -746,20 +745,26 @@ async fn create_response(
         trace.write_upstream_response(upstream.status, &upstream.body)
     })?;
 
-    // 与真实宿主一致：非 2xx 永远走 buffered；成功响应才使用请求插件声明的模式。
-    if !(200..300).contains(&upstream.status) || !transformed_request.response_context.response_mode
-    {
+    // 与网关一致，按上游响应选择插槽；plugin-context 原样传递，服务不解析。
+    let upstream_is_sse = upstream.headers.iter().any(|header| {
+        header.name.eq_ignore_ascii_case("content-type")
+            && std::str::from_utf8(&header.value)
+                .ok()
+                .and_then(|value| value.split(';').next())
+                .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/event-stream"))
+    });
+    if !(200..300).contains(&upstream.status) || !upstream_is_sse {
         handle_buffered_response(
             request_id,
             upstream,
-            transformed_request.response_context.response_mode,
+            transformed_request.plugin_context,
             &mut trace,
         )
     } else {
         handle_stream_response(
             request_id,
             upstream,
-            transformed_request.response_context.response_mode,
+            transformed_request.plugin_context,
             &mut trace,
         )
     }
@@ -791,7 +796,7 @@ async fn send_upstream(
 fn handle_buffered_response(
     request_id: u64,
     response: HttpResponse,
-    response_mode: bool,
+    plugin_context: Vec<u8>,
     trace: &mut TraceRecorder,
 ) -> Result<Response, ServiceError> {
     let upstream_was_sse = body_has_sse_framing(&response.body);
@@ -808,7 +813,7 @@ fn handle_buffered_response(
                 .collect(),
             body: response.body,
         },
-        response_context: Some(BufferedResponseContext { response_mode }),
+        plugin_context: Some(plugin_context),
     }) {
         Ok(transformed) => transformed,
         Err(error) => {
@@ -879,7 +884,7 @@ fn handle_buffered_response(
 fn handle_stream_response(
     request_id: u64,
     response: HttpResponse,
-    response_mode: bool,
+    plugin_context: Vec<u8>,
     trace: &mut TraceRecorder,
 ) -> Result<Response, ServiceError> {
     let HttpResponse {
@@ -899,7 +904,7 @@ fn handle_stream_response(
                 })
                 .collect(),
         },
-        response_context: Some(StreamResponseContext { response_mode }),
+        plugin_context: Some(plugin_context),
     }) {
         Ok(head) => head,
         Err(error) => {

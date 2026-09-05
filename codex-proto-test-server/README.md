@@ -33,7 +33,7 @@ cargo run --manifest-path codex-proto-test-server/Cargo.toml
 ```
 
 多 workspace 调试时可以额外传入 `--chatgpt-account-id <ACCOUNT_ID>`，它只覆盖本次进程实际
-使用的值，不会回写配置。监听地址默认为 `127.0.0.1:3000`。非流式验证示例：
+使用的值，不会回写配置。监听地址默认为 `127.0.0.1:3000`。请求示例：
 
 ```bash
 curl http://127.0.0.1:3000/v1/responses \
@@ -41,9 +41,13 @@ curl http://127.0.0.1:3000/v1/responses \
   -d '{"model":"gpt-5.6-terra","input":"只回复 OK","stream":false}'
 ```
 
-流式验证只需把请求中的 `stream` 改为 `true`。测试服务为了能在写出 HTTP 响应前完成整条
-事件序列和终止事件校验，会先收集完整上游 SSE，再以 `text/event-stream` 返回；它用于验证
-插件协议转换，不用于测量首 token 延迟。
+测试服务为了能在写出 HTTP 响应前完成整条事件序列和终止事件校验，会先收集完整上游
+SSE，再以 `text/event-stream` 返回；它用于验证插件协议转换，不用于测量首 token 延迟。
+
+服务与网关一致，按上游 Content-Type 选择响应插件，非 2xx 响应固定走 buffered。
+`plugin-context` 作为不透明字节原样转交，服务不解析其内容；本 GPT Codex 套件自行
+约定 JSON 格式，并由响应插件读取其中的 `stream`。此字段目前不触发 SSE 聚合，因此
+Codex 的 SSE 成功响应仍以 SSE 返回，包括原始请求 `stream=false` 的情况。
 
 ## 请求调试记录
 

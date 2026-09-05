@@ -1,7 +1,7 @@
 import { Loader2, Plus } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { Modal } from "../../components/Modal";
-import { buttonPrimary, fieldHelp, fieldLabel, fieldStack, inputClass, spinnerClass, textareaClass } from "../../lib/ui";
+import { buttonPrimary, fieldLabel, fieldStack, inputClass, spinnerClass, textareaClass } from "../../lib/ui";
 import type { PluginSummary, UpstreamApiKeyProvider } from "../../types";
 import { pluginSourceLabel } from "./access";
 import { pluginSlotLabels, suiteSlotFields } from "./slots";
@@ -37,7 +37,7 @@ export function PluginSuiteCreateDialog({ plugins, saving, onCreate, onClose, is
   }
 
   return (
-    <Modal titleId="pluginSuiteCreateTitle" title={isPlatformAdmin ? "创建平台公共套件" : "创建本租户套件"} description="从已有插件中组合套件。创建后不能更换插件搭配。" closeDisabled={saving} onClose={onClose}>
+    <Modal titleId="pluginSuiteCreateTitle" title={isPlatformAdmin ? "创建平台公共套件" : "创建本租户套件"} closeDisabled={saving} onClose={onClose}>
       <form className="grid gap-4" onSubmit={submit}>
         <label className={fieldStack}>
           <span className={fieldLabel}>套件名称</span>
@@ -61,7 +61,6 @@ export function PluginSuiteCreateDialog({ plugins, saving, onCreate, onClose, is
             </select>
           </label>
         ))}
-        <span className={fieldHelp}>至少选择一个插件。仅列出同 Provider、对应插槽的插件。</span>
         <label className={fieldStack}>
           <span className={fieldLabel}>备注</span>
           <textarea className={textareaClass} disabled={saving} maxLength={1024} value={input.description} onChange={(e) => setInput({ ...input, description: e.target.value })} />

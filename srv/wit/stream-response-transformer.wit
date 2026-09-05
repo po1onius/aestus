@@ -1,7 +1,7 @@
 package aestus:stream-response-transformer@1.0.0;
 
 interface common-types {
-    use aestus:plugin-types/response-types@1.0.0.{response-context};
+    use aestus:plugin-types/response-types@1.0.0.{plugin-context};
 
     record header {
         name: string,
@@ -16,7 +16,7 @@ interface common-types {
     record start-input {
         head: response-head,
         /// 同一 attempt 的请求插件输出；没有执行请求插件时为 none。
-        response-context: option<response-context>,
+        plugin-context: option<plugin-context>,
     }
 
     record transform-error {

@@ -43,12 +43,6 @@ pub struct AccountResource {
     pub chatgpt_account_is_fedramp: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ResponseContext {
-    /// `true` 表示成功响应使用 stream 插槽，`false` 表示使用 buffered 插槽。
-    pub response_mode: bool,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestTransformInput {
     pub account: AccountResource,
@@ -60,7 +54,7 @@ pub struct RequestTransformInput {
 pub struct RequestTransformOutput {
     pub headers: Vec<Header>,
     pub body: Vec<u8>,
-    pub response_context: ResponseContext,
+    pub plugin_context: Vec<u8>,
 }
 
 /// 执行完整的 Codex OAuth 请求插件逻辑。该入口不依赖 WASM/WIT，可被协议验证服务直接调用。
@@ -78,9 +72,15 @@ pub fn transform_request(
     Ok(RequestTransformOutput {
         headers,
         body: transformed.body,
-        response_context: ResponseContext {
-            response_mode: transformed.downstream_streaming,
-        },
+        plugin_context: serde_json::to_vec(&serde_json::json!({
+            "stream": transformed.downstream_streaming,
+        }))
+        .map_err(|_| {
+            PluginError::new(
+                "serialize_plugin_context_failed",
+                "无法序列化 plugin-context JSON",
+            )
+        })?,
     })
 }
 

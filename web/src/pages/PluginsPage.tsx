@@ -49,9 +49,9 @@ export function PluginsPage(props: Props) {
           <option value="claude">Claude · Messages</option>
         </select>
       </div>
-      <p className={cellNoteClass}>{props.user.role === "platform_admin"
-        ? "平台公共插件和套件对所有租户可用。公共套件只能选择公共插件。"
-        : "可以使用平台公共资源，管理本租户资源；私有套件可组合公共插件与本租户插件。"}</p>
+      {props.user.role !== "platform_admin" && (
+        <p className={cellNoteClass}>可以使用平台公共资源，管理本租户资源；私有套件可组合公共插件与本租户插件。</p>
+      )}
       <div className={`${panelClass} overflow-hidden`}>
         <div className={panelHeaderClass}>
           <h2 className={panelTitleClass}>{tab === "plugins" ? "WASM 插件" : "套件"}</h2>

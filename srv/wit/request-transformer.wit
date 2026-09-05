@@ -1,7 +1,7 @@
 package aestus:request-transformer@1.0.0;
 
 interface common-types {
-    use aestus:plugin-types/response-types@1.0.0.{response-context};
+    use aestus:plugin-types/response-types@1.0.0.{plugin-context};
 
     record header {
         name: string,
@@ -12,7 +12,7 @@ interface common-types {
         headers: list<header>,
         body: list<u8>,
         /// 与最终 header/body 同属一次 attempt 的权威响应阶段上下文。
-        response-context: response-context,
+        plugin-context: plugin-context,
     }
 
     record transform-error {

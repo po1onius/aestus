@@ -4,9 +4,9 @@ use std::cell::RefCell;
 
 use crate::{
     Effects as CommonEffects, Feedback as CommonFeedback, Header as CommonHeader,
-    LimitFeedback as CommonLimitFeedback, ResponseContext as CommonResponseContext,
-    ResponseHead as CommonResponseHead, StreamFailure as CommonStreamFailure,
-    StreamResponseTransformer, StreamStartInput as CommonStartInput, Usage as CommonUsage,
+    LimitFeedback as CommonLimitFeedback, ResponseHead as CommonResponseHead,
+    StreamFailure as CommonStreamFailure, StreamResponseTransformer,
+    StreamStartInput as CommonStartInput, Usage as CommonUsage,
 };
 
 wit_bindgen::generate!({
@@ -46,9 +46,7 @@ impl Guest for GptCodexStreamResponsePlugin {
                         .map(to_common_header)
                         .collect(),
                 },
-                response_context: input.response_context.map(|context| CommonResponseContext {
-                    response_mode: context.response_mode,
-                }),
+                plugin_context: input.plugin_context,
             })
         });
         let transformed = transformed.map_err(from_common_error)?;

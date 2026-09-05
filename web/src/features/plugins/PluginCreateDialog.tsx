@@ -58,7 +58,6 @@ export function PluginCreateDialog({ saving, onCreate, onClose, isPlatformAdmin 
         <label className={fieldStack}>
           <span className={fieldLabel}>WASM 文件</span>
           <input className={inputClass} type="file" accept=".wasm,application/wasm" required disabled={saving} onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
-          <span className="text-xs text-slate-500">文件最大 8 MiB。上传后可在多个套件中重复选择。</span>
         </label>
         <label className={fieldStack}>
           <span className={fieldLabel}>备注</span>

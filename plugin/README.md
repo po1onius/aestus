@@ -4,14 +4,15 @@
 一次 `/v1/responses` 请求。插件只实现 GPT OAuth Account 到 ChatGPT Codex Responses
 上游的协议适配，不包含 `/chat/completions` 兼容、WebSocket v2、心跳、重试或计费策略。
 
-Codex OAuth 上游固定使用 SSE。下游传入 `stream=false` 时，套件会完整收集上游事件流，
-再转换为一个非流式 Responses JSON；下游传入 `stream=true` 时，则逐个处理完整 SSE item。
+Codex OAuth 上游固定使用 SSE。宿主按上游 Content-Type 选择响应插槽；SSE 成功响应
+进入流式插件，逐个处理完整 SSE item。buffered 插件保留完整 SSE 转 JSON 的转换能力，
+但上下文中的 `stream=false` 目前只被插件读取，不会触发宿主切换插槽或自动聚合。
 
 三个组件分别是：
 
 | Dashboard 插槽 | 构建产物 | 职责 |
 | --- | --- | --- |
-| 请求插件 | `target/gpt-codex-request.component.wasm` | 生成最终上游请求 body/header，并声明下游响应模式 |
+| 请求插件 | `target/gpt-codex-request.component.wasm` | 生成最终上游请求 body/header，并携带插件私有上下文 |
 | 非流式响应插件 | `target/gpt-codex-buffered-response.component.wasm` | 处理完整上游 HTTP 响应或把完整 SSE 转为 JSON |
 | 流式响应插件 | `target/gpt-codex-stream-response.component.wasm` | 处理响应头及每个完整 SSE item |
 
@@ -20,7 +21,7 @@ Codex OAuth 上游固定使用 SSE。下游传入 `stream=false` 时，套件会
 三个插件分别拥有自己的完整转换实现，不依赖其他插件的业务类型或业务函数。每个 crate
 公开不依赖 WASM/WIT 的 Rust 入口，可由普通 Rust 程序直接调用：
 
-- `gpt-codex-request-plugin::transform_request`：改造 OAuth 请求 header/body，并返回下游响应模式；
+- `gpt-codex-request-plugin::transform_request`：改造 OAuth 请求 header/body，并返回插件私有上下文；
 - `gpt-codex-buffered-response-plugin::transform_buffered_response`：处理非流式 JSON、错误响应
   以及完整 SSE 到 JSON 的转换；
 - `gpt-codex-stream-response-plugin::StreamResponseTransformer`：处理一条流式响应的完整生命周期。
@@ -36,9 +37,9 @@ Component 只负责各自 WIT 类型映射，因此 Rust 函数入口和上传�
 请求插件会执行以下操作：
 
 - 请求体必须是 JSON object，并且包含非空字符串 `model`；
-- 保存调用方原始 `stream`。请求输出统一使用 `response-context` record，其中
-  `response-mode=true` 表示 stream，`false` 表示 buffered；只有原始值为布尔 `true`
-  时才输出 `true`；
+- 保存调用方原始 `stream`。请求输出的 `plugin-context` 是 `list<u8>`，内容为 UTF-8
+  JSON，例如 `{"stream":true}`。只有调用方原始 `stream` 为布尔 `true` 时，JSON 中的
+  `stream` 才为 `true`，否则为 `false`；
 - 发给 Codex 上游的 body 无论下游模式如何，都固定为 `store=false`、`stream=true`；
 - 拒绝非空 `previous_response_id`。HTTP `/v1/responses` 不支持 Responses WebSocket v2 的
   连接态续链语义；
@@ -78,10 +79,19 @@ Component 只负责各自 WIT 类型映射，因此 Rust 函数入口和上传�
 - 将 `role=tool` 转成 `function_call_output`；
 - 对 Spark 模型注入图片能力说明。
 
-请求 ABI 不再提供独立的 `response-mode` enum 或透明字节 `response-context`。模式被收敛到
-必填的 `response-context.response-mode: bool`。宿主会把同一 record 按 attempt 传给被选中的
-buffered 或 stream 响应插件；未执行请求插件时，响应插件输入中的 `response-context` 为
-`none`。当前响应转换不使用该模式补齐 Response，避免把请求配置误当成上游响应事实。
+三个 ABI 共用 `plugin-context = list<u8>` 类型。它是插件私有的不透明字节，宿主只限制
+容量并按 attempt 原样转交，不解析 JSON，不要求任何字段，也不从中提取响应模式。其他
+插件可以约定完全不同的内容。未执行请求插件时，响应插件输入中的 `plugin-context` 为
+`none`；执行过请求插件并返回空字节时则为 `some([])`。
+
+本目录的 GPT Codex 套件自行约定使用 UTF-8 JSON object，并以布尔 `stream` 保存调用方
+原始交付模式；这只是本套件的内部协议，不属于宿主或 WIT 的字段契约。
+
+本套件的两个响应插件各自在业务入口解析 JSON 的 `stream`；非法 JSON、缺失或非布尔
+`stream` 返回 `invalid_plugin_context`，额外字段不会被拒绝。上下文为 `none` 时解析结果
+为 `None`。该字段目前只被读取，不用于限制插槽、切换响应模式或补齐 Response 字段。
+
+这是对旧 record ABI 的破坏性修改；宿主升级后需要重新编译并上传三个插件组件。
 
 请求插件主动返回的 `transform-error` 表示调用方请求不受支持或结构非法。宿主不会发送
 上游 HTTP 请求，也不会调用 buffered/stream 响应插件，而是使用插件公开的 `code/message`
@@ -110,7 +120,7 @@ buffered 或 stream 响应插件；未执行请求插件时，响应插件输入
 
 ## 缓冲响应转换
 
-缓冲响应插件用于下游 `stream=false` 的成功响应，以及所有非 2xx HTTP 响应。
+缓冲响应插件用于上游非 SSE 的成功响应，以及所有非 2xx HTTP 响应。
 
 如果上游 body 已经是 JSON，插件只提取 effects 并执行通用响应字段转换，不校验它是否为
 标准 Response object；非 2xx JSON 或非 JSON 错误响应仍保持上游状态和 body。如果成功响应
@@ -193,15 +203,18 @@ WASM 组件不访问数据库、缓存、文件系统或网络，也没有日志
 buffered 响应和 stream 响应三个插槽，执行 Provider 原生代理流程；混合资源分组会在每次
 调度后按实际资源类型决定。
 
-成功响应优先使用请求插件声明的 `response-context.response-mode` 选择响应插槽，不依赖
-上游 `Content-Type`。值为 `true` 时选择 stream，值为 `false` 时选择 buffered。401、429、
-5xx 等非成功响应固定交给 buffered 插件，以便完整解析错误正文和产生 maintenance 回执。
+成功响应按上游 `Content-Type` 选择响应插槽：`text/event-stream` 选择 stream，其他
+类型选择 buffered。401、429、5xx 等非成功响应固定交给 buffered 插件，以便完整解析
+错误正文和产生 maintenance 回执。宿主不读取原始请求或插件上下文中的 `stream` 来选槽。
 如果被选择的响应插槽未配置插件，宿主会回到 Provider 原生响应处理流程。
 已配置插件但引用失效时拒绝请求，不按空插槽处理。
 
 宿主允许单个完整 SSE item 最大 500 MiB。stream Component 使用独立的 2 GiB 线性内存
 边界，为 canonical ABI、JSON DOM 及必要重写产生的瞬时副本预留空间；请求和 buffered
-响应 Component 使用 64 MiB 内存边界。插件输出 body 不能超过 64 MiB。
+响应 Component 使用 64 MiB 内存边界。插件输出 body 不能超过 64 MiB，`plugin-context`
+不能超过 1 MiB。宿主在发送上游请求前仅校验上下文容量；超限视为插件执行故障，返回
+脱敏 HTTP 502。上下文相关日志只记录是否存在及字节大小，不记录或解析内容。JSON 格式和
+字段校验由本套件的响应插件执行，其他插件自行决定如何解释其上下文。
 
 ## 构建与上传
 
@@ -243,10 +256,10 @@ Account attempt；其他接口及 Official API Key attempt 保持原来的原生
 编译缓存位于各网关进程内存，不使用 Redis；删除插件或套件不会清理该缓存，当前也
 没有 TTL 或容量淘汰。缓存保留到进程退出，但不能绕过入口数据库有效性校验。
 
-共享响应上下文和三个 ABI 的唯一真源分别是：
+共享插件上下文和三个 ABI 的唯一真源分别是：
 
 - [`../srv/wit/plugin-types.wit`](../srv/wit/plugin-types.wit)：共享的
-  `response-context` record；
+  `plugin-context = list<u8>` 类型；
 - [`../srv/wit/request-transformer.wit`](../srv/wit/request-transformer.wit)
 - [`../srv/wit/buffered-response-transformer.wit`](../srv/wit/buffered-response-transformer.wit)
 - [`../srv/wit/stream-response-transformer.wit`](../srv/wit/stream-response-transformer.wit)

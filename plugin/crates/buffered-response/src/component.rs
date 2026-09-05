@@ -3,8 +3,8 @@
 use crate::{
     BufferedDisposition as CommonDisposition, BufferedTransformInput as CommonTransformInput,
     Effects as CommonEffects, Feedback as CommonFeedback, Header as CommonHeader,
-    HttpResponse as CommonResponse, LimitFeedback as CommonLimitFeedback,
-    ResponseContext as CommonResponseContext, Usage as CommonUsage, transform_buffered_response,
+    HttpResponse as CommonResponse, LimitFeedback as CommonLimitFeedback, Usage as CommonUsage,
+    transform_buffered_response,
 };
 
 wit_bindgen::generate!({
@@ -58,9 +58,7 @@ fn to_common_input(input: TransformInput) -> CommonTransformInput {
                 .collect(),
             body: input.response.body,
         },
-        response_context: input.response_context.map(|context| CommonResponseContext {
-            response_mode: context.response_mode,
-        }),
+        plugin_context: input.plugin_context,
     }
 }
 

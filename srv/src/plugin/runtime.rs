@@ -35,6 +35,7 @@ const PLUGIN_MEMORY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 /// 会在调用期间并存。2 GiB 为这些瞬时副本留出空间，同时仍给单个 stream session 设置
 /// 明确边界，避免异常组件无限增长线性内存。
 const STREAM_PLUGIN_MEMORY_LIMIT_BYTES: usize = 2 * 1024 * 1024 * 1024;
+const MAX_PLUGIN_CONTEXT_BYTES: usize = 1024 * 1024;
 const MAX_OUTPUT_BODY_BYTES: usize = 64 * 1024 * 1024;
 const _: () = assert!(STREAM_PLUGIN_MEMORY_LIMIT_BYTES > MAX_SSE_ITEM_BYTES);
 const MAX_HEADER_VALUES: usize = 256;
@@ -158,23 +159,7 @@ pub struct RequestPluginOutput {
     pub headers: HeaderMap,
     pub body: Bytes,
     /// 请求插件声明的响应阶段上下文，与最终 header/body 一起按 attempt 传递。
-    pub response_context: PluginResponseContext,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PluginResponseContext {
-    /// `true` 表示成功响应使用 stream 插槽，`false` 表示使用 buffered 插槽。
-    pub response_mode: bool,
-}
-
-impl PluginResponseContext {
-    pub const fn response_mode_str(self) -> &'static str {
-        if self.response_mode {
-            "stream"
-        } else {
-            "buffered"
-        }
-    }
+    pub plugin_context: Vec<u8>,
 }
 
 #[derive(Clone)]
@@ -186,7 +171,7 @@ pub struct RawPluginResponse {
 
 pub struct BufferedPluginInput {
     pub response: RawPluginResponse,
-    pub response_context: Option<PluginResponseContext>,
+    pub plugin_context: Option<Vec<u8>>,
 }
 
 pub struct PluginEffects {
@@ -423,13 +408,11 @@ impl PluginRuntime {
         component: &Component,
         status: StatusCode,
         headers: &HeaderMap,
-        response_context: Option<PluginResponseContext>,
+        plugin_context: Option<Vec<u8>>,
     ) -> AppResult<StreamPluginStartOutput> {
         match binding.provider.as_str() {
-            PROVIDER_GPT => self.start_gpt_stream(component, status, headers, response_context),
-            PROVIDER_CLAUDE => {
-                self.start_claude_stream(component, status, headers, response_context)
-            }
+            PROVIDER_GPT => self.start_gpt_stream(component, status, headers, plugin_context),
+            PROVIDER_CLAUDE => self.start_claude_stream(component, status, headers, plugin_context),
             provider => Err(AppError::Plugin {
                 message: format!("stream 响应插件 Provider 不受支持: {provider}"),
             }),
@@ -470,7 +453,7 @@ impl PluginRuntime {
                 .into_iter()
                 .map(|header| (header.name, header.value)),
             output.body,
-            output.response_context.response_mode,
+            output.plugin_context,
         )
     }
 
@@ -507,7 +490,7 @@ impl PluginRuntime {
                 .into_iter()
                 .map(|header| (header.name, header.value)),
             output.body,
-            output.response_context.response_mode,
+            output.plugin_context,
         )
     }
 
@@ -523,11 +506,7 @@ impl PluginRuntime {
                 headers: headers_to_wit::<common_types::Header>(&input.response.headers)?,
                 body: input.response.body.to_vec(),
             },
-            response_context: input
-                .response_context
-                .map(|context| common_types::ResponseContext {
-                    response_mode: context.response_mode,
-                }),
+            plugin_context: input.plugin_context,
         };
         let mut store = self.new_store(PLUGIN_MEMORY_LIMIT_BYTES)?;
         let linker = Linker::<StoreData>::new(&self.inner.engine);
@@ -554,11 +533,7 @@ impl PluginRuntime {
                 headers: headers_to_wit::<common_types::Header>(&input.response.headers)?,
                 body: input.response.body.to_vec(),
             },
-            response_context: input
-                .response_context
-                .map(|context| common_types::ResponseContext {
-                    response_mode: context.response_mode,
-                }),
+            plugin_context: input.plugin_context,
         };
         let mut store = self.new_store(PLUGIN_MEMORY_LIMIT_BYTES)?;
         let linker = Linker::<StoreData>::new(&self.inner.engine);
@@ -578,7 +553,7 @@ impl PluginRuntime {
         component: &Component,
         status: StatusCode,
         headers: &HeaderMap,
-        response_context: Option<PluginResponseContext>,
+        plugin_context: Option<Vec<u8>>,
     ) -> AppResult<StreamPluginStartOutput> {
         use gpt_stream_bindings::aestus::stream_response_transformer::common_types;
         let mut store = self.new_store(STREAM_PLUGIN_MEMORY_LIMIT_BYTES)?;
@@ -592,9 +567,7 @@ impl PluginRuntime {
                 status: status.as_u16(),
                 headers: headers_to_wit::<common_types::Header>(headers)?,
             },
-            response_context: response_context.map(|context| common_types::ResponseContext {
-                response_mode: context.response_mode,
-            }),
+            plugin_context,
         };
         let output = bindings
             .call_start(&mut store, &input)
@@ -619,7 +592,7 @@ impl PluginRuntime {
         component: &Component,
         status: StatusCode,
         headers: &HeaderMap,
-        response_context: Option<PluginResponseContext>,
+        plugin_context: Option<Vec<u8>>,
     ) -> AppResult<StreamPluginStartOutput> {
         use claude_stream_bindings::aestus::stream_response_transformer::common_types;
         let mut store = self.new_store(STREAM_PLUGIN_MEMORY_LIMIT_BYTES)?;
@@ -633,9 +606,7 @@ impl PluginRuntime {
                 status: status.as_u16(),
                 headers: headers_to_wit::<common_types::Header>(headers)?,
             },
-            response_context: response_context.map(|context| common_types::ResponseContext {
-                response_mode: context.response_mode,
-            }),
+            plugin_context,
         };
         let output = bindings
             .call_start(&mut store, &input)
@@ -788,11 +759,19 @@ fn headers_to_wit<H: WitHeader>(headers: &HeaderMap) -> AppResult<Vec<H>> {
 fn request_output_from_parts(
     headers: impl Iterator<Item = (String, Vec<u8>)>,
     body: Vec<u8>,
-    response_mode: bool,
+    plugin_context: Vec<u8>,
 ) -> AppResult<RequestPluginOutput> {
     if body.len() > MAX_OUTPUT_BODY_BYTES {
         return Err(AppError::Plugin {
             message: format!("请求插件输出 Body 超过限制: {} bytes", body.len()),
+        });
+    }
+    if plugin_context.len() > MAX_PLUGIN_CONTEXT_BYTES {
+        return Err(AppError::Plugin {
+            message: format!(
+                "请求插件输出 plugin-context 超过限制: {} bytes",
+                plugin_context.len()
+            ),
         });
     }
     let mut headers = parse_headers(headers)?;
@@ -801,7 +780,7 @@ fn request_output_from_parts(
     Ok(RequestPluginOutput {
         headers,
         body: Bytes::from(body),
-        response_context: PluginResponseContext { response_mode },
+        plugin_context,
     })
 }
 
