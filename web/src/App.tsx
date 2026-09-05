@@ -34,6 +34,7 @@ import {
   themeStorageKey,
 } from "./config";
 import { AccountImportDialog } from "./features/accounts/AccountImportDialog";
+import { AccountQuotaDialog } from "./features/accounts/AccountQuotaDialog";
 import { ProviderGroupCreateDialog } from "./features/accounts/ProviderGroupCreateDialog";
 import { ProviderUpstreamApiKeyDialog } from "./features/accounts/ProviderUpstreamApiKeyDialog";
 import { RateLimitResetDialog } from "./features/accounts/RateLimitResetDialog";
@@ -163,7 +164,11 @@ export function App() {
   const [providerGroupsVisible, setProviderGroupsVisible] = useState(false);
   const [activeAccountProvider, setActiveAccountProvider] = useState<AccountProviderKey>("gpt");
   const [users, setUsers] = useState<DashboardUserListItem[]>([]);
-  const [accountQuotas, setAccountQuotas] = useState<Record<string, GptAccountQuotaResponse>>({});
+  const [accountQuotaTarget, setAccountQuotaTarget] = useState<GptAccount | null>(null);
+  const [accountQuotaResponse, setAccountQuotaResponse] =
+    useState<GptAccountQuotaResponse | null>(null);
+  const [accountQuotaLoading, setAccountQuotaLoading] = useState(false);
+  const [accountQuotaError, setAccountQuotaError] = useState<string | null>(null);
   const [rateLimitResetTarget, setRateLimitResetTarget] = useState<GptAccount | null>(null);
   const [rateLimitResetResponse, setRateLimitResetResponse] =
     useState<RateLimitResetCreditsResponse | null>(null);
@@ -222,7 +227,6 @@ export function App() {
   const [upstreamApiKeyEnabledUpdatingId, setUpstreamApiKeyEnabledUpdatingId] =
     useState<string | null>(null);
   const [resourceGroupUpdatingId, setResourceGroupUpdatingId] = useState<string | null>(null);
-  const [quotaRefreshingIds, setQuotaRefreshingIds] = useState<Record<string, boolean>>({});
   const [apiKeyUpdatingId, setApiKeyUpdatingId] = useState<string | null>(null);
   const [accountImportOpen, setAccountImportOpen] = useState(false);
   const [accountImportMode, setAccountImportMode] = useState<AccountImportMode>("oauth");
@@ -586,7 +590,15 @@ export function App() {
     setProviderGroupsVisible(false);
     setActiveAccountProvider("gpt");
     setUsers([]);
-    setAccountQuotas({});
+    setAccountQuotaTarget(null);
+    setAccountQuotaResponse(null);
+    setAccountQuotaLoading(false);
+    setAccountQuotaError(null);
+    setRateLimitResetTarget(null);
+    setRateLimitResetResponse(null);
+    setRateLimitResetLoading(false);
+    setRateLimitResetError(null);
+    setApplyingResetCreditId(null);
     setApiKeys([]);
     setPlugins([]);
     setPluginOptions([]);
@@ -653,7 +665,6 @@ export function App() {
     setResourceGroupUpdatingId(null);
     setProviderGroupSavingId(null);
     setUserUpdatingId(null);
-    setQuotaRefreshingIds({});
     setLoading(false);
     setUsersLoading(false);
     setApiKeysLoading(false);
@@ -725,10 +736,6 @@ export function App() {
       setGptUpstreamApiKeysPage(pageStateFrom(gptUpstreamKeys));
       setClaudeAccountsPage(pageStateFrom(claudeData));
       setClaudeUpstreamApiKeysPage(pageStateFrom(claudeUpstreamKeys));
-      const visibleAccountIds = new Set(data.items.map((account) => account.id));
-      setAccountQuotas((items) =>
-        Object.fromEntries(Object.entries(items).filter(([accountId]) => visibleAccountIds.has(accountId))),
-      );
     } catch (error) {
       if (isActiveAuthToken(token)) {
         showErrorToast("账号加载失败", error);
@@ -2323,8 +2330,8 @@ export function App() {
     }
   }
 
-  /** 查询并写入账号额度；重置成功后的静默同步与手动“查询额度”共用同一状态更新路径。 */
-  async function fetchAndStoreAccountQuota(account: GptAccount) {
+  /** 查询账号额度；手动查看与重置成功后的调度状态同步共用同一路径。 */
+  async function fetchAccountQuota(account: GptAccount) {
     const quota = await requestJson<GptAccountQuotaResponse>(
       `${gptAccountsPath}/${account.id}/quota`,
       {
@@ -2332,7 +2339,6 @@ export function App() {
       },
       authToken,
     );
-    setAccountQuotas((items) => ({ ...items, [account.id]: quota }));
     if (quota.quota_limit_removed) {
       // 后端已同时更新 PostgreSQL quota 状态与 Redis 调度投影，重新加载账号列表，避免
       // 页面继续展示查询前的 quota_limited 快照。
@@ -2341,24 +2347,35 @@ export function App() {
     return quota;
   }
 
-  async function refreshAccountQuota(account: GptAccount) {
-    setQuotaRefreshingIds((items) => ({ ...items, [account.id]: true }));
+  /** 点击“查询额度”后立即打开弹窗，由弹窗承载加载态、错误态和完整额度结果。 */
+  async function openAccountQuotaDialog(account: GptAccount) {
+    setAccountQuotaTarget(account);
+    setAccountQuotaResponse(null);
+    setAccountQuotaError(null);
+    setAccountQuotaLoading(true);
     try {
-      const quota = await fetchAndStoreAccountQuota(account);
+      const quota = await fetchAccountQuota(account);
+      setAccountQuotaResponse(quota);
       if (quota.quota_limit_removed) {
         toast.success("账号额度查询成功，额度限制已解除");
       } else {
         toast.success("账号额度查询成功");
       }
     } catch (error) {
-      showErrorToast("账号额度查询失败", error);
+      console.error("[dashboard] 账号额度查询失败", error);
+      setAccountQuotaError(errorMessageFrom(error));
     } finally {
-      setQuotaRefreshingIds((items) => {
-        const next = { ...items };
-        delete next[account.id];
-        return next;
-      });
+      setAccountQuotaLoading(false);
     }
+  }
+
+  function closeAccountQuotaDialog() {
+    if (accountQuotaLoading) {
+      return;
+    }
+    setAccountQuotaTarget(null);
+    setAccountQuotaResponse(null);
+    setAccountQuotaError(null);
   }
 
   async function fetchRateLimitResetCredits(account: GptAccount) {
@@ -2435,7 +2452,7 @@ export function App() {
         const [creditsResult, quotaResult] = await Promise.allSettled([
           fetchRateLimitResetCredits(account),
           result.code === "reset" || result.code === "already_redeemed"
-            ? fetchAndStoreAccountQuota(account)
+            ? fetchAccountQuota(account)
             : Promise.resolve(null),
         ]);
         if (creditsResult.status === "fulfilled") {
@@ -2485,11 +2502,6 @@ export function App() {
         method: "DELETE",
       }, authToken);
       setAccounts((items) => items.filter((item) => item.id !== deleted.id));
-      setAccountQuotas((items) => {
-        const next = { ...items };
-        delete next[deleted.id];
-        return next;
-      });
       await loadProviderGroups();
       toast.success("账号已删除");
     } catch (error) {
@@ -2739,6 +2751,8 @@ export function App() {
     rateLimitResetTarget && (rateLimitResetLoading || applyingResetCreditId)
       ? rateLimitResetTarget.id
       : null;
+  const quotaOperationAccountId =
+    accountQuotaTarget && accountQuotaLoading ? accountQuotaTarget.id : null;
 
   if (authLoading || !currentUser) {
     return (
@@ -2812,6 +2826,16 @@ export function App() {
               onChatgptAccountIdChange={setChatgptAccountId}
               onSubmitCallback={submitCallback}
               onSubmitManual={submitManualAccount}
+            />
+          )}
+          {accountQuotaTarget && activePage === "accounts" && (
+            <AccountQuotaDialog
+              key={`account-quota-${accountQuotaTarget.id}`}
+              account={accountQuotaTarget}
+              response={accountQuotaResponse}
+              loading={accountQuotaLoading}
+              error={accountQuotaError}
+              onClose={closeAccountQuotaDialog}
             />
           )}
           {rateLimitResetTarget && activePage === "accounts" && (
@@ -3038,7 +3062,6 @@ export function App() {
           claudeAccounts={claudeAccounts}
           gptUpstreamApiKeys={gptUpstreamApiKeys}
           claudeUpstreamApiKeys={claudeUpstreamApiKeys}
-          accountQuotas={accountQuotas}
           loading={loading}
           activeProvider={activeAccountProvider}
           activeCredentialTab={activeCredentialTab}
@@ -3049,7 +3072,7 @@ export function App() {
           accountDeletingId={accountDeletingId}
           upstreamApiKeyDeletingId={upstreamApiKeyDeletingId}
           upstreamApiKeyEnabledUpdatingId={upstreamApiKeyEnabledUpdatingId}
-          quotaRefreshingIds={quotaRefreshingIds}
+          quotaOperationAccountId={quotaOperationAccountId}
           resetOperationAccountId={resetOperationAccountId}
           providerGroups={providerGroups}
           resourceGroupUpdatingId={resourceGroupUpdatingId}
@@ -3079,7 +3102,7 @@ export function App() {
           onUpdateClaudeEnabled={updateClaudeEnabled}
           onUpdateGptEnabled={updateEnabled}
           onUpdateUpstreamApiKeyEnabled={updateUpstreamApiKeyEnabled}
-          onRefreshAccountQuota={refreshAccountQuota}
+          onOpenAccountQuota={openAccountQuotaDialog}
           onOpenRateLimitReset={openRateLimitResetDialog}
           onDeleteGptAccount={requestDeleteAccount}
           onDeleteClaudeAccount={requestDeleteClaudeAccount}

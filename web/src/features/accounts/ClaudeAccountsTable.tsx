@@ -72,9 +72,10 @@ export function ClaudeAccountsTable({
             <th>账号</th>
             <th>所在组</th>
             <th>Anthropic 身份</th>
-            <th>OAuth Scope</th>
             <th>状态</th>
+            <th>并发</th>
             <th>调度</th>
+            <th>凭证</th>
             <th>更新</th>
             <th>操作</th>
           </tr>
@@ -131,23 +132,9 @@ export function ClaudeAccountsTable({
                 </p>
               </td>
               <td>
-                <div className={cellWrapClass}>
-                  {account.scopes.length > 0 ? account.scopes.join(", ") : "未返回 scope"}
-                </div>
-                <p className={cellNoteClass}>
-                  Refresh Token 到期：{formatOptionalDateTime(account.refresh_token_expires_at)}
-                </p>
-                <p className={cellNoteClass}>
-                  订阅创建：{formatOptionalDateTime(account.subscription_created_at)}
-                </p>
-                <p className={cellNoteClass}>
-                  账号创建：{formatOptionalDateTime(account.account_created_at)}
-                </p>
-              </td>
-              <td>
                 <div className="grid gap-1.5">
                   <StatusBadge status={account.status} />
-                  <p className={cellNoteClass}>管理员：{account.enabled ? "已启用" : "已禁用"}</p>
+                  <p className={cellNoteClass}>管理状态：{account.enabled ? "已启用" : "已禁用"}</p>
                   {account.status_reason && (
                     <p className={`${cellNoteClass} max-w-40 text-red-700 dark:text-red-400`} title={account.status_reason}>
                       {account.status_reason}
@@ -156,26 +143,46 @@ export function ClaudeAccountsTable({
                 </div>
               </td>
               <td>
+                <div className={cellMainClass}>{account.runtime.inflight_count}</div>
+              </td>
+              <td>
                 <RuntimeBadge runtime={account.runtime} />
                 <p className={cellNoteClass}>
-                  并发：{account.runtime.inflight_count} ·{" "}
-                  {account.runtime.runtime_ready ? "runtime 就绪" : "runtime 未就绪"}
+                  可调度：{account.runtime.runtime_ready ? "是" : "否"}
                 </p>
-                <p className={cellNoteClass}>Token：{account.runtime.token_usable ? "可用" : "不可用"}</p>
+                <p className={cellNoteClass}>
+                  运行态：{account.runtime.runtime_exists ? "已发布" : "未发布"}
+                </p>
+                {account.runtime.runtime_state === "quota_limited" &&
+                  (account.runtime.quota_resets_at || account.quota_resets_at) && (
+                    <p className={cellNoteClass}>
+                      预计恢复：
+                      {formatOptionalDateTime(
+                        account.runtime.quota_resets_at || account.quota_resets_at,
+                      )}
+                    </p>
+                  )}
+              </td>
+              <td>
+                <div className={cellMainClass}>
+                  Token：{account.runtime.token_usable ? "可用" : "不可用"}
+                </div>
                 <p className={cellNoteClass}>
                   下次刷新：{formatOptionalDateTime(account.runtime.next_token_refresh_at)}
                 </p>
-                {(account.runtime.quota_resets_at || account.quota_resets_at) && (
-                  <p className={cellNoteClass}>
-                    额度恢复：
-                    {formatOptionalDateTime(account.runtime.quota_resets_at || account.quota_resets_at)}
-                  </p>
-                )}
+                <p className={cellNoteClass}>
+                  Refresh Token 到期：{formatOptionalDateTime(account.refresh_token_expires_at)}
+                </p>
               </td>
               <td>
-                <div className={cellMainClass}>{formatDateTime(account.updated_at)}</div>
+                <div className={cellMainClass}>更新：{formatDateTime(account.updated_at)}</div>
                 <p className={cellNoteClass}>创建：{formatDateTime(account.created_at)}</p>
-                <p className={cellNoteClass}>运行态：{account.runtime.runtime_exists ? "已发布" : "未发布"}</p>
+                <p className={cellNoteClass}>
+                  订阅创建：{formatOptionalDateTime(account.subscription_created_at)}
+                </p>
+                <p className={cellNoteClass}>
+                  账号创建：{formatOptionalDateTime(account.account_created_at)}
+                </p>
               </td>
               <td>
                 <div className={actionStackClass}>

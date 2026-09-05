@@ -1,6 +1,5 @@
 import { errorMessageFrom } from "../../lib/errors";
 import type {
-  GptAccountQuotaResponse,
   GptCreditsSnapshot,
   GptQuotaSnapshot,
   OverrideEntry,
@@ -66,15 +65,6 @@ export function createOverrideEntry(key: string, value: string): OverrideEntry {
 /** 优先使用浏览器 UUID，为仅存在于前端的临时表单项创建唯一 ID。 */
 function createClientId() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
-export function quotaPrimarySnapshot(quota: GptAccountQuotaResponse) {
-  return (
-    quota.primary ??
-    quota.snapshots.find((snapshot) => snapshot.limit_id === "codex") ??
-    quota.snapshots[0] ??
-    null
-  );
 }
 
 export function quotaStatusLabel(snapshot: GptQuotaSnapshot) {

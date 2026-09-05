@@ -28,7 +28,6 @@ import type {
   AccountProviderKey,
   ClaudeAccount,
   GptAccount,
-  GptAccountQuotaResponse,
   ProviderCredentialTab,
   ProviderGroupSummary,
   ProviderUpstreamApiKey,
@@ -42,7 +41,6 @@ interface AccountsPageProps {
   claudeAccounts: ClaudeAccount[];
   gptUpstreamApiKeys: ProviderUpstreamApiKey[];
   claudeUpstreamApiKeys: ProviderUpstreamApiKey[];
-  accountQuotas: Record<string, GptAccountQuotaResponse>;
   loading: boolean;
   activeProvider: AccountProviderKey;
   activeCredentialTab: ProviderCredentialTab;
@@ -53,7 +51,7 @@ interface AccountsPageProps {
   accountDeletingId: string | null;
   upstreamApiKeyDeletingId: string | null;
   upstreamApiKeyEnabledUpdatingId: string | null;
-  quotaRefreshingIds: Record<string, boolean>;
+  quotaOperationAccountId: string | null;
   resetOperationAccountId: string | null;
   providerGroups: ProviderGroupSummary[];
   resourceGroupUpdatingId: string | null;
@@ -84,7 +82,7 @@ interface AccountsPageProps {
     apiKey: ProviderUpstreamApiKey,
     enabled: boolean,
   ) => void;
-  onRefreshAccountQuota: (account: GptAccount) => void;
+  onOpenAccountQuota: (account: GptAccount) => void;
   onOpenRateLimitReset: (account: GptAccount) => void;
   onDeleteGptAccount: (account: GptAccount) => void;
   onDeleteClaudeAccount: (account: ClaudeAccount) => void;
@@ -113,7 +111,6 @@ export function AccountsPage({
   claudeAccounts,
   gptUpstreamApiKeys,
   claudeUpstreamApiKeys,
-  accountQuotas,
   loading,
   activeProvider,
   activeCredentialTab,
@@ -124,7 +121,7 @@ export function AccountsPage({
   accountDeletingId,
   upstreamApiKeyDeletingId,
   upstreamApiKeyEnabledUpdatingId,
-  quotaRefreshingIds,
+  quotaOperationAccountId,
   resetOperationAccountId,
   providerGroups,
   resourceGroupUpdatingId,
@@ -147,7 +144,7 @@ export function AccountsPage({
   onUpdateClaudeEnabled,
   onUpdateGptEnabled,
   onUpdateUpstreamApiKeyEnabled,
-  onRefreshAccountQuota,
+  onOpenAccountQuota,
   onOpenRateLimitReset,
   onDeleteGptAccount,
   onDeleteClaudeAccount,
@@ -381,14 +378,13 @@ export function AccountsPage({
           <GptAccountsTable
             access={access}
             accounts={accounts}
-            quotas={accountQuotas}
-            quotaRefreshingIds={quotaRefreshingIds}
+            quotaOperationAccountId={quotaOperationAccountId}
             resetOperationAccountId={resetOperationAccountId}
             groups={activeEnabledProviderGroups}
             groupUpdatingId={resourceGroupUpdatingId}
             enabledUpdatingId={enabledUpdatingId}
             deletingId={accountDeletingId}
-            onRefreshQuota={onRefreshAccountQuota}
+            onOpenQuota={onOpenAccountQuota}
             onOpenRateLimitReset={onOpenRateLimitReset}
             onUpdateEnabled={onUpdateGptEnabled}
             onUpdateGroup={onUpdateGptGroup}

@@ -16,22 +16,20 @@ import {
   tableClass,
   tableScrollClass,
 } from "../../lib/ui";
-import type { GptAccount, GptAccountQuotaResponse, ProviderGroup } from "../../types";
+import type { GptAccount, ProviderGroup } from "../../types";
 import { ProviderGroupCell } from "./ProviderGroupCell";
-import { QuotaCell } from "./QuotaCell";
 import { enabledToggleLabel } from "./utils";
 
 interface GptAccountsTableProps {
   access: ProviderAccess;
   accounts: GptAccount[];
-  quotas: Record<string, GptAccountQuotaResponse>;
-  quotaRefreshingIds: Record<string, boolean>;
+  quotaOperationAccountId: string | null;
   resetOperationAccountId: string | null;
   groups: ProviderGroup[];
   groupUpdatingId: string | null;
   enabledUpdatingId: string | null;
   deletingId: string | null;
-  onRefreshQuota: (account: GptAccount) => void;
+  onOpenQuota: (account: GptAccount) => void;
   onOpenRateLimitReset: (account: GptAccount) => void;
   onUpdateGroup: (account: GptAccount, groupId: string) => void;
   onUpdateEnabled: (account: GptAccount, enabled: boolean) => void;
@@ -43,14 +41,13 @@ interface GptAccountsTableProps {
 export function GptAccountsTable({
   access,
   accounts,
-  quotas,
-  quotaRefreshingIds,
+  quotaOperationAccountId,
   resetOperationAccountId,
   groups,
   groupUpdatingId,
   enabledUpdatingId,
   deletingId,
-  onRefreshQuota,
+  onOpenQuota,
   onOpenRateLimitReset,
   onUpdateGroup,
   onUpdateEnabled,
@@ -59,15 +56,16 @@ export function GptAccountsTable({
 }: GptAccountsTableProps) {
   return (
     <div className={tableScrollClass}>
-      <table className={`${tableClass} min-w-[100rem]`}>
+      <table className={`${tableClass} min-w-[108rem]`}>
         <thead>
           <tr>
             <th>账号</th>
             <th>所在组</th>
             <th>计划</th>
-            <th>额度</th>
             <th>状态</th>
+            <th>并发</th>
             <th>调度</th>
+            <th>凭证</th>
             <th>更新</th>
             <th>操作</th>
           </tr>
@@ -80,7 +78,7 @@ export function GptAccountsTable({
             const canViewOverride =
               access.has(groupId, "account.override.view") && account.override !== null;
             const busy =
-              Boolean(quotaRefreshingIds[account.id]) ||
+              quotaOperationAccountId === account.id ||
               resetOperationAccountId === account.id ||
               deletingId === account.id ||
               groupUpdatingId === account.id ||
@@ -91,10 +89,6 @@ export function GptAccountsTable({
                 <td>
                   <div className={entryStackClass}>
                     <strong className={entryTitleClass} title={account.email || "未命名账号"}>{account.email || "未命名账号"}</strong>
-                    <span className={cellNoteClass} title={account.account_id || "未设置 chatgpt_account_id"}>
-                      {account.account_id || "未设置 chatgpt_account_id"}
-                    </span>
-                    <span className={cellNoteClass} title={`client_id: ${account.client_id}`}>client_id: {account.client_id}</span>
                   </div>
                 </td>
                 <td>
@@ -115,16 +109,9 @@ export function GptAccountsTable({
                   <div className={cellMainClass}>{account.plan_type}</div>
                 </td>
                 <td>
-                  {canViewQuota ? (
-                    <QuotaCell quota={quotas[account.id]} />
-                  ) : (
-                    <span className={cellNoteClass}>无查看权限</span>
-                  )}
-                </td>
-                <td>
                   <div className="grid gap-1.5">
                     <StatusBadge status={account.status} />
-                    <p className={cellNoteClass}>管理员：{account.enabled ? "已启用" : "已禁用"}</p>
+                    <p className={cellNoteClass}>管理状态：{account.enabled ? "已启用" : "已禁用"}</p>
                     {account.status_reason && (
                       <p className={`${cellNoteClass} max-w-40 text-red-700 dark:text-red-400`} title={account.status_reason}>
                         {account.status_reason}
@@ -133,36 +120,47 @@ export function GptAccountsTable({
                   </div>
                 </td>
                 <td>
+                  <div className={cellMainClass}>{account.runtime.inflight_count}</div>
+                </td>
+                <td>
                   <RuntimeBadge runtime={account.runtime} />
                   <p className={cellNoteClass}>
-                    并发：{account.runtime.inflight_count} ·{" "}
-                    {account.runtime.runtime_ready ? "runtime 就绪" : "runtime 未就绪"}
+                    可调度：{account.runtime.runtime_ready ? "是" : "否"}
                   </p>
-                  <p className={cellNoteClass}>Token：{account.runtime.token_usable ? "可用" : "不可用"}</p>
+                  <p className={cellNoteClass}>
+                    运行态：{account.runtime.runtime_exists ? "已发布" : "未发布"}
+                  </p>
+                  {account.runtime.runtime_state === "quota_limited" &&
+                    (account.runtime.quota_resets_at || account.quota_resets_at) && (
+                      <p className={cellNoteClass}>
+                        预计恢复：
+                        {formatOptionalDateTime(
+                          account.runtime.quota_resets_at || account.quota_resets_at,
+                        )}
+                      </p>
+                    )}
+                </td>
+                <td>
+                  <div className={cellMainClass}>
+                    Token：{account.runtime.token_usable ? "可用" : "不可用"}
+                  </div>
                   <p className={cellNoteClass}>
                     下次刷新：{formatOptionalDateTime(account.runtime.next_token_refresh_at)}
                   </p>
-                  {(account.runtime.quota_resets_at || account.quota_resets_at) && (
-                    <p className={cellNoteClass}>
-                      额度恢复：
-                      {formatOptionalDateTime(account.runtime.quota_resets_at || account.quota_resets_at)}
-                    </p>
-                  )}
                 </td>
                 <td>
-                  <div className={cellMainClass}>{formatDateTime(account.updated_at)}</div>
-                  <p className={cellNoteClass}>更新：{formatDateTime(account.updated_at)}</p>
-                  <p className={cellNoteClass}>运行态：{account.runtime.runtime_exists ? "已发布" : "未发布"}</p>
+                  <div className={cellMainClass}>更新：{formatDateTime(account.updated_at)}</div>
+                  <p className={cellNoteClass}>创建：{formatDateTime(account.created_at)}</p>
                 </td>
                 <td>
                   <div className={actionStackClass}>
                     <button
                       className={buttonSmall}
                       disabled={busy || !canViewQuota}
-                      onClick={() => onRefreshQuota(account)}
+                      onClick={() => onOpenQuota(account)}
                       title={canViewQuota ? "查询账号额度" : "未获得查看账号额度权限"}
                     >
-                      {quotaRefreshingIds[account.id] ? (
+                      {quotaOperationAccountId === account.id ? (
                         <Loader2 className={spinnerClass} size={14} />
                       ) : (
                         <Search size={14} />
