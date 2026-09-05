@@ -1,6 +1,8 @@
 CREATE TABLE IF NOT EXISTS gateway_request_logs
 (
     request_id UUID,
+    -- worker 最后收到的上游账号或官方 API Key 的内部 UUID；未收到时为空。
+    resource_id Nullable(UUID),
     provider LowCardinality(String),
     route LowCardinality(String),
     api_key_name Nullable(String),

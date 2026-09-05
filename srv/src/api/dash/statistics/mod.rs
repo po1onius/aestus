@@ -4,6 +4,7 @@
 //! 用量聚合按独立模块维护，后续 provider、错误率等统计继续在同级扩展。
 
 mod calendar;
+pub(super) mod gpt_account_usage;
 mod request_logs;
 mod usage;
 

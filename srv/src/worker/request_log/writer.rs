@@ -28,6 +28,8 @@ const REQUEST_LOG_BATCH_FLUSH_INTERVAL_MS: u64 = 2_000;
 pub(super) struct RequestLogRow {
     #[serde(with = "clickhouse::serde::uuid")]
     pub(super) request_id: Uuid,
+    #[serde(with = "clickhouse::serde::uuid::option")]
+    pub(super) resource_id: Option<Uuid>,
     pub(super) provider: String,
     pub(super) route: String,
     pub(super) api_key_name: Option<String>,
@@ -117,6 +119,7 @@ impl RequestLogRow {
 
         Ok(Self {
             request_id: entry.request_id,
+            resource_id: entry.resource_id,
             provider: entry.provider,
             route: entry.route,
             api_key_name,

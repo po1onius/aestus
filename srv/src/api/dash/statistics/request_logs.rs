@@ -57,6 +57,8 @@ struct ListRequestLogsResponse {
 struct RequestLogQueryRow {
     #[serde(with = "clickhouse::serde::uuid")]
     request_id: Uuid,
+    #[serde(with = "clickhouse::serde::uuid::option")]
+    resource_id: Option<Uuid>,
     provider: String,
     route: String,
     api_key_name: Option<String>,
@@ -90,6 +92,7 @@ struct RequestLogQueryRow {
 #[derive(Debug, Serialize)]
 struct RequestLogRecord {
     request_id: Uuid,
+    resource_id: Option<Uuid>,
     provider: String,
     route: String,
     api_key_name: Option<String>,
@@ -125,6 +128,7 @@ impl From<RequestLogQueryRow> for RequestLogRecord {
 
         Self {
             request_id: row.request_id,
+            resource_id: row.resource_id,
             provider: row.provider,
             route: row.route,
             api_key_name: row.api_key_name,

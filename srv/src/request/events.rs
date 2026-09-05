@@ -153,6 +153,8 @@ pub enum RequestEvent {
         request_id: Uuid,
         details: RequestInspectionDetails,
     },
+    /// 每次调度成功后发布，包括首次调用和重试；日志保留最后收到的资源 ID。
+    ResourceSelected { request_id: Uuid, resource_id: Uuid },
     /// 最终下游响应第一次具备客户端可见正文的时间。
     ///
     /// Buffered 响应在完整正文已经确定、即将交给 Axum 时发布；streaming 响应在首个
@@ -180,6 +182,7 @@ impl RequestEvent {
             Self::Started { request_id, .. }
             | Self::GatewayAuthenticated { request_id, .. }
             | Self::RequestInspected { request_id, .. }
+            | Self::ResourceSelected { request_id, .. }
             | Self::ResponseStarted { request_id, .. }
             | Self::UsageObserved { request_id, .. }
             | Self::Ended { request_id, .. } => *request_id,
@@ -191,6 +194,7 @@ impl RequestEvent {
             Self::Started { .. } => "request_started",
             Self::GatewayAuthenticated { .. } => "gateway_authenticated",
             Self::RequestInspected { .. } => "request_inspected",
+            Self::ResourceSelected { .. } => "resource_selected",
             Self::ResponseStarted { .. } => "response_started",
             Self::UsageObserved { .. } => "usage_observed",
             Self::Ended { .. } => "request_ended",

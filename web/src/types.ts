@@ -233,8 +233,10 @@ export interface GptQuotaWindow {
   used_percent: number;
   remaining_percent: number;
   window_minutes: number | null;
+  starts_at: string | null;
   resets_at: string | null;
   reset_after_seconds: number | null;
+  gateway_total_tokens: string | null;
 }
 
 export interface GptCreditsSnapshot {
@@ -419,6 +421,7 @@ export interface ListApiKeysResponse extends ListPageResponse<ApiKey> {
 }
 
 export interface RequestLogRecord {
+  resource_id: string | null;
   request_id: string;
   provider: string;
   route: string;

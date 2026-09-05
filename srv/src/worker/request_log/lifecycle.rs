@@ -115,6 +115,7 @@ pub(super) struct RequestLogExtra {
 #[derive(Debug)]
 pub(super) struct RequestLogEntry {
     pub(super) request_id: Uuid,
+    pub(super) resource_id: Option<Uuid>,
     pub(super) provider: String,
     pub(super) route: String,
     pub(super) gateway_attribution: Option<GatewayAttribution>,
@@ -144,6 +145,7 @@ impl RequestLogEntry {
     ) -> Self {
         Self {
             request_id,
+            resource_id: None,
             provider: provider.to_owned(),
             route: route.to_owned(),
             gateway_attribution: None,
@@ -190,6 +192,10 @@ impl RequestLogLifecycle {
                 request_id,
                 details,
             } => self.set_request_inspection(request_id, details),
+            RequestEvent::ResourceSelected {
+                request_id,
+                resource_id,
+            } => self.set_resource_id(request_id, resource_id),
             RequestEvent::ResponseStarted {
                 request_id,
                 occurred_at,
@@ -223,6 +229,25 @@ impl RequestLogLifecycle {
             warn!(request_id = %request_id, provider, route, "请求日志 request ID 重复，旧聚合状态已被替换");
         }
         info!(request_id = %request_id, provider, route, "worker 已创建请求日志聚合上下文");
+    }
+
+    fn set_resource_id(&mut self, request_id: Uuid, resource_id: Uuid) {
+        let Some(entry) = self.entries.get_mut(&request_id) else {
+            warn!(
+                request_id = %request_id,
+                resource_id = %resource_id,
+                "worker 收到上游资源归属时未命中日志聚合上下文"
+            );
+            return;
+        };
+        let previous_resource_id = entry.resource_id;
+        entry.resource_id = Some(resource_id);
+        info!(
+            request_id = %request_id,
+            previous_resource_id = ?previous_resource_id,
+            resource_id = %resource_id,
+            "worker 已更新请求日志的上游资源归属"
+        );
     }
 
     fn set_gateway_attribution(&mut self, request_id: Uuid, details: GatewayAuthDetailsEvent) {
@@ -402,6 +427,7 @@ impl RequestLogLifecycle {
         info!(
             request_id = %request_id,
             request_status = status.as_str(),
+            resource_id = ?entry.resource_id,
             termination = termination.unwrap_or("<none>"),
             error_response_present = entry.extra.error_response.is_some(),
             "worker 已根据请求终态完成日志状态判定"

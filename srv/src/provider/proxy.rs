@@ -109,6 +109,10 @@ where
             }
         };
         let allocation = lease.allocation();
+        state.request_events().emit(RequestEvent::ResourceSelected {
+            request_id: request.request_id,
+            resource_id: allocation.resource.id,
+        });
         let attempt_context = UpstreamAttemptContext {
             request_id: allocation.request_id,
             provider: P::provider_name(),

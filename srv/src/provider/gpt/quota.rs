@@ -20,7 +20,7 @@ use crate::{
     state::AppState,
 };
 
-const DEFAULT_LIMIT_ID: &str = "codex";
+pub(crate) const DEFAULT_LIMIT_ID: &str = "codex";
 
 /// 单个 GPT 账号的额度快照响应。
 ///
@@ -90,8 +90,13 @@ pub struct GptQuotaWindow {
     pub used_percent: f64,
     pub remaining_percent: f64,
     pub window_minutes: Option<i64>,
+    /// 用上游原始秒数反推的窗口起点，不从取整后的展示分钟数反推。
+    pub starts_at: Option<DateTime<Utc>>,
     pub resets_at: Option<DateTime<Utc>>,
     pub reset_after_seconds: Option<i64>,
+    /// Dashboard 按账号和窗口汇总的本网关已记录 token；字符串避免前端整数精度丢失。
+    /// 未统计或窗口无法完整查询时为 None，成功查询但没有用量时为 "0"。
+    pub gateway_total_tokens: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -390,14 +395,22 @@ fn make_quota_snapshot(
 
 fn map_rate_limit_window(window: RateLimitWindowSnapshot) -> GptQuotaWindow {
     let used_percent = window.used_percent.clamp(0.0, 100.0);
+    let resets_at = timestamp_seconds_to_datetime(window.reset_at);
+    let starts_at = window
+        .limit_window_seconds
+        .filter(|seconds| *seconds > 0)
+        .and_then(chrono::Duration::try_seconds)
+        .and_then(|duration| resets_at?.checked_sub_signed(duration));
     GptQuotaWindow {
         used_percent,
         remaining_percent: (100.0 - used_percent).clamp(0.0, 100.0),
         window_minutes: window
             .limit_window_seconds
             .and_then(window_minutes_from_seconds),
-        resets_at: timestamp_seconds_to_datetime(window.reset_at),
+        starts_at,
+        resets_at,
         reset_after_seconds: window.reset_after_seconds,
+        gateway_total_tokens: None,
     }
 }
 
@@ -426,7 +439,7 @@ fn window_minutes_from_seconds(seconds: i64) -> Option<i64> {
         return None;
     }
 
-    Some((seconds + 59) / 60)
+    Some(seconds / 60 + i64::from(seconds % 60 != 0))
 }
 
 fn timestamp_seconds_to_datetime(timestamp: Option<i64>) -> Option<DateTime<Utc>> {

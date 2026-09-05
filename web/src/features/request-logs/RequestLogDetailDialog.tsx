@@ -40,6 +40,7 @@ export function RequestLogDetailDialog({
       <div className="grid gap-5">
         <DetailSection title="请求">
           <DetailField label="请求 ID" value={log.request_id} code />
+          <DetailField label="上游资源 ID" value={log.resource_id || "未记录"} code />
           <DetailField label="路由" value={log.route} code />
           <DetailField label="Provider" value={log.provider} />
           {showUsername && <DetailField label="用户" value={log.username || "未记录"} />}

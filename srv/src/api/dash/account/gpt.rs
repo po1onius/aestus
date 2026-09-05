@@ -15,6 +15,7 @@ use crate::{
     api::dash::{
         auth as dash_auth,
         pagination::{ListPage, ListPageQuery},
+        statistics::gpt_account_usage,
     },
     err::{AdminResult, AppError, AppResult},
     provider::{
@@ -542,6 +543,7 @@ async fn refresh_gpt_account_quota(
         .filter(|quota_resets_at| *quota_resets_at > chrono::Utc::now())
         .map(|quota_resets_at| (quota_resets_at, account.updated_at));
     let mut quota = quota::fetch_account_quota(&state, &account).await?;
+    gpt_account_usage::populate_window_usage(&state, &account, &mut quota).await?;
     let available_remaining_percent = quota.available_remaining_percent();
 
     if let (Some((expected_quota_resets_at, expected_updated_at)), Some(remaining_percent)) =

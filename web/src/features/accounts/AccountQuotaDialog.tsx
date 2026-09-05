@@ -1,6 +1,6 @@
 import { AlertCircle, Loader2 } from "lucide-react";
 import { Modal } from "../../components/Modal";
-import { formatDateTime, formatOptionalDateTime, formatPercent } from "../../lib/format";
+import { formatDateTime, formatOptionalDateTime, formatPercent, formatTokenCount } from "../../lib/format";
 import { spinnerClass } from "../../lib/ui";
 import type {
   GptAccount,
@@ -114,11 +114,18 @@ function QuotaSnapshotCard({ snapshot }: { snapshot: GptQuotaSnapshot }) {
 
       {snapshot.primary || snapshot.secondary ? (
         <div className="mt-4 grid gap-3 md:grid-cols-2">
-          {snapshot.primary && <QuotaWindowCard label="主窗口" window={snapshot.primary} />}
-          {snapshot.secondary && <QuotaWindowCard label="次窗口" window={snapshot.secondary} />}
+          {snapshot.primary && <QuotaWindowCard label="主窗口" window={snapshot.primary} showGatewayUsage={snapshot.limit_id === "codex"} />}
+          {snapshot.secondary && <QuotaWindowCard label="次窗口" window={snapshot.secondary} showGatewayUsage={snapshot.limit_id === "codex"} />}
         </div>
       ) : (
         <p className="mt-4 text-sm text-slate-500 dark:text-slate-400">未返回窗口用量。</p>
+      )}
+
+      {snapshot.limit_id === "codex" && (snapshot.primary || snapshot.secondary) && (
+        <p className="mt-3 text-xs leading-5 text-slate-500 dark:text-slate-400">
+          Token 按请求开始时间统计至本次查询时间，仅包含本网关已记录的用量。
+          窗口时间缺失、已过期或超出日志保留期时无法统计。
+        </p>
       )}
 
       {(snapshot.credits || snapshot.individual_limit || snapshot.rate_limit_reached_type) && (
@@ -155,7 +162,7 @@ function QuotaSnapshotCard({ snapshot }: { snapshot: GptQuotaSnapshot }) {
   );
 }
 
-function QuotaWindowCard({ label, window }: { label: string; window: GptQuotaWindow }) {
+function QuotaWindowCard({ label, window, showGatewayUsage }: { label: string; window: GptQuotaWindow; showGatewayUsage: boolean }) {
   return (
     <div className="rounded-lg bg-slate-50 px-4 py-3 dark:bg-slate-950/50">
       <p className="text-xs font-medium text-slate-500 dark:text-slate-400">{label}</p>
@@ -169,6 +176,15 @@ function QuotaWindowCard({ label, window }: { label: string; window: GptQuotaWin
           {window.window_minutes !== null ? `${window.window_minutes} 分钟` : "未返回"}
         </span>
         <span>重置：{formatOptionalDateTime(window.resets_at)}</span>
+        {showGatewayUsage && (
+          <>
+            <span>窗口开始：{formatOptionalDateTime(window.starts_at)}</span>
+            <span className="font-medium text-slate-700 dark:text-slate-300">
+              本窗口网关已记录 Token：
+              {window.gateway_total_tokens !== null ? formatTokenCount(window.gateway_total_tokens) : "无法统计"}
+            </span>
+          </>
+        )}
       </div>
     </div>
   );
