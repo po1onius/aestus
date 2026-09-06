@@ -13,6 +13,7 @@ AI 模型网关:统一管理上游账号资源,对外提供标准 API
 - 插件:内置codex -> responses兼容转换插件
 - SaaS 租户:平台管理员分发明文租户码；首位注册者成为租户 owner，后续注册者成为普通用户
 - 面板:平台管理员管理租户及公共插件、套件；租户 owner 管理本租户用户、网关 Api Key、账号、分组、插件和额度
+- 网站首页: `/` 提供产品能力、请求处理流程与可复制的 API 接入示例，通过控制台入口登录或注册
 - 用户并发:租户 owner 可设置并查看用户的每 Provider 并发，GPT 与 Claude 独立计数
 - 分组授权:租户 owner 按 Provider 分组授权普通用户创建 Key，并可独立授予组内账号、
   官方 Key、额度、重置信息和请求覆盖的查看或操作权限
@@ -68,6 +69,11 @@ podman compose up -d clickhouse redis postgres
 podman compose run --rm --no-deps migrate
 podman compose up -d gateway
 ```
+
+首页与控制台由 Rust 网关统一托管：`make dev` 会先构建 `web/dist`，再通过
+`AESTUS_WEB_DIST_DIR=../web/dist` 提供静态资源，访问 `http://127.0.0.1:8080/` 即可打开首页。
+Docker 镜像也已包含前端构建产物并配置托管目录，无需单独启动 Vite 或 Nginx。
+首页更新后重新执行 `cd web && npm run build` 即可更新本地后端托管的页面。
 
 ## 插件与套件
 
