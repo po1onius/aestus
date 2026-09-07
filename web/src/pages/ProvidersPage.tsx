@@ -35,7 +35,7 @@ import type {
   UpstreamApiKeyProvider,
 } from "../types";
 
-interface AccountsPageProps {
+interface ProvidersPageProps {
   access: ProviderAccess;
   accounts: GptAccount[];
   claudeAccounts: ClaudeAccount[];
@@ -105,7 +105,7 @@ const providerLogos: Record<AccountProviderKey, string> = {
  * 账号和官方 Key 使用既有凭证 Tab；分组通过相邻的独立按钮切换主表内容，不混入 Tab
  * 的凭证类型语义。官方 API Key 的展示和操作继续保持 provider 中立。
  */
-export function AccountsPage({
+export function ProvidersPage({
   access,
   accounts,
   claudeAccounts,
@@ -151,7 +151,7 @@ export function AccountsPage({
   onDeleteUpstreamApiKey,
   onOpenRequestOverride,
   onPageChange,
-}: AccountsPageProps) {
+}: ProvidersPageProps) {
   const activeProviderMeta =
     accountProviderTabs.find((provider) => provider.key === activeProvider) ?? accountProviderTabs[0];
   const activeAccounts =

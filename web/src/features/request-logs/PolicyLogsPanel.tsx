@@ -2,7 +2,7 @@ import { ChevronLeft, ChevronRight, Loader2, RefreshCw, ScrollText } from "lucid
 import { useEffect, useState } from "react";
 import { requestJson } from "../../api/client";
 import { DatePickerInput } from "../../components/DatePickerInput";
-import { requestLogPageSize, requestLogsPath } from "../../config";
+import { requestLogPageSize, policyLogsPath } from "../../config";
 import { formatDateTimeWithMilliseconds, todayInputValue } from "../../lib/format";
 import { cellMainClass, cx, emptyStateClass, iconButton, panelClass, spinnerClass, tableClass } from "../../lib/ui";
 import type { ListPolicyLogsResponse, PolicyLogCursor } from "../../types";
@@ -28,7 +28,7 @@ export function PolicyLogsPanel({ token, timezone, refreshRevision }: PolicyLogs
     params.set("before_occurred_at", cursor.before_occurred_at);
     params.set("before_id", cursor.before_id);
   }
-  const path = `${requestLogsPath}/policy?${params}`;
+  const path = `${policyLogsPath}?${params}`;
   const queryKey = JSON.stringify([path, token, refreshRevision, retryRevision]);
   // 条件变化时立即隐藏旧结果；取消请求后也不接受旧响应回写。
   const loading = result?.key !== queryKey;

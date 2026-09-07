@@ -24,7 +24,7 @@ struct WindowTokenTotals {
 }
 
 /// 调用方先完成账号额度查看授权；这里按租户和资源统计所有调用者，不按当前用户裁剪。
-pub(in crate::api::dash) async fn populate_window_usage(
+pub(in crate::api::console) async fn populate_window_usage(
     state: &AppState,
     account: &ProviderAccount,
     quota: &mut GptAccountQuotaResponse,

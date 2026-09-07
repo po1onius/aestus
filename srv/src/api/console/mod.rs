@@ -18,54 +18,57 @@ use crate::{
 };
 
 #[derive(Debug, Serialize)]
-struct DashStatusResponse<'a> {
+struct ConsoleStatusResponse<'a> {
     status: &'a str,
     note: &'a str,
 }
 
-/// 管理面板 API 路由。
+/// 控制台 API 路由，统一挂载于 `/api/console`。
 ///
-/// 这里先提供一个占位状态接口，后续账号管理、API Key 管理、监控查询都挂到该模块下。
+/// 按业务资源组织 URL；角色权限和租户数据范围由各接口的鉴权逻辑确定。
 pub fn router() -> Router<AppState> {
+    tracing::info!(api_prefix = "/api/console", "注册控制台 API 路由");
     Router::new()
         .route("/status", get(status))
         .nest("/auth", auth::router())
-        .nest("/api-keys", gateway_api_keys::router())
+        .nest("/gateway-api-keys", gateway_api_keys::router())
         .nest("/plugins", plugins::router())
+        .nest("/plugin-suites", plugins::suites_router())
         .nest("/provider-groups", provider_groups::router())
-        .nest("/claude-accounts", account::claude::router())
+        .nest("/providers/claude/accounts", account::claude::router())
         .nest(
-            "/claude-upstream-api-keys",
+            "/providers/claude/upstream-api-keys",
             provider_upstream_api_keys::router::<ClaudeMaintenance>(),
         )
-        .nest("/gpt-accounts", account::gpt::router())
+        .nest("/providers/gpt/accounts", account::gpt::router())
         .nest(
-            "/gpt-upstream-api-keys",
+            "/providers/gpt/upstream-api-keys",
             provider_upstream_api_keys::router::<GptMaintenance>(),
         )
         .nest("/request-logs", statistics::request_logs_router())
+        .nest("/policy-logs", statistics::policy_logs_router())
         .nest("/usage", statistics::usage_router())
         .nest("/tenants", tenants::router())
         .nest("/users", users::router())
-        // `/dash` 未知路径必须返回 JSON 404，不能继续落入 SPA 的 index.html fallback。
-        .fallback(dash_not_found)
+        // 控制台 API 未知路径必须返回 JSON 404，不能落入 SPA 的 index.html fallback。
+        .fallback(console_not_found)
 }
 
-async fn dash_not_found() -> impl IntoResponse {
+async fn console_not_found() -> impl IntoResponse {
     (
         StatusCode::NOT_FOUND,
         Json(serde_json::json!({
             "error": {
-                "code": "dashboard_route_not_found",
-                "message": "请求的 Dashboard API 不存在"
+                "code": "console_route_not_found",
+                "message": "请求的控制台 API 不存在"
             }
         })),
     )
 }
 
-async fn status() -> Json<DashStatusResponse<'static>> {
-    Json(DashStatusResponse {
+async fn status() -> Json<ConsoleStatusResponse<'static>> {
+    Json(ConsoleStatusResponse {
         status: "ok",
-        note: "dashboard api is ready",
+        note: "console api is ready",
     })
 }

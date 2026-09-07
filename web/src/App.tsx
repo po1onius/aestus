@@ -13,7 +13,8 @@ import { DashboardShell } from "./components/DashboardShell";
 import { ModelWhitelistDialog } from "./components/ModelWhitelistDialog";
 import {
   accountProviderTabs,
-  apiKeysPath,
+  gatewayApiKeysPath,
+  authPath,
   authTokenStorageKey,
   claudeAccountsPath,
   claudeUpstreamApiKeysPath,
@@ -25,6 +26,7 @@ import {
   maxUserConcurrency,
   maxUserQuota,
   pluginsPath,
+  pluginSuitesPath,
   providerGroupsPath,
   requestLogPageSize,
   requestLogsPath,
@@ -68,8 +70,8 @@ import {
   routesForUser,
 } from "./lib/routing";
 import { shiftDateInputValue, todayInputValue } from "./lib/format";
-import { AccountsPage } from "./pages/AccountsPage";
-import { ApiKeysPage } from "./pages/ApiKeysPage";
+import { ProvidersPage } from "./pages/ProvidersPage";
+import { GatewayApiKeysPage } from "./pages/GatewayApiKeysPage";
 import { PluginsPage } from "./pages/PluginsPage";
 import { RequestLogsPage } from "./pages/RequestLogsPage";
 import { TenantsPage } from "./pages/TenantsPage";
@@ -300,8 +302,8 @@ export function App() {
 
   useEffect(() => {
     // 刷新页面时 currentUser 会先短暂为 null。如果此时按普通用户路由归一化，管理员专属
-    // 地址会先被改写为 /dashboard/usage，待身份恢复后又回退到 /admin/accounts。必须等
-    // /dash/auth/me 完成后再按真实角色校验 URL，才能正确保留刷新前的管理员页面。
+    // 地址会先被改写为 /console/usage，待身份恢复后又回退到 /console/providers。必须等
+    // /api/console/auth/me 完成后再按真实角色校验 URL，才能正确保留刷新前的管理员页面。
     if (authLoading || !currentGroupAccess.ready) {
       return;
     }
@@ -429,7 +431,7 @@ export function App() {
     const token = authToken;
     setAuthLoading(true);
     try {
-      const data = await requestJson<MeResponse>("/dash/auth/me", undefined, token);
+      const data = await requestJson<MeResponse>(`${authPath}/me`, undefined, token);
       if (!isActiveAuthToken(token)) {
         return;
       }
@@ -471,7 +473,7 @@ export function App() {
     }
     setAuthSubmitting(true);
     try {
-      const data = await requestJson<AuthResponse>("/dash/auth/login", {
+      const data = await requestJson<AuthResponse>(`${authPath}/login`, {
         method: "POST",
         body: JSON.stringify({
           identifier: loginIdentifier.trim(),
@@ -497,7 +499,7 @@ export function App() {
   async function sendRegisterEmailCode() {
     setEmailCodeSending(true);
     try {
-      await requestJson<{ status: string }>("/dash/auth/register/email-code", {
+      await requestJson<{ status: string }>(`${authPath}/register/email-code`, {
         method: "POST",
         body: JSON.stringify({ email: registerEmail.trim() }),
       });
@@ -532,7 +534,7 @@ export function App() {
     }
     setAuthSubmitting(true);
     try {
-      const data = await requestJson<AuthResponse>("/dash/auth/register", {
+      const data = await requestJson<AuthResponse>(`${authPath}/register`, {
         method: "POST",
         body: JSON.stringify({
           username,
@@ -880,7 +882,7 @@ export function App() {
 
     setApiKeysLoading(true);
     try {
-      const data = await requestJson<ListApiKeysResponse>(listPagePath(apiKeysPath, offset), undefined, token);
+      const data = await requestJson<ListApiKeysResponse>(listPagePath(gatewayApiKeysPath, offset), undefined, token);
       if (!isActiveAuthToken(token)) {
         return;
       }
@@ -910,7 +912,7 @@ export function App() {
     try {
       const [data, suites] = await Promise.all([
         requestJson<PluginSummary[]>(pluginsPath, undefined, token),
-        requestJson<PluginSuiteSummary[]>(`${pluginsPath}/suites`, undefined, token),
+        requestJson<PluginSuiteSummary[]>(pluginSuitesPath, undefined, token),
       ]);
       if (isActiveAuthToken(token)) {
         setPlugins(data);
@@ -931,7 +933,7 @@ export function App() {
     }
     try {
       const data = await requestJson<PluginSuiteSummary[]>(
-        `${pluginsPath}/suites/options`,
+        `${pluginSuitesPath}/options`,
         undefined,
         token,
       );
@@ -1067,7 +1069,7 @@ export function App() {
       return;
     }
 
-    if (activePage === "apiKeys") {
+    if (activePage === "gatewayApiKeys") {
       await Promise.all([
         loadApiKeys(),
         loadPluginOptions(),
@@ -1778,7 +1780,7 @@ export function App() {
 
     setApiKeySaving(true);
     try {
-      await requestJson<ApiKey>(apiKeysPath, {
+      await requestJson<ApiKey>(gatewayApiKeysPath, {
         method: "POST",
         body: JSON.stringify({
           name,
@@ -1840,7 +1842,7 @@ export function App() {
 
     setApiKeyPluginSaving(true);
     try {
-      const updated = await requestJson<ApiKey>(`${apiKeysPath}/${target.id}/plugin`, {
+      const updated = await requestJson<ApiKey>(`${gatewayApiKeysPath}/${target.id}/plugin-suite`, {
         method: "PUT",
         body: JSON.stringify({ plugin_suite_id: apiKeyPluginSuiteId || null }),
       }, token);
@@ -1884,7 +1886,7 @@ export function App() {
 
     setApiKeyUpdatingId(apiKey.id);
     try {
-      const updated = await requestJson<ApiKey>(`${apiKeysPath}/${apiKey.id}/models`, {
+      const updated = await requestJson<ApiKey>(`${gatewayApiKeysPath}/${apiKey.id}/models`, {
         method: "PUT",
         body: JSON.stringify({ allowed_models: allowedModels }),
       }, token);
@@ -1938,7 +1940,7 @@ export function App() {
     }
     setPluginSavingId("create-suite");
     try {
-      await requestJson<PluginSuiteSummary>(`${pluginsPath}/suites`, {
+      await requestJson<PluginSuiteSummary>(pluginSuitesPath, {
         method: "POST",
         body: JSON.stringify({ ...input, name: input.name.trim(), description: input.description.trim() }),
       }, token);
@@ -1959,7 +1961,7 @@ export function App() {
     if (!token || !canManagePlugin(currentUser, suite.tenant_id)) return;
     setPluginSavingId(suite.id);
     try {
-      const updated = await requestJson<PluginSuiteSummary[]>(`${pluginsPath}/suites/${suite.id}/enabled`, {
+      const updated = await requestJson<PluginSuiteSummary[]>(`${pluginSuitesPath}/${suite.id}/enabled`, {
         method: "PUT", body: JSON.stringify({ enabled: !suite.enabled }),
       }, token);
       if (!isActiveAuthToken(token)) return;
@@ -1986,7 +1988,7 @@ export function App() {
     if (!token || !canManagePlugin(currentUser, resource.tenant_id)) return;
     setPluginSavingId(resource.id);
     try {
-      const base = isSuite ? `${pluginsPath}/suites/${resource.id}` : `${pluginsPath}/${resource.id}`;
+      const base = isSuite ? `${pluginSuitesPath}/${resource.id}` : `${pluginsPath}/${resource.id}`;
       const impact = await requestJson<PluginDeletionImpact>(`${base}/deletion-impact`, undefined, token);
       if (!isActiveAuthToken(token)) return;
       setConfirmationRequest({
@@ -2009,7 +2011,7 @@ export function App() {
     setPluginSavingId(id);
     try {
       const deleted = await requestJson<DeletePluginResponse>(
-        isSuite ? `${pluginsPath}/suites/${id}` : `${pluginsPath}/${id}`,
+        isSuite ? `${pluginSuitesPath}/${id}` : `${pluginsPath}/${id}`,
         { method: "DELETE" }, token,
       );
       if (!isActiveAuthToken(token)) return;
@@ -2032,7 +2034,7 @@ export function App() {
 
     setApiKeyUpdatingId(apiKey.id);
     try {
-      const updated = await requestJson<ApiKey>(`${apiKeysPath}/${apiKey.id}/enabled`, {
+      const updated = await requestJson<ApiKey>(`${gatewayApiKeysPath}/${apiKey.id}/enabled`, {
         method: "POST",
         body: JSON.stringify({ enabled: !apiKey.enabled }),
       }, token);
@@ -2073,7 +2075,7 @@ export function App() {
 
     setApiKeyUpdatingId(apiKey.id);
     try {
-      const deleted = await requestJson<DeleteApiKeyResponse>(`${apiKeysPath}/${apiKey.id}`, {
+      const deleted = await requestJson<DeleteApiKeyResponse>(`${gatewayApiKeysPath}/${apiKey.id}`, {
         method: "DELETE",
       }, token);
       if (!isActiveAuthToken(token)) return;
@@ -2286,7 +2288,7 @@ export function App() {
   async function updateEnabled(account: GptAccount, enabled: boolean) {
     setEnabledUpdatingId(account.id);
     try {
-      const updated = await requestJson<GptAccount>(`/dash/gpt-accounts/${account.id}/enabled`, {
+      const updated = await requestJson<GptAccount>(`${gptAccountsPath}/${account.id}/enabled`, {
         method: "PUT",
         body: JSON.stringify({ enabled }),
       }, authToken);
@@ -2819,7 +2821,7 @@ export function App() {
       )}
       overlays={
         <AnimatePresence>
-          {accountImportOpen && activePage === "accounts" && (
+          {accountImportOpen && activePage === "providers" && (
             <AccountImportDialog
               key="account-import"
               provider={activeAccountProvider}
@@ -2844,7 +2846,7 @@ export function App() {
               onSubmitManual={submitManualAccount}
             />
           )}
-          {accountQuotaTarget && activePage === "accounts" && (
+          {accountQuotaTarget && activePage === "providers" && (
             <AccountQuotaDialog
               key={`account-quota-${accountQuotaTarget.id}`}
               account={accountQuotaTarget}
@@ -2854,7 +2856,7 @@ export function App() {
               onClose={closeAccountQuotaDialog}
             />
           )}
-          {rateLimitResetTarget && activePage === "accounts" && (
+          {rateLimitResetTarget && activePage === "providers" && (
             <RateLimitResetDialog
               key={`rate-limit-reset-${rateLimitResetTarget.id}`}
               account={rateLimitResetTarget}
@@ -2870,7 +2872,7 @@ export function App() {
               onClose={closeRateLimitResetDialog}
             />
           )}
-          {providerGroupCreateProvider && activePage === "accounts" && (
+          {providerGroupCreateProvider && activePage === "providers" && (
             <ProviderGroupCreateDialog
               key="provider-group-create"
               providerLabel={providerLabel(providerGroupCreateProvider)}
@@ -2889,7 +2891,7 @@ export function App() {
               onClose={closeProviderGroupCreateDialog}
             />
           )}
-          {providerGroupModelsTarget && activePage === "accounts" && (
+          {providerGroupModelsTarget && activePage === "providers" && (
             <ModelWhitelistDialog
               key={`provider-group-models-${providerGroupModelsTarget.id}`}
               titleId="providerGroupModelsTitle"
@@ -2901,7 +2903,7 @@ export function App() {
               onClose={closeProviderGroupModelsDialog}
             />
           )}
-          {upstreamApiKeyDialogProvider && activePage === "accounts" && (
+          {upstreamApiKeyDialogProvider && activePage === "providers" && (
             <ProviderUpstreamApiKeyDialog
               key="upstream-api-key"
               providerLabel={providerLabel(upstreamApiKeyDialogProvider)}
@@ -2915,7 +2917,7 @@ export function App() {
               onClose={closeUpstreamApiKeyDialog}
             />
           )}
-          {requestOverrideTarget && activePage === "accounts" && (
+          {requestOverrideTarget && activePage === "providers" && (
             <RequestOverrideDialog
               key="request-override"
               target={requestOverrideTarget}
@@ -2930,7 +2932,7 @@ export function App() {
               onClose={closeRequestOverrideDialog}
             />
           )}
-          {apiKeyCreateOpen && activePage === "apiKeys" && (
+          {apiKeyCreateOpen && activePage === "gatewayApiKeys" && (
             <ApiKeyCreateDialog
               key="api-key-create"
               name={apiKeyName}
@@ -2948,7 +2950,7 @@ export function App() {
               onClose={closeApiKeyCreateDialog}
             />
           )}
-          {apiKeyModelsTarget && activePage === "apiKeys" && (
+          {apiKeyModelsTarget && activePage === "gatewayApiKeys" && (
             <ModelWhitelistDialog
               key={`api-key-models-${apiKeyModelsTarget.id}`}
               titleId="apiKeyModelsTitle"
@@ -2961,7 +2963,7 @@ export function App() {
               onClose={closeApiKeyModelsDialog}
             />
           )}
-          {apiKeyPluginTarget && activePage === "apiKeys" && (
+          {apiKeyPluginTarget && activePage === "gatewayApiKeys" && (
             <ApiKeyPluginDialog
               key={`api-key-plugin-${apiKeyPluginTarget.id}`}
               apiKey={apiKeyPluginTarget}
@@ -3072,8 +3074,8 @@ export function App() {
             loading={usageLoading}
           />
         </Suspense>
-      ) : activePage === "accounts" ? (
-        <AccountsPage
+      ) : activePage === "providers" ? (
+        <ProvidersPage
           access={providerAccess}
           accounts={accounts}
           claudeAccounts={claudeAccounts}
@@ -3156,8 +3158,8 @@ export function App() {
           onToggleStatus={updateUserStatus}
           onPageChange={loadUsers}
         />
-      ) : activePage === "apiKeys" ? (
-        <ApiKeysPage
+      ) : activePage === "gatewayApiKeys" ? (
+        <GatewayApiKeysPage
           apiKeys={apiKeys}
           loading={apiKeysLoading}
           updatingId={apiKeyUpdatingId}

@@ -1,3 +1,4 @@
+import { consolePagePaths } from "../config";
 import { useState } from "react";
 import {
   ArrowDown,
@@ -26,7 +27,7 @@ import claudeLogo from "@lobehub/icons-static-svg/icons/claude.svg";
 import tokenGatewayLogo from "../assets/token-gateway-logo.svg";
 import "./home.css";
 
-const dashboardPath = "/dashboard/usage";
+const consoleEntryPath = consolePagePaths.usage;
 const examples = [
   {
     id: "responses",
@@ -186,7 +187,7 @@ export function HomePage() {
               快速接入 <ArrowUpRight size={12} />
             </a>
           </nav>
-          <a className="home-console-link" href={dashboardPath}>
+          <a className="home-console-link" href={consoleEntryPath}>
             进入控制台 <ArrowUpRight size={16} />
           </a>
           <button
@@ -233,7 +234,7 @@ export function HomePage() {
               让每一次 AI 调用都有序可控。
             </p>
             <div className="hero-actions">
-              <a className="home-button home-button-dark" href={dashboardPath}>
+              <a className="home-button home-button-dark" href={consoleEntryPath}>
                 开始账号托管 <ArrowUpRight size={18} />
               </a>
               <a className="home-text-link" href="#architecture">
@@ -487,7 +488,7 @@ export function HomePage() {
               </p>
               <a
                 className="home-button home-button-light"
-                href="/admin/api-keys"
+                href={consolePagePaths.gatewayApiKeys}
               >
                 管理 API Key <ArrowUpRight size={17} />
               </a>
@@ -605,7 +606,7 @@ export function HomePage() {
               把账号托管好。<span>让整个团队，专注用好 AI。</span>
             </h2>
           </div>
-          <a className="home-button home-button-dark" href={dashboardPath}>
+          <a className="home-button home-button-dark" href={consoleEntryPath}>
             进入控制台 <ArrowUpRight size={18} />
           </a>
         </section>

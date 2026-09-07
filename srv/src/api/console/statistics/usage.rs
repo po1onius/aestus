@@ -15,7 +15,7 @@ use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::{
-    api::dash::auth,
+    api::console::auth,
     err::{AppError, AppResult},
     state::AppState,
     user::{self, User},

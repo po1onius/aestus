@@ -1,4 +1,4 @@
-import { dashboardRoutes } from "../config";
+import { consolePagePaths, dashboardRoutes } from "../config";
 import type { DashboardPage, DashboardRoute, DashboardUser } from "../types";
 
 export function routesForUser(
@@ -17,13 +17,13 @@ export function routesForUser(
   return dashboardRoutes.filter(
     (route) =>
       !route.platformOnly &&
-      (!route.ownerOnly || (route.page === "accounts" && canViewProviderResources)),
+      (!route.ownerOnly || (route.page === "providers" && canViewProviderResources)),
   );
 }
 
 export function pageFromPath(pathname: string, routes: DashboardRoute[]): DashboardPage {
   const normalized = stripTrailingSlash(pathname);
-  return routes.find((route) => route.path === normalized)?.page ?? routes[0]?.page ?? "apiKeys";
+  return routes.find((route) => route.path === normalized)?.page ?? routes[0]?.page ?? "gatewayApiKeys";
 }
 
 export function normalizeDashboardPath(
@@ -33,7 +33,7 @@ export function normalizeDashboardPath(
   const normalized = stripTrailingSlash(pathname);
   return routes.some((route) => route.path === normalized)
     ? normalized
-    : (routes[0]?.path ?? "/admin/api-keys");
+    : (routes[0]?.path ?? consolePagePaths.gatewayApiKeys);
 }
 
 function stripTrailingSlash(pathname: string) {
@@ -58,7 +58,7 @@ export function activePageLoading(
   if (activePage === "plugins") {
     return pluginsLoading;
   }
-  if (activePage === "apiKeys") {
+  if (activePage === "gatewayApiKeys") {
     return apiKeysLoading;
   }
   if (activePage === "requestLogs") {

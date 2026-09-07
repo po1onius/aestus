@@ -12,7 +12,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
-    api::dash::{
+    api::console::{
         auth as dash_auth,
         pagination::{ListPage, ListPageQuery},
     },

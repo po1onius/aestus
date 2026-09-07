@@ -13,9 +13,14 @@ use axum::Router;
 
 use crate::state::AppState;
 
-/// 保持现有 `/dash/request-logs` URL 的内部路由入口，避免纯代码重构影响前端。
+/// 普通请求日志明细查询。
 pub(super) fn request_logs_router() -> Router<AppState> {
-    request_logs::router().nest("/policy", policy_logs::router())
+    request_logs::router()
+}
+
+/// Policy 日志独立查询，保留自身的数据范围、权限和分页规则。
+pub(super) fn policy_logs_router() -> Router<AppState> {
+    policy_logs::router()
 }
 
 /// 当前用户用量概览与独立时间趋势接口不依赖日志明细分页，直接使用 ClickHouse 聚合结果。

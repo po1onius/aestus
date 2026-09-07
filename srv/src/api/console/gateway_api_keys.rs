@@ -16,7 +16,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
-    api::dash::{auth, pagination::ListPageQuery},
+    api::console::{auth, pagination::ListPageQuery},
     err::{AppError, AppResult},
     gateway_key::{self, GatewayApiKeyWithModels},
     plugin::{self, model::PluginSuiteSummary},
@@ -40,7 +40,7 @@ struct CreateApiKeyRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct UpdateApiKeyPluginRequest {
+struct UpdateApiKeyPluginSuiteRequest {
     plugin_suite_id: Option<Uuid>,
 }
 
@@ -84,7 +84,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_api_keys).post(create_api_key))
         .route("/{id}", delete(delete_api_key))
-        .route("/{id}/plugin", put(update_api_key_plugin))
+        .route("/{id}/plugin-suite", put(update_api_key_plugin_suite))
         .route("/{id}/models", put(update_api_key_models))
         .route("/{id}/enabled", post(update_api_key_enabled))
 }
@@ -262,11 +262,11 @@ async fn update_api_key_models(
     )))
 }
 
-async fn update_api_key_plugin(
+async fn update_api_key_plugin_suite(
     State(state): State<AppState>,
     auth::CurrentUser(current_user): auth::CurrentUser,
     Path(id): Path<Uuid>,
-    Json(payload): Json<UpdateApiKeyPluginRequest>,
+    Json(payload): Json<UpdateApiKeyPluginSuiteRequest>,
 ) -> AppResult<impl IntoResponse> {
     let mut conn = state.db_conn().await?;
     require_api_key_group_grant(&mut conn, &current_user, id).await?;

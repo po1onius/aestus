@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    api::dash::auth,
+    api::console::auth,
     err::{AdminResult, AppError, AppResult},
     provider::{
         claude::maintenance::ClaudeMaintenance,

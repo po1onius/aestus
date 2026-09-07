@@ -8,7 +8,7 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::{
-    api::dash::{
+    api::console::{
         auth,
         pagination::{ListPage, ListPageQuery},
     },

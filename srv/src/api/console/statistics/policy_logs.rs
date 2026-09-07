@@ -13,7 +13,7 @@ use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::{
-    api::dash::auth,
+    api::console::auth,
     err::{AppError, AppResult},
     request::policy_log::gpt_policy_violation_logs,
     state::AppState,

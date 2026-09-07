@@ -1,6 +1,6 @@
 //! 独立 WASM 插件上传及固定套件组合。上传按 Provider/插槽校验 Component ABI。
 use crate::{
-    api::dash::auth,
+    api::console::auth,
     err::{AdminResult, AppError, AppResult},
     plugin::{
         self,
@@ -33,11 +33,16 @@ pub fn router() -> Router<AppState> {
         )
         .route("/{id}", delete(delete_plugin))
         .route("/{id}/deletion-impact", get(plugin_deletion_impact))
-        .route("/suites", get(list_suites).post(create_suite))
-        .route("/suites/options", get(list_suite_options))
-        .route("/suites/{id}", delete(delete_suite))
-        .route("/suites/{id}/deletion-impact", get(suite_deletion_impact))
-        .route("/suites/{id}/enabled", put(update_suite_enabled))
+}
+
+/// 套件是可独立创建、绑定和删除的资源，与单个 WASM 插件使用平级路由。
+pub fn suites_router() -> Router<AppState> {
+    Router::new()
+        .route("/", get(list_suites).post(create_suite))
+        .route("/options", get(list_suite_options))
+        .route("/{id}", delete(delete_suite))
+        .route("/{id}/deletion-impact", get(suite_deletion_impact))
+        .route("/{id}/enabled", put(update_suite_enabled))
 }
 
 async fn list_plugins(

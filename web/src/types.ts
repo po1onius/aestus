@@ -10,11 +10,11 @@ export type RuntimeViewState =
   | "not_runtime";
 export type DashboardPage =
   | "tenants"
-  | "accounts"
+  | "providers"
   | "plugins"
   | "users"
   | "usage"
-  | "apiKeys"
+  | "gatewayApiKeys"
   | "requestLogs";
 export type DashboardTheme = "light" | "dark";
 export type AccountImportMode = "oauth" | "refreshToken";

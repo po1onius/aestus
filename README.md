@@ -75,6 +75,32 @@ podman compose up -d gateway
 Docker 镜像也已包含前端构建产物并配置托管目录，无需单独启动 Vite 或 Nginx。
 首页更新后重新执行 `cd web && npm run build` 即可更新本地后端托管的页面。
 
+## URL 与职责
+
+公开首页使用 `/`，控制台页面统一使用 `/console` 前缀，控制台 API 统一使用
+`/api/console` 前缀。页面按业务资源命名；平台管理员、租户 owner 和普通用户共用
+相应 URL，可见功能、操作权限和数据范围由登录身份确定。
+
+| 功能 | 页面 | 控制台 API |
+| --- | --- | --- |
+| 租户 | `/console/tenants` | `/api/console/tenants` |
+| Provider 资源 | `/console/providers` | 见下文 |
+| 插件与套件 | `/console/plugins` | `/api/console/plugins`、`/api/console/plugin-suites` |
+| 用户 | `/console/users` | `/api/console/users` |
+| 用量 | `/console/usage` | `/api/console/usage` |
+| 网关 API Key | `/console/gateway-api-keys` | `/api/console/gateway-api-keys` |
+| 请求日志与 Policy 日志 | `/console/request-logs` | `/api/console/request-logs`、`/api/console/policy-logs` |
+
+Provider 的 OAuth 账号和上游官方 Key 分别使用
+`/api/console/providers/{provider}/accounts` 与
+`/api/console/providers/{provider}/upstream-api-keys`，当前支持 `gpt` 和 `claude`。
+跨 Provider 的分组管理和授权选项使用 `/api/console/provider-groups`。
+网关 Key 的套件绑定使用 `PUT /api/console/gateway-api-keys/{id}/plugin-suite`。
+登录、注册及当前身份查询使用 `/api/console/auth` 下的对应接口。
+
+本次路径调整需要同步发布前后端，并更新控制台书签和直接调用控制台 API 的脚本；
+不提供旧路径别名。对外模型协议继续使用 `/v1/...`，健康检查继续使用 `/healthz`。
+
 ## 插件与套件
 
 平台管理员和租户 owner 在“插件”页面分别管理 WASM 插件和套件。两张表的 `tenant_id`
@@ -189,7 +215,7 @@ Provider 查询账号 `specific.email`，保存查询时的邮箱快照；资源
 发布及 writer 投递均使用有界队列的 `try_send`；队列满允许丢弃，落库失败只记录诊断，
 不阻塞或中断模型响应。租户 owner 可在 Dashboard 请求日志页切换“请求日志 / Policy 日志”，
 按服务时区的自然日查看 Policy 日志的时间、用户名、账号邮箱和错误码，并使用游标翻页。
-查询接口 `GET /dash/request-logs/policy` 仅允许租户 owner 查看当前租户的数据，不允许客户端
+查询接口 `GET /api/console/policy-logs` 仅允许租户 owner 查看当前租户的数据，不允许客户端
 指定租户；支持 `date`、`limit`（默认 100，最多 500）、成对的 `before_occurred_at` 与
 `before_id` 游标。Policy 日志没有请求日志的 30 天查询限制。
 

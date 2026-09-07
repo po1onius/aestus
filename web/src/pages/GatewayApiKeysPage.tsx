@@ -23,7 +23,7 @@ import {
 } from "../lib/ui";
 import type { ApiKey } from "../types";
 
-interface ApiKeysPageProps {
+interface GatewayApiKeysPageProps {
   apiKeys: ApiKey[];
   loading: boolean;
   updatingId: string | null;
@@ -39,7 +39,7 @@ interface ApiKeysPageProps {
   onPageChange: (offset: number) => void;
 }
 
-export function ApiKeysPage({
+export function GatewayApiKeysPage({
   apiKeys,
   loading,
   updatingId,
@@ -53,7 +53,7 @@ export function ApiKeysPage({
   onDelete,
   onCopy,
   onPageChange,
-}: ApiKeysPageProps) {
+}: GatewayApiKeysPageProps) {
   // 可见状态仅保存在当前页面组件中；刷新或重新进入页面后自动恢复为默认隐藏。
   const [visibleApiKeyIds, setVisibleApiKeyIds] = useState<Set<string>>(() => new Set());
 

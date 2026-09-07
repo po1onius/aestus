@@ -192,7 +192,7 @@ function RouteIcon({ page }: { page: DashboardPage }) {
   switch (page) {
     case "tenants":
       return <Building2 size={18} />;
-    case "accounts":
+    case "providers":
       return <ServerCog size={18} />;
     case "plugins":
       return <PlugZap size={18} />;
@@ -200,7 +200,7 @@ function RouteIcon({ page }: { page: DashboardPage }) {
       return <UsersRound size={18} />;
     case "usage":
       return <ChartNoAxesCombined size={18} />;
-    case "apiKeys":
+    case "gatewayApiKeys":
       return <KeyRound size={18} />;
     case "requestLogs":
       return <ScrollText size={18} />;
