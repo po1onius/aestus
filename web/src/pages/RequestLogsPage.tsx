@@ -2,8 +2,10 @@ import { ChevronLeft, ChevronRight, Loader2, ScrollText } from "lucide-react";
 import { AnimatePresence } from "motion/react";
 import { useState, type KeyboardEvent } from "react";
 import { DatePickerInput } from "../components/DatePickerInput";
+import { SlidingTabList } from "../components/SlidingTabList";
 import { StatusBadge } from "../components/StatusBadge";
 import { RequestLogDetailDialog } from "../features/request-logs/RequestLogDetailDialog";
+import { PolicyLogsPanel } from "../features/request-logs/PolicyLogsPanel";
 import { requestLogEffort, requestLogFastMode, statusTone } from "../features/request-logs/utils";
 import { firstTokenDurationMs, formatDuration } from "../lib/format";
 import {
@@ -17,7 +19,7 @@ import {
   tableClass,
   compactInputClass,
 } from "../lib/ui";
-import type { RequestLogCursor, RequestLogRecord, TenantSummary } from "../types";
+import type { RequestLogCursor, RequestLogRecord, RequestLogView, TenantSummary } from "../types";
 
 interface RequestLogsPageProps {
   logs: RequestLogRecord[];
@@ -41,7 +43,69 @@ interface RequestLogsPageProps {
   onNextPage: () => void;
 }
 
-export function RequestLogsPage({
+interface RequestLogsViewProps extends RequestLogsPageProps {
+  showPolicyLogs: boolean;
+  view: RequestLogView;
+  onViewChange: (view: RequestLogView) => void;
+  token: string | null;
+  policyRefreshRevision: number;
+}
+
+export function RequestLogsPage(props: RequestLogsViewProps) {
+  if (!props.showPolicyLogs) {
+    return <RequestLogTable {...props} />;
+  }
+
+  const tabs = [
+    { value: "requests", label: "请求日志" },
+    { value: "policy", label: "Policy 日志" },
+  ] as const;
+
+  return (
+    <section className="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
+      <SlidingTabList count={2} selectedIndex={props.view === "policy" ? 1 : 0} ariaLabel="日志类型" className="self-start">
+        {tabs.map((tab, index) => (
+          <button
+            key={tab.value}
+            id={`log-tab-${tab.value}`}
+            type="button"
+            role="tab"
+            aria-selected={props.view === tab.value}
+            aria-controls="log-tab-panel"
+            tabIndex={props.view === tab.value ? 0 : -1}
+            className={cx(
+              "relative z-10 rounded-md px-4 py-2 text-sm font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600/30",
+              props.view === tab.value
+                ? "text-indigo-800 dark:text-indigo-300"
+                : "text-slate-600 hover:text-slate-950 dark:text-slate-400 dark:hover:text-slate-100",
+            )}
+            onClick={() => props.onViewChange(tab.value)}
+            onKeyDown={(event) => {
+              const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? 1
+                : event.key === "ArrowLeft" || event.key === "ArrowRight" ? 1 - index : null;
+              if (nextIndex !== null) {
+                event.preventDefault();
+                props.onViewChange(tabs[nextIndex].value);
+                document.getElementById(`log-tab-${tabs[nextIndex].value}`)?.focus();
+              }
+            }}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </SlidingTabList>
+      <div id="log-tab-panel" role="tabpanel" aria-labelledby={`log-tab-${props.view}`} tabIndex={0} className="flex min-h-0 min-w-0 flex-1 flex-col">
+        {props.view === "policy" ? (
+          <PolicyLogsPanel token={props.token} timezone={props.timezone} refreshRevision={props.policyRefreshRevision} />
+        ) : (
+          <RequestLogTable {...props} />
+        )}
+      </div>
+    </section>
+  );
+}
+
+function RequestLogTable({
   logs,
   showTenant,
   showUsername,

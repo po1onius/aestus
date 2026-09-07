@@ -16,6 +16,7 @@ use crate::{
             images,
             maintenance::GptMaintenance,
             model::GptAccountRequestContext,
+            policy_log,
             upstream::{build_upstream_url, classify_http_failure, filtered_response_headers},
         },
         protocol::{
@@ -188,6 +189,7 @@ pub(super) async fn process_image_upstream_response(
     let status = upstream_response.status();
     let headers = upstream_response.headers().clone();
     let body = read_buffered_upstream_body(config, attempt.provider, upstream_response).await?;
+    let policy_violation = policy_log::parse_http_error(resource.kind, status, &body);
 
     if status.is_success() {
         let usage = images::parse_image_usage(&body).map_err(|message| {
@@ -218,6 +220,7 @@ pub(super) async fn process_image_upstream_response(
         );
         return Ok(ProtocolResponse::Buffered(
             BufferedProtocolResponse::Respond {
+                policy_violation,
                 status,
                 headers: filtered_response_headers(&headers, resource.kind),
                 body: downstream_body,
@@ -252,6 +255,7 @@ pub(super) async fn process_image_upstream_response(
         }
     } else {
         BufferedProtocolResponse::Respond {
+            policy_violation,
             status,
             headers: filtered_response_headers(&headers, resource.kind),
             body,

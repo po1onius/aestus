@@ -1,12 +1,19 @@
 use chrono::{DateTime, Utc};
-use diesel_async::AsyncPgConnection;
+use diesel::{
+    dsl::sql,
+    prelude::*,
+    sql_types::{Nullable, Text},
+};
+use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use tracing::info;
+use uuid::Uuid;
 
 use crate::{
-    err::AppResult,
+    err::{AppError, AppResult},
     provider::{
         credential::{
-            ACCOUNT_STATUS_VALID, NewProviderAccount, ProviderAccount, serialize_specific,
+            ACCOUNT_STATUS_VALID, NewProviderAccount, ProviderAccount, schema::provider_accounts,
+            serialize_specific,
         },
         gpt::model::{GptAccountSpecific, PROVIDER},
         resource::RequestOverride,
@@ -16,6 +23,26 @@ use crate::{
 
 pub mod account {
     use super::*;
+
+    /// 策略日志只读取本租户 GPT 账号的邮箱投影，不加载 access/refresh token 等凭证。
+    pub async fn find_email_by_id(
+        conn: &mut AsyncPgConnection,
+        tenant_id: &str,
+        id: Uuid,
+    ) -> AppResult<Option<String>> {
+        provider_accounts::table
+            .filter(provider_accounts::tenant_id.eq(tenant_id))
+            .filter(provider_accounts::provider.eq(PROVIDER))
+            .filter(provider_accounts::id.eq(id))
+            .select(sql::<Nullable<Text>>("specific ->> 'email'"))
+            .first::<Option<String>>(conn)
+            .await
+            .optional()
+            .map(Option::flatten)
+            .map_err(|source| AppError::DbQuery {
+                message: format!("查询 GPT 账号邮箱失败: {source}"),
+            })
+    }
 
     #[allow(clippy::too_many_arguments)]
     pub async fn create_with_override(

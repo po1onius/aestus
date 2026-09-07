@@ -477,6 +477,28 @@ export interface ListRequestLogsResponse {
   next_cursor: RequestLogCursor | null;
 }
 
+export type RequestLogView = "requests" | "policy";
+
+export interface PolicyLogRecord {
+  id: string;
+  username: string;
+  account_email: string | null;
+  occurred_at: string;
+  error_code: string;
+}
+
+export interface PolicyLogCursor {
+  before_occurred_at: string;
+  before_id: string;
+}
+
+export interface ListPolicyLogsResponse {
+  date: string;
+  timezone: string;
+  items: PolicyLogRecord[];
+  next_cursor: PolicyLogCursor | null;
+}
+
 export type UsageScope = "current_user" | "tenant" | "all_users";
 
 export interface UsageLifetime {

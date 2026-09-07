@@ -40,7 +40,9 @@ use crate::{
         response_logging::response_body_for_tracing,
         scheduler::{self, UpstreamAllocation, UpstreamLease},
     },
-    request::events::{RequestEndResult, RequestEvent, StreamEndReason, UsageAttribution},
+    request::events::{
+        GptPolicyViolation, RequestEndResult, RequestEvent, StreamEndReason, UsageAttribution,
+    },
     state::AppState,
 };
 
@@ -301,7 +303,9 @@ where
                 body,
                 feedback,
                 usage,
+                policy_violation,
             }) => {
+                publish_policy_violation(state, request.request_id, policy_violation);
                 let feedback_result =
                     apply_optional_feedback::<P::Maintenance>(state, allocation, feedback).await;
                 if let Some(usage) = usage {
@@ -816,6 +820,7 @@ async fn handle_response<P: ProviderProtocol>(
     let usage = output.effects.usage;
     let response = match output.disposition {
         BufferedPluginDisposition::Respond(response) => BufferedProtocolResponse::Respond {
+            policy_violation: None,
             status: response.status,
             headers: response.headers,
             body: response.body,
@@ -861,6 +866,23 @@ async fn handle_response<P: ProviderProtocol>(
         }
     };
     Ok((ProtocolResponse::Buffered(response), None))
+}
+
+fn publish_policy_violation(
+    state: &AppState,
+    request_id: uuid::Uuid,
+    violation: Option<GptPolicyViolation>,
+) {
+    if let Some(violation) = violation {
+        info!(%request_id, error_code = violation.error_code.as_str(), occurred_at = %violation.occurred_at, "GPT 原生账号响应命中策略错误，发布日志事件");
+        state
+            .request_events()
+            .emit(RequestEvent::GptPolicyViolationObserved {
+                request_id,
+                occurred_at: violation.occurred_at,
+                error_code: violation.error_code,
+            });
+    }
 }
 
 fn finish_buffered_response(
@@ -1090,6 +1112,7 @@ impl<M: MaintenanceProvider> ManagedUpstreamStream<M> {
     fn observe(&mut self, bytes: Bytes) {
         if let Some(observer) = self.observer.as_mut() {
             let update = observer.observe(bytes);
+            publish_policy_violation(&self.state, self.request_id, update.policy_violation);
             self.output.extend(update.output);
             self.submit_feedback_once(update.feedback);
             return;
@@ -1278,6 +1301,7 @@ impl<M: MaintenanceProvider> ManagedUpstreamStream<M> {
             return;
         };
         let completion = observer.complete();
+        publish_policy_violation(&self.state, self.request_id, completion.policy_violation);
         self.output.extend(completion.output);
         self.usage = completion.usage;
         self.stream_error = completion.error;

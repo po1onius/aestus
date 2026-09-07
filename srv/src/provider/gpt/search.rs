@@ -13,6 +13,7 @@ use crate::{
             codex_http::{header as codex_header, response as codex_response},
             maintenance::GptMaintenance,
             model::GptAccountRequestContext,
+            policy_log,
             upstream::{build_upstream_url, filtered_response_headers},
         },
         protocol::{
@@ -41,7 +42,7 @@ struct SearchRequestMetadata {
 /// GPT `/v1/alpha/search` 的 provider/operation adapter。
 ///
 /// Search 与 Responses 共享 GPT 资源池、凭证和 Codex 请求头语义，但上游响应是一次性 JSON。
-/// 当前不解释任何错误正文，也不产生 token usage；所有 HTTP 状态和正文均直接交还调用方。
+/// 错误正文只旁路识别策略日志，不产生 token usage；所有 HTTP 状态和正文均直接交还调用方。
 pub struct GptSearchProxy;
 
 impl ProviderProtocol for GptSearchProxy {
@@ -208,6 +209,7 @@ async fn process_upstream_response(
     let status = upstream_response.status();
     let headers = upstream_response.headers().clone();
     let body = read_buffered_upstream_body(config, attempt.provider, upstream_response).await?;
+    let policy_violation = policy_log::parse_http_error(resource.kind, status, &body);
 
     if status.is_success() {
         info!(
@@ -236,12 +238,13 @@ async fn process_upstream_response(
             response_bytes = body.len(),
             upstream_response_body_encoding = tracing_body.encoding(),
             upstream_response_body = %tracing_body.content(),
-            "GPT Search 上游错误响应暂不分类，完整正文已写入 tracing 并将原样透传"
+            "GPT Search 上游错误响应已旁路观察策略日志，完整正文已写入 tracing 并将原样透传"
         );
     }
 
     Ok(ProtocolResponse::Buffered(
         BufferedProtocolResponse::Respond {
+            policy_violation,
             status,
             headers: filtered_response_headers(&headers, resource.kind),
             body,

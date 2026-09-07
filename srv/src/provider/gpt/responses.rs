@@ -17,6 +17,7 @@ use crate::{
             },
             maintenance::GptMaintenance,
             model::GptAccountRequestContext,
+            policy_log,
             upstream::{
                 account_signal_to_feedback, build_upstream_url, classify_http_failure,
                 filtered_response_headers,
@@ -33,6 +34,7 @@ use crate::{
         resource::{UpstreamResource, UpstreamResourceKind},
         response_logging::response_body_for_tracing,
     },
+    request::events::GptPolicyViolation,
 };
 
 impl From<CodexTokenUsage> for TokenUsage {
@@ -221,6 +223,7 @@ async fn process_upstream_response(
     }
 
     let body = read_buffered_upstream_body(config, attempt.provider, upstream_response).await?;
+    let policy_violation = policy_log::parse_http_error(resource.kind, status, &body);
     let tracing_body = response_body_for_tracing(&body);
     warn!(
         request_id = %attempt.request_id,
@@ -247,6 +250,7 @@ async fn process_upstream_response(
         }
     } else {
         BufferedProtocolResponse::Respond {
+            policy_violation,
             status,
             headers: filtered_response_headers(&headers, resource.kind),
             body,
@@ -258,9 +262,10 @@ async fn process_upstream_response(
     Ok(ProtocolResponse::Buffered(response))
 }
 
-/// GPT SSE observer 只保存协议解析状态；maintenance 回执、资源释放、额度扣减与日志收尾
-/// 全部由通用流包装器执行。
+/// GPT SSE observer 只返回协议解析结果和策略日志事实；事件发布、maintenance 回执、
+/// 资源释放、额度扣减与请求日志收尾全部由通用流包装器执行。
 struct GptSseObserver {
+    policy_violation: Option<GptPolicyViolation>,
     resource_kind: UpstreamResourceKind,
     sse_buffer: Vec<u8>,
     usage: Option<TokenUsage>,
@@ -271,6 +276,7 @@ struct GptSseObserver {
 impl GptSseObserver {
     fn new(resource_kind: UpstreamResourceKind) -> Self {
         Self {
+            policy_violation: None,
             resource_kind,
             sse_buffer: Vec::with_capacity(8192),
             usage: None,
@@ -307,6 +313,7 @@ impl GptSseObserver {
                 .output
                 .push_back(Bytes::from(std::mem::take(&mut self.sse_buffer)));
         }
+        update.policy_violation = self.policy_violation.take();
         update
     }
 
@@ -326,7 +333,27 @@ impl GptSseObserver {
                 (original, None)
             }
             Some(CodexSseData::ResponseFailed(error)) => self.record_failure(error, original),
-            Some(CodexSseData::Other(_)) | None => (original, None),
+            Some(CodexSseData::Other(value)) => {
+                // 仅按 type/code 识别策略日志，其他 error 字段类型错误不应阻止记录。
+                // 复用已有解析结果，不为旁路日志再次解析整个 SSE JSON。
+                if value.get("type").and_then(serde_json::Value::as_str) == Some("response.failed")
+                {
+                    self.observe_policy_error_code(
+                        value
+                            .pointer("/response/error/code")
+                            .and_then(serde_json::Value::as_str),
+                    );
+                }
+                (original, None)
+            }
+            None => (original, None),
+        }
+    }
+
+    fn observe_policy_error_code(&mut self, code: Option<&str>) {
+        // 同一批字节只需返回首次命中；跨批及整条请求的去重统一由日志 worker 完成。
+        if self.policy_violation.is_none() {
+            self.policy_violation = policy_log::parse_stream_error_code(self.resource_kind, code);
         }
     }
 
@@ -350,6 +377,7 @@ impl GptSseObserver {
         error: codex_response::CodexResponseError,
         original: Bytes,
     ) -> (Bytes, Option<UpstreamFeedback>) {
+        self.observe_policy_error_code(error.code.as_deref());
         let original_for_request_log = String::from_utf8_lossy(&original).to_string();
         let tracing_body = response_body_for_tracing(&original);
         let Some(signal) = codex_response::parse_stream_account_signal(&error) else {
@@ -407,6 +435,7 @@ impl StreamObserver for GptSseObserver {
                 .push_back(Bytes::from(std::mem::take(&mut self.sse_buffer)));
         }
         StreamCompletion {
+            policy_violation: update.policy_violation,
             output: update.output,
             feedback: update.feedback,
             usage: self.usage.take(),

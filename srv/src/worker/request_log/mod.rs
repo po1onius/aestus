@@ -1,7 +1,8 @@
-//! 请求日志后台投影与 ClickHouse writer。
+//! 请求日志聚合与 ClickHouse / PostgreSQL 日志写入的组合。
 //!
 //! 核心请求链路只发布强类型事件。本模块在 worker 任务中顺序聚合事件，最终日志快照再
-//! 进入独立的 ClickHouse 批量 writer；Dashboard 的 ClickHouse 读取仍由 statistics 负责。
+//! 进入独立的 ClickHouse 批量 writer；首次策略错误在同一次收尾时派发给 PostgreSQL writer。
+//! Dashboard 的 ClickHouse 读取仍由 statistics 负责。
 
 mod lifecycle;
 mod writer;
@@ -15,6 +16,7 @@ use tokio::task::JoinHandle;
 
 use crate::request::events::RequestEvent;
 
+use super::policy_log::PolicyLogWriter;
 use lifecycle::RequestLogLifecycle;
 use writer::RequestLogWriter;
 
@@ -28,12 +30,13 @@ impl RequestLogWorker {
         client: Client,
         table: String,
         service_timezone: Tz,
+        policy_log: PolicyLogWriter,
     ) -> (Self, JoinHandle<()>) {
         let table: Arc<str> = Arc::from(table);
         let (writer, writer_task) = RequestLogWriter::spawn(client, table, service_timezone);
         (
             Self {
-                lifecycle: RequestLogLifecycle::new(writer),
+                lifecycle: RequestLogLifecycle::new(writer, policy_log),
             },
             writer_task,
         )

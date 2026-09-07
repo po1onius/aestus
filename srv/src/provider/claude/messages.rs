@@ -264,6 +264,7 @@ async fn process_upstream_response(
         let response_headers = filtered_response_headers(&headers);
         return Ok(ProtocolResponse::Buffered(
             BufferedProtocolResponse::Respond {
+                policy_violation: None,
                 status,
                 headers: response_headers,
                 body,
@@ -408,6 +409,7 @@ async fn process_upstream_response(
         }
     } else {
         BufferedProtocolResponse::Respond {
+            policy_violation: None,
             status,
             headers: filtered_response_headers(&headers),
             body,
@@ -540,6 +542,7 @@ impl StreamObserver for ClaudeSseObserver {
                 .push_back(Bytes::from(std::mem::take(&mut self.sse_buffer)));
         }
         StreamCompletion {
+            policy_violation: None,
             output: update.output,
             feedback: update.feedback,
             usage: self.usage.take().map(|usage| usage.into_token_usage()),

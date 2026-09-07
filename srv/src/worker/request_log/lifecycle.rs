@@ -3,16 +3,19 @@ use std::collections::HashMap;
 use bytes::Bytes;
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::request::events::{
-    GatewayAuthDetails as GatewayAuthDetailsEvent, RequestEndResult, RequestEvent,
-    RequestInspectionDetails as RequestInspectionDetailsEvent, StreamEndReason, StreamErrorRecord,
-    TokenUsage,
+    GatewayAuthDetails as GatewayAuthDetailsEvent, GptPolicyViolation, RequestEndResult,
+    RequestEvent, RequestInspectionDetails as RequestInspectionDetailsEvent, StreamEndReason,
+    StreamErrorRecord, TokenUsage,
 };
 
-use super::writer::RequestLogWriter;
+use super::{
+    super::policy_log::{PolicyLogTask, PolicyLogWriter},
+    writer::RequestLogWriter,
+};
 
 /// 最长保留一天未收到完成事件的聚合状态。
 ///
@@ -125,6 +128,8 @@ pub(super) struct RequestLogEntry {
     pub(super) response_finished_at: Option<DateTime<Utc>>,
     pub(super) token_usage: Option<TokenUsage>,
     pub(super) extra: RequestLogExtra,
+    /// 仅供 PostgreSQL 特殊日志收尾使用，不属于 ClickHouse 行或 extra。
+    policy_violation: Option<GptPolicyViolation>,
 }
 
 /// 只在 worker 完成终态判定后产生并投递给 ClickHouse writer 的不可变快照。
@@ -155,6 +160,7 @@ impl RequestLogEntry {
             response_finished_at: None,
             token_usage: None,
             extra: RequestLogExtra::default(),
+            policy_violation: None,
         }
     }
 }
@@ -166,18 +172,33 @@ impl RequestLogEntry {
 pub(super) struct RequestLogLifecycle {
     entries: HashMap<Uuid, RequestLogEntry>,
     writer: RequestLogWriter,
+    policy_log: PolicyLogWriter,
 }
 
 impl RequestLogLifecycle {
-    pub(super) fn new(writer: RequestLogWriter) -> Self {
+    pub(super) fn new(writer: RequestLogWriter, policy_log: PolicyLogWriter) -> Self {
         Self {
             entries: HashMap::new(),
             writer,
+            policy_log,
         }
     }
 
     pub(super) fn handle(&mut self, event: RequestEvent) {
         match event {
+            RequestEvent::GptPolicyViolationObserved {
+                request_id,
+                occurred_at,
+                error_code,
+            } => {
+                self.record_policy_violation(
+                    request_id,
+                    GptPolicyViolation {
+                        occurred_at,
+                        error_code,
+                    },
+                );
+            }
             RequestEvent::Started {
                 request_id,
                 provider,
@@ -359,6 +380,19 @@ impl RequestLogLifecycle {
         );
     }
 
+    fn record_policy_violation(&mut self, request_id: Uuid, violation: GptPolicyViolation) {
+        let Some(entry) = self.entries.get_mut(&request_id) else {
+            warn!(%request_id, error_code = violation.error_code.as_str(), "worker 收到策略日志事件时未命中请求聚合上下文");
+            return;
+        };
+        if let Some(first) = entry.policy_violation {
+            debug!(%request_id, first_error_code = first.error_code.as_str(), ignored_error_code = violation.error_code.as_str(), "同一下游请求重复命中策略错误，保留首次记录");
+            return;
+        }
+        info!(%request_id, error_code = violation.error_code.as_str(), occurred_at = %violation.occurred_at, "worker 已保存本请求首次策略错误，等待请求收尾");
+        entry.policy_violation = Some(violation);
+    }
+
     fn finish(
         &mut self,
         request_id: Uuid,
@@ -432,6 +466,22 @@ impl RequestLogLifecycle {
             error_response_present = entry.extra.error_response.is_some(),
             "worker 已根据请求终态完成日志状态判定"
         );
+        // 正常结束与超时回收共用此处。条目只移除一次，因此每个下游请求最多派发一条。
+        // 派发仅 try_send；PostgreSQL 的写入不阻塞请求日志聚合或 ClickHouse writer。
+        if let Some(violation) = entry.policy_violation.take() {
+            if let Some(attribution) = entry.gateway_attribution.as_ref() {
+                self.policy_log.dispatch(PolicyLogTask {
+                    request_id,
+                    tenant_id: attribution.tenant_id.clone(),
+                    username: attribution.username.clone(),
+                    resource_id: entry.resource_id,
+                    occurred_at: violation.occurred_at,
+                    error_code: violation.error_code,
+                });
+            } else {
+                warn!(%request_id, error_code = violation.error_code.as_str(), "请求收尾时缺少鉴权快照，跳过 PostgreSQL 策略日志");
+            }
+        }
         self.writer
             .submit(FinalizedRequestLogEntry { entry, status });
     }

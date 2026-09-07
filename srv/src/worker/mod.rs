@@ -1,8 +1,9 @@
 //! 非核心后台功能的组合根。
 //!
 //! 核心请求链路只持有 [`RequestEventPublisher`] 并非阻塞地发布事实。本模块私有持有事件
-//! receiver、请求日志投影器和额度执行器；任何队列或任务故障都不会反向改变模型请求。
+//! receiver、请求日志投影器、策略日志 writer 和额度执行器；队列或任务故障不会反向改变模型请求。
 
+mod policy_log;
 mod quota;
 mod request_log;
 
@@ -19,6 +20,7 @@ use crate::{
     request::events::{RequestEvent, RequestEventPublisher},
 };
 
+use policy_log::PolicyLogWriter;
 use quota::{QuotaDeductionTask, QuotaWorker};
 use request_log::RequestLogWorker;
 
@@ -51,8 +53,9 @@ pub fn start(
     service_timezone: Tz,
 ) -> (RequestEventPublisher, WorkerRuntime) {
     let (publisher, event_rx) = RequestEventPublisher::channel(REQUEST_EVENT_QUEUE_CAPACITY);
+    let (policy_log, policy_log_task) = PolicyLogWriter::new(db_pool.clone());
     let (request_log, request_log_writer_task) =
-        RequestLogWorker::new(clickhouse, request_log_table, service_timezone);
+        RequestLogWorker::new(clickhouse, request_log_table, service_timezone, policy_log);
     let (quota, quota_task) = QuotaWorker::new(db_pool);
     let event_router_task = spawn_request_event_router(event_rx, request_log, quota);
 
@@ -64,7 +67,12 @@ pub fn start(
     (
         publisher,
         WorkerRuntime {
-            tasks: vec![event_router_task, quota_task, request_log_writer_task],
+            tasks: vec![
+                event_router_task,
+                quota_task,
+                request_log_writer_task,
+                policy_log_task,
+            ],
         },
     )
 }

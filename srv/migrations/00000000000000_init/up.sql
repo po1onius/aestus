@@ -293,3 +293,20 @@ CREATE INDEX idx_provider_api_keys_provider_created_at_id ON provider_api_keys (
 CREATE INDEX idx_provider_api_keys_tenant_provider_created_at_id ON provider_api_keys (tenant_id, provider, created_at DESC, id DESC);
 CREATE INDEX idx_provider_api_keys_group_id ON provider_api_keys (group_id);
 CREATE INDEX idx_provider_api_keys_probe_due ON provider_api_keys (provider, next_probe_at) WHERE enabled AND next_probe_at IS NOT NULL;
+
+-- 独立策略日志保存请求发生时的身份快照，不通过外键关联用户或租户。
+CREATE TABLE gpt_policy_violation_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id TEXT NOT NULL,
+    username TEXT NOT NULL,
+    -- writer 根据请求日志的资源 ID 查询 GPT 账号邮箱，保存查询时的邮箱快照。
+    account_email TEXT,
+    occurred_at TIMESTAMPTZ NOT NULL,
+    error_code TEXT NOT NULL,
+    CHECK (tenant_id <> ''),
+    CHECK (username <> ''),
+    CHECK (error_code IN ('cyber_policy', 'misalignment_policy_violation', 'bio_policy'))
+);
+
+CREATE INDEX idx_gpt_policy_violation_logs_tenant_time
+    ON gpt_policy_violation_logs (tenant_id, occurred_at DESC, id DESC);

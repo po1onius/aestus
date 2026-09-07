@@ -44,6 +44,31 @@ pub struct UsageAttribution {
     pub api_key_id: Uuid,
 }
 
+/// GPT 原生响应中需要独立记录的策略错误，不参与资源维护分类。
+#[derive(Debug, Clone, Copy)]
+pub enum GptPolicyErrorCode {
+    CyberPolicy,
+    MisalignmentPolicyViolation,
+    BioPolicy,
+}
+
+impl GptPolicyErrorCode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CyberPolicy => "cyber_policy",
+            Self::MisalignmentPolicyViolation => "misalignment_policy_violation",
+            Self::BioPolicy => "bio_policy",
+        }
+    }
+}
+
+/// adapter/observer 识别到的策略日志事实，时间在观察上游响应时确定。
+#[derive(Debug, Clone, Copy)]
+pub struct GptPolicyViolation {
+    pub occurred_at: DateTime<Utc>,
+    pub error_code: GptPolicyErrorCode,
+}
+
 /// 网关 header 鉴权成功后立即产生的调用方归属。
 ///
 /// 这些字段全部属于网关自身的 API Key、用户和 Provider 分组领域，不依赖请求体及
@@ -169,6 +194,12 @@ pub enum RequestEvent {
         attribution: UsageAttribution,
         usage: TokenUsage,
     },
+    /// 请求日志 worker 聚合首次命中；收尾时仅将此事实投递 PostgreSQL writer。
+    GptPolicyViolationObserved {
+        request_id: Uuid,
+        occurred_at: DateTime<Utc>,
+        error_code: GptPolicyErrorCode,
+    },
     Ended {
         request_id: Uuid,
         occurred_at: DateTime<Utc>,
@@ -185,6 +216,7 @@ impl RequestEvent {
             | Self::ResourceSelected { request_id, .. }
             | Self::ResponseStarted { request_id, .. }
             | Self::UsageObserved { request_id, .. }
+            | Self::GptPolicyViolationObserved { request_id, .. }
             | Self::Ended { request_id, .. } => *request_id,
         }
     }
@@ -197,13 +229,14 @@ impl RequestEvent {
             Self::ResourceSelected { .. } => "resource_selected",
             Self::ResponseStarted { .. } => "response_started",
             Self::UsageObserved { .. } => "usage_observed",
+            Self::GptPolicyViolationObserved { .. } => "gpt_policy_violation_observed",
             Self::Ended { .. } => "request_ended",
         }
     }
 }
 
 /// 核心请求链路持有的唯一后台事件发布端口。
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct RequestEventPublisher {
     tx: mpsc::Sender<RequestEvent>,
 }

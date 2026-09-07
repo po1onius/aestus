@@ -113,6 +113,7 @@ import type {
   RateLimitResetCreditsResponse,
   RequestLogCursor,
   RequestLogRecord,
+  RequestLogView,
   RequestOverride,
   RequestOverrideTarget,
   TenantSummary,
@@ -199,6 +200,8 @@ export function App() {
   const [requestOverrideHeaderRows, setRequestOverrideHeaderRows] = useState<OverrideEntry[]>([]);
   const [requestOverrideBodyRows, setRequestOverrideBodyRows] = useState<OverrideEntry[]>([]);
   const [requestLogs, setRequestLogs] = useState<RequestLogRecord[]>([]);
+  const [requestLogView, setRequestLogView] = useState<RequestLogView>("requests");
+  const [policyLogRefreshRevision, setPolicyLogRefreshRevision] = useState(0);
   const [requestLogDate, setRequestLogDate] = useState(() => todayInputValue("UTC"));
   const [requestLogNonSuccessOnly, setRequestLogNonSuccessOnly] = useState(false);
   const [requestLogTenantId, setRequestLogTenantId] = useState("");
@@ -386,6 +389,10 @@ export function App() {
       return;
     }
 
+    if (currentUser.role === "tenant_owner" && requestLogView === "policy") {
+      return;
+    }
+
     const queryKey = requestLogAutoLoadKey(
       currentUser.id,
       requestLogDate,
@@ -400,7 +407,7 @@ export function App() {
     // 避免请求结束后的状态更新形成隐式重试循环。
     setRequestLogAutoLoadedKey(queryKey);
     void loadRequestLogs(null, []);
-  }, [activePage, authToken, currentUser, requestLogDate, requestLogNonSuccessOnly, requestLogTenantId, requestLogAutoLoadedKey]);
+  }, [activePage, authToken, currentUser, requestLogDate, requestLogNonSuccessOnly, requestLogTenantId, requestLogAutoLoadedKey, requestLogView]);
 
   useEffect(() => {
     resetRequestLogPaging();
@@ -620,6 +627,8 @@ export function App() {
     setRequestOverrideHeaderRows([]);
     setRequestOverrideBodyRows([]);
     setRequestLogs([]);
+    setRequestLogView("requests");
+    setPolicyLogRefreshRevision(0);
     setRequestLogTenantId("");
     setRequestLogTenantOptions([]);
     setRequestLogAutoLoadedKey(null);
@@ -1069,6 +1078,10 @@ export function App() {
     }
 
     if (activePage === "requestLogs") {
+      if (currentUser?.role === "tenant_owner" && requestLogView === "policy") {
+        setPolicyLogRefreshRevision((value) => value + 1);
+        return;
+      }
       await Promise.all([
         loadRequestLogs(null, []),
         currentUser?.role === "platform_admin"
@@ -3161,6 +3174,11 @@ export function App() {
         />
       ) : (
         <RequestLogsPage
+          showPolicyLogs={currentUser.role === "tenant_owner"}
+          view={requestLogView}
+          onViewChange={setRequestLogView}
+          token={authToken}
+          policyRefreshRevision={policyLogRefreshRevision}
           logs={requestLogs}
           showTenant={currentUser.role === "platform_admin"}
           showUsername={currentUser.role !== "tenant_user"}

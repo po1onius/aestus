@@ -151,8 +151,9 @@ curl http://127.0.0.1:8080/v1/images/edits \
 
 `POST /v1/alpha/search` 供 Codex standalone web search 使用，进入与 Responses 相同的
 GPT 鉴权、模型白名单、资源调度和请求日志流程。请求 JSON 及上游 JSON 响应均直接透传，
-网关只替换所选 Account 或 Official API Key 的凭证；当前不解释上游错误响应，也不记录
-token usage。Codex model provider 的 Base URL 指向 Aestus 的 `/v1` 后，会自动请求该接口。
+网关只替换所选 Account 或 Official API Key 的凭证；仅对 Account 错误响应旁路识别下述 GPT 策略日志，
+不据此改写响应或调度资源，也不记录 token usage。Codex model provider 的 Base URL 指向
+Aestus 的 `/v1` 后，会自动请求该接口。
 
 GPT 搜索上游路径默认是 `/alpha/search`，可通过 `AESTUS_GPT_UPSTREAM_SEARCH_PATH` 覆盖。
 
@@ -161,6 +162,43 @@ GPT 搜索上游路径默认是 `/alpha/search`，可通过 `AESTUS_GPT_UPSTREAM
 调度成功时通过非阻塞 `try_send` 发送上游账号或官方 API Key 的内部 UUID；worker 每次收到
 资源事件就更新请求明细的 `resource_id`，收到结束事件后落库。未收到资源事件时该字段为空。
 队列满时允许丢弃事件，日志处理不影响核心请求。请求日志详情可查看该 ID。
+
+GPT OAuth 账号的原生响应处理分支会将以下策略错误作为独立日志发送给后台 worker：
+
+- HTTP `400` 且 `error.code=cyber_policy`；
+- HTTP `400` 或 `403` 且 `error.code=misalignment_policy_violation`；
+- SSE `type=response.failed` 且 `response.error.code` 为 `cyber_policy`、
+  `misalignment_policy_violation` 或 `bio_policy`。
+
+HTTP 识别覆盖 Responses、图片生成、图片编辑和搜索；SSE 识别位于原生 Responses observer。
+仅 Account 原生响应参与，绑定套件但所选响应插槽为空、回到原生处理时也参与；
+Official API Key 和由响应插件接管的响应均不参与。这些 Account 策略错误不会触发内部重试。
+adapter / observer 只返回识别结果，由通用 proxy / 流包装器发送日志事件；记录只增加日志
+事实，既有响应、maintenance 和请求日志结果判定继续执行。
+
+独立 PostgreSQL 表 `gpt_policy_violation_logs` 保存主键 `id`、鉴权时的 `tenant_id`、
+`username` 快照、上游账号邮箱 `account_email`、实际观察时间 `occurred_at`（TIMESTAMPTZ）和
+`error_code`，不使用外键。PostgreSQL writer 根据请求日志聚合的资源 ID，限定本租户和 GPT
+Provider 查询账号 `specific.email`，保存查询时的邮箱快照；资源事件缺失、账号已删除或
+未记录邮箱时保存 NULL。policy 表不保存资源 ID，ClickHouse 请求日志继续保存 `resource_id`。
+策略事件仅携带 `request_id`、发生时间和错误码。请求日志 worker 在已有请求聚合中保存
+首次命中；重复事件不覆盖错误码或时间，一个下游请求最多生成一条特殊日志。在请求结束
+或沿用现有 24 小时超时回收流程收尾时，worker 使用已有鉴权快照生成 PostgreSQL 写入任务。
+策略字段仅存在于内存聚合中，不写入 ClickHouse 行或 `extra`，也不回查用户表。收尾时
+缺少鉴权快照会记录警告并跳过特殊日志，普通请求日志仍按原有流程写入。
+发布及 writer 投递均使用有界队列的 `try_send`；队列满允许丢弃，落库失败只记录诊断，
+不阻塞或中断模型响应。租户 owner 可在 Dashboard 请求日志页切换“请求日志 / Policy 日志”，
+按服务时区的自然日查看 Policy 日志的时间、用户名、账号邮箱和错误码，并使用游标翻页。
+查询接口 `GET /dash/request-logs/policy` 仅允许租户 owner 查看当前租户的数据，不允许客户端
+指定租户；支持 `date`、`limit`（默认 100，最多 500）、成对的 `before_occurred_at` 与
+`before_id` 游标。Policy 日志没有请求日志的 30 天查询限制。
+
+策略日志表已归入初始化 migration `00000000000000_init`，用于无历史数据的数据库初始化：
+
+```bash
+cd deploy
+podman compose run --rm --no-deps migrate
+```
 
 GPT 账号额度查询同时展示主 Codex 额度两个窗口内的“本窗口网关已记录 Token”。窗口起点由
 上游重置时间减去原始窗口秒数得到，按账号汇总从起点（包含）到额度查询时间（不包含）之间

@@ -6,6 +6,7 @@ pub mod image_generations;
 mod images;
 pub mod maintenance;
 pub mod model;
+mod policy_log;
 pub mod quota;
 pub(crate) mod rate_limit_reset;
 pub mod responses;

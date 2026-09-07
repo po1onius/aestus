@@ -18,7 +18,9 @@ use crate::{
     request::body_cache::CachedBody,
 };
 
-pub use crate::request::events::{RequestLogFields, StreamErrorRecord, TokenUsage};
+pub use crate::request::events::{
+    GptPolicyViolation, RequestLogFields, StreamErrorRecord, TokenUsage,
+};
 
 /// 单个完整 SSE item（包含字段、数据和结尾空行）的统一大小上限。
 ///
@@ -301,6 +303,8 @@ pub enum BufferedProtocolResponse {
         body: Bytes,
         feedback: Option<UpstreamFeedback>,
         usage: Option<TokenUsage>,
+        /// 原生账号响应的策略日志事实，由通用 proxy 发布，不参与响应决策。
+        policy_violation: Option<GptPolicyViolation>,
     },
     /// 当前上游响应只作为重试依据，不会暴露给调用方。
     Retry {
@@ -315,6 +319,8 @@ pub enum BufferedProtocolResponse {
 /// provider 流观察器处理一批上游字节后的结果。
 #[derive(Default)]
 pub struct StreamUpdate {
+    /// 此批次首次观察到的策略错误，跨批次的请求级去重由日志 worker 负责。
+    pub policy_violation: Option<GptPolicyViolation>,
     pub output: VecDeque<Bytes>,
     pub feedback: Option<UpstreamFeedback>,
 }
@@ -322,6 +328,8 @@ pub struct StreamUpdate {
 /// 上游流正常结束或被中断时，provider 交给 pipeline 的最终解析结果。
 #[derive(Default)]
 pub struct StreamCompletion {
+    /// 收尾解析新发现的策略错误，须在发布请求终态之前发送。
+    pub policy_violation: Option<GptPolicyViolation>,
     pub output: VecDeque<Bytes>,
     pub feedback: Option<UpstreamFeedback>,
     pub usage: Option<TokenUsage>,
