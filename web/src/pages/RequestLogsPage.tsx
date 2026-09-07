@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight, Loader2, ScrollText } from "lucide-react";
+import { ChevronLeft, ChevronRight, Loader2, ScrollText, Shrink, Zap } from "lucide-react";
 import { AnimatePresence } from "motion/react";
 import { useState, type KeyboardEvent } from "react";
 import { DatePickerInput } from "../components/DatePickerInput";
@@ -242,7 +242,7 @@ function RequestLogTable({
                   {showUsernameColumn && <th>用户名</th>}
                   <th>请求</th>
                   <th>模型</th>
-                  <th>请求参数</th>
+                  <th>额外参数</th>
                   <th>强度</th>
                   <th>状态</th>
                   <th>首/总</th>
@@ -286,8 +286,17 @@ function RequestLogTable({
                       </div>
                     </td>
                     <td>
-                      <div className={cellMainClass}>
-                        fast mode: {formatFastMode(requestLogFastMode(log))}
+                      <div className="flex items-center gap-2">
+                        {requestLogFastMode(log) && (
+                          <span role="img" aria-label="Fast mode 已开启" title="Fast mode 已开启" className="text-blue-600 dark:text-blue-400">
+                            <Zap size={16} fill="currentColor" aria-hidden="true" />
+                          </span>
+                        )}
+                        {log.is_compaction && (
+                          <span role="img" aria-label="压缩请求（Compact）" title="压缩请求（Compact）" className="text-slate-600 dark:text-slate-400">
+                            <Shrink size={16} aria-hidden="true" />
+                          </span>
+                        )}
                       </div>
                     </td>
                     <td>
@@ -321,13 +330,6 @@ function RequestLogTable({
       </AnimatePresence>
     </section>
   );
-}
-
-function formatFastMode(fastMode: boolean | null) {
-  if (fastMode === null) {
-    return "未记录";
-  }
-  return fastMode ? "开启" : "关闭";
 }
 
 function RequestTimeCell({ log }: { log: RequestLogRecord }) {

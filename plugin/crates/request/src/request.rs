@@ -136,23 +136,24 @@ fn normalize_service_tier(object: &mut Map<String, Value>) {
 }
 
 fn normalize_input(object: &mut Map<String, Value>) {
-    if matches!(object.get("input"), Some(Value::String(_))) {
-        let Some(Value::String(input)) = object.remove("input") else {
-            unreachable!("input 已确认是 string");
-        };
-        object.insert(
-            "input".to_owned(),
-            if input.trim().is_empty() {
-                Value::Array(Vec::new())
-            } else {
-                Value::Array(vec![json!({
-                    "type": "message",
-                    "role": "user",
-                    "content": input,
-                })])
-            },
-        );
+    let Some(input) = object.get_mut("input") else {
+        return;
+    };
+    if input.is_array() {
+        return;
     }
+
+    // 非数组输入统一包装成 user message，保留 content 的原始 JSON 类型和值。
+    let content = input.take();
+    *input = if content.as_str().is_some_and(|text| text.trim().is_empty()) {
+        Value::Array(Vec::new())
+    } else {
+        Value::Array(vec![json!({
+            "type": "message",
+            "role": "user",
+            "content": content,
+        })])
+    };
 }
 
 /// ChatGPT Codex 输入历史统一使用 developer 表达高优先级消息。这里仅改 role 并保留消息
