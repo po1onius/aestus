@@ -53,7 +53,7 @@ pub fn transform_oauth_body(body: &[u8]) -> Result<OAuthTransformOutput, String>
     // 转成 developer，不能再复制到 instructions，否则同一条高优先级指令会进入上下文两次。
     ensure_instructions(object);
     normalize_system_messages(object);
-    normalize_input(object);
+    normalize_input(object)?;
 
     let body =
         serde_json::to_vec(&value).map_err(|error| format!("改造后的请求体无法序列化: {error}"))?;
@@ -135,25 +135,35 @@ fn normalize_service_tier(object: &mut Map<String, Value>) {
     }
 }
 
-fn normalize_input(object: &mut Map<String, Value>) {
-    let Some(input) = object.get_mut("input") else {
-        return;
+fn normalize_input(object: &mut Map<String, Value>) -> Result<(), String> {
+    let input = object
+        .get_mut("input")
+        .ok_or_else(|| "input 不能为空".to_owned())?;
+    // 在字符串化之前拒绝空值，避免把 null 转为可发送的文本 "null"。
+    let is_empty = match input {
+        Value::Null => true,
+        Value::String(text) => text.trim().is_empty(),
+        Value::Array(items) => items.is_empty(),
+        _ => false,
     };
+    if is_empty {
+        return Err("input 不能为空".to_owned());
+    }
     if input.is_array() {
-        return;
+        return Ok(());
     }
 
-    // 非数组输入统一包装成 user message，保留 content 的原始 JSON 类型和值。
-    let content = input.take();
-    *input = if content.as_str().is_some_and(|text| text.trim().is_empty()) {
-        Value::Array(Vec::new())
-    } else {
-        Value::Array(vec![json!({
-            "type": "message",
-            "role": "user",
-            "content": content,
-        })])
+    // 数组无需包装；其他输入先转为文本，字符串原样保留，其余类型使用 JSON 表示。
+    let content = match input.take() {
+        Value::String(text) => text,
+        value => value.to_string(),
     };
+    *input = Value::Array(vec![json!({
+        "type": "message",
+        "role": "user",
+        "content": content,
+    })]);
+    Ok(())
 }
 
 /// ChatGPT Codex 输入历史统一使用 developer 表达高优先级消息。这里仅改 role 并保留消息

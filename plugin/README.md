@@ -56,9 +56,10 @@ Component 只负责各自 WIT 类型映射，因此 Rust 函数入口和上传�
   `text.verbosity` 做模型判断或删除；
 - `instructions` 缺失或为空时，注入固定的内置 Codex base prompt，不根据 model 选择；
 - 将 input 中的 `role=system` 原位改为 `developer`，不会重复复制到顶层 `instructions`；
-- 将已提供的非数组 `input`（字符串、数字、布尔值、对象或 `null`）转为 user message
-  数组，`content` 保留原始 JSON 类型和值；空字符串或纯空白字符串转为空数组，缺失的
-  `input` 不补齐；
+- `input` 缺失、为 `null`、空字符串、纯空白字符串或空数组时，返回
+  `invalid_oauth_responses_body`，消息为 `input 不能为空`，宿主生成 HTTP 400；
+- 非空数组 `input` 不额外包装；其他非空 `input` 先转为字符串，再包装为 user message
+  数组：字符串原样保留，数字、布尔值和对象使用 JSON 文本表示，作为字符串 `content`；
 - 所有 input item 的 `id` 以及 `item_reference` 完全保持调用方原值，不再判断续链输入或
   清理 message、工具 item 和 reasoning item 的标识；
 - 工具调用与工具输出的 `call_id` 完全保持调用方原值，不添加 `fc_*` 前缀，也不对超长
