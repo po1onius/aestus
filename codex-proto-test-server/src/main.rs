@@ -745,15 +745,25 @@ async fn create_response(
         trace.write_upstream_response(upstream.status, &upstream.body)
     })?;
 
-    // 与网关一致，按上游响应选择插槽；plugin-context 原样传递，服务不解析。
-    let upstream_is_sse = upstream.headers.iter().any(|header| {
-        header.name.eq_ignore_ascii_case("content-type")
-            && std::str::from_utf8(&header.value)
-                .ok()
-                .and_then(|value| value.split(';').next())
-                .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/event-stream"))
-    });
-    if !(200..300).contains(&upstream.status) || !upstream_is_sse {
+    // 与网关一致，成功响应按请求插件输出选槽；plugin-context 原样传递，服务不解析。
+    let is_stream = (200..300).contains(&upstream.status) && transformed_request.stream;
+    info!(
+        request_id,
+        upstream_status = upstream.status,
+        request_plugin_stream = transformed_request.stream,
+        response_mode_source = if (200..300).contains(&upstream.status) {
+            "request_plugin_stream"
+        } else {
+            "http_status"
+        },
+        selected_plugin_slot = if is_stream {
+            "stream_response"
+        } else {
+            "buffered_response"
+        },
+        "已选择响应插件插槽"
+    );
+    if !is_stream {
         handle_buffered_response(
             request_id,
             upstream,

@@ -44,10 +44,11 @@ curl http://127.0.0.1:3000/v1/responses \
 测试服务为了能在写出 HTTP 响应前完成整条事件序列和终止事件校验，会先收集完整上游
 SSE，再以 `text/event-stream` 返回；它用于验证插件协议转换，不用于测量首 token 延迟。
 
-服务与网关一致，按上游 Content-Type 选择响应插件，非 2xx 响应固定走 buffered。
-`plugin-context` 作为不透明字节原样转交，服务不解析其内容；本 GPT Codex 套件自行
-约定 JSON 格式，并由响应插件读取其中的 `stream`。此字段目前不触发 SSE 聚合，因此
-Codex 的 SSE 成功响应仍以 SSE 返回，包括原始请求 `stream=false` 的情况。
+服务与网关一致，成功响应按请求插件的独立输出字段 `stream: bool` 选择响应插件，
+非 2xx 响应固定走 buffered。原始请求 `stream=false`（或未提供）时，Codex 的 SSE 成功
+响应由 buffered 插件聚合为单个 Responses JSON；`stream=true` 时返回 SSE。
+`plugin-context` 作为不透明字节原样转交，本 GPT Codex 套件目前返回空字节，响应插件
+不再解析或校验其中的 `stream`。
 
 ## 请求调试记录
 

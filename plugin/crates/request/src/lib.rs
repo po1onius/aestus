@@ -54,6 +54,8 @@ pub struct RequestTransformInput {
 pub struct RequestTransformOutput {
     pub headers: Vec<Header>,
     pub body: Vec<u8>,
+    /// 下游响应交付模式，独立于上游 body 中固定为 true 的 stream。
+    pub stream: bool,
     pub plugin_context: Vec<u8>,
 }
 
@@ -72,15 +74,8 @@ pub fn transform_request(
     Ok(RequestTransformOutput {
         headers,
         body: transformed.body,
-        plugin_context: serde_json::to_vec(&serde_json::json!({
-            "stream": transformed.downstream_streaming,
-        }))
-        .map_err(|_| {
-            PluginError::new(
-                "serialize_plugin_context_failed",
-                "无法序列化 plugin-context JSON",
-            )
-        })?,
+        stream: transformed.downstream_streaming,
+        plugin_context: Vec::new(),
     })
 }
 

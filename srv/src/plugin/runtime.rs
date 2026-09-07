@@ -158,6 +158,8 @@ impl RequestPluginInput {
 pub struct RequestPluginOutput {
     pub headers: HeaderMap,
     pub body: Bytes,
+    /// 请求插件声明的下游响应交付模式。
+    pub stream: bool,
     /// 请求插件声明的响应阶段上下文，与最终 header/body 一起按 attempt 传递。
     pub plugin_context: Vec<u8>,
 }
@@ -453,6 +455,7 @@ impl PluginRuntime {
                 .into_iter()
                 .map(|header| (header.name, header.value)),
             output.body,
+            output.stream,
             output.plugin_context,
         )
     }
@@ -490,6 +493,7 @@ impl PluginRuntime {
                 .into_iter()
                 .map(|header| (header.name, header.value)),
             output.body,
+            output.stream,
             output.plugin_context,
         )
     }
@@ -759,6 +763,7 @@ fn headers_to_wit<H: WitHeader>(headers: &HeaderMap) -> AppResult<Vec<H>> {
 fn request_output_from_parts(
     headers: impl Iterator<Item = (String, Vec<u8>)>,
     body: Vec<u8>,
+    stream: bool,
     plugin_context: Vec<u8>,
 ) -> AppResult<RequestPluginOutput> {
     if body.len() > MAX_OUTPUT_BODY_BYTES {
@@ -780,6 +785,7 @@ fn request_output_from_parts(
     Ok(RequestPluginOutput {
         headers,
         body: Bytes::from(body),
+        stream,
         plugin_context,
     })
 }
@@ -946,7 +952,7 @@ fn feedback_from_parts(
     resets_at: Option<i64>,
 ) -> AppResult<UpstreamFeedback> {
     let reason = bounded_text(reason, "feedback.reason")?;
-    let resets_at = resets_at.map(timestamp_from_seconds).transpose()?;
+    let resets_at = resets_at.and_then(timestamp_from_seconds);
     Ok(match kind {
         FeedbackKind::Error => UpstreamFeedback::Error { reason },
         FeedbackKind::AuthenticationRejected => UpstreamFeedback::AuthenticationRejected { reason },
@@ -966,10 +972,15 @@ enum FeedbackKind {
     EntitlementMissing,
 }
 
-fn timestamp_from_seconds(seconds: i64) -> AppResult<DateTime<Utc>> {
-    DateTime::from_timestamp(seconds, 0).ok_or_else(|| AppError::Plugin {
-        message: format!("插件 feedback reset 时间戳非法: {seconds}"),
-    })
+fn timestamp_from_seconds(seconds: i64) -> Option<DateTime<Utc>> {
+    let timestamp = DateTime::from_timestamp(seconds, 0);
+    if timestamp.is_none() {
+        tracing::warn!(
+            resets_at_unix_seconds = seconds,
+            "插件 feedback 重置时间超出有效日期范围，忽略该时间并保留维护回执"
+        );
+    }
+    timestamp
 }
 
 fn bounded_text(value: String, field: &str) -> AppResult<String> {

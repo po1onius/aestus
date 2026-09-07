@@ -9,7 +9,7 @@ use std::{
 
 use axum::{
     body::{Body, Bytes},
-    http::{HeaderMap, Response, StatusCode, header},
+    http::{HeaderMap, Response, StatusCode},
 };
 use chrono::Utc;
 use futures_util::Stream;
@@ -500,11 +500,15 @@ struct PreparedUpstreamRequest {
     body: reqwest::Body,
     /// 与实际发出的请求绑定；内容由插件自行解释，重试不复用上一 attempt 的值。
     plugin_context: Option<Vec<u8>>,
+    /// 本次 attempt 的请求插件输出；未执行请求插件时为 None，成功响应默认选流式。
+    request_plugin_stream: Option<bool>,
 }
 
 struct ReceivedUpstreamResponse {
     response: reqwest::Response,
     plugin_context: Option<Vec<u8>>,
+    /// 本次 attempt 的请求插件输出；未执行请求插件时为 None，成功响应默认选流式。
+    request_plugin_stream: Option<bool>,
 }
 
 /// 插件模式只复用 provider 的目标地址选择；原生 header 白名单、资源 override 和
@@ -546,8 +550,9 @@ async fn prepare_plugin_upstream_request<P: ProviderProtocol>(
         upstream_header_count = output.headers.len(),
         upstream_body_bytes = output.body.len(),
         plugin_context_bytes = output.plugin_context.len(),
+        request_plugin_stream = output.stream,
         http_client_profile = client_profile.as_str(),
-        "插件输出已成为本次 attempt 的最终上游 header/body，plugin-context 已绑定到该 attempt"
+        "插件输出已成为本次 attempt 的最终上游 header/body，stream 和 plugin-context 已绑定到该 attempt"
     );
 
     Ok(PreparedUpstreamRequest {
@@ -557,6 +562,7 @@ async fn prepare_plugin_upstream_request<P: ProviderProtocol>(
         headers: output.headers,
         body: reqwest::Body::from(output.body),
         plugin_context: Some(output.plugin_context),
+        request_plugin_stream: Some(output.stream),
     })
 }
 
@@ -638,6 +644,7 @@ async fn finalize_upstream_request<P: ProviderProtocol>(
         headers: draft.headers,
         body,
         plugin_context: None,
+        request_plugin_stream: None,
     })
 }
 
@@ -652,6 +659,7 @@ async fn send_upstream_request<P: ProviderProtocol>(
         headers,
         body,
         plugin_context,
+        request_plugin_stream,
     } = request;
     let timeout_seconds = state.config().provider_upstream_timeout_seconds.max(1);
     let send = state
@@ -673,10 +681,12 @@ async fn send_upstream_request<P: ProviderProtocol>(
     Ok(ReceivedUpstreamResponse {
         response,
         plugin_context,
+        request_plugin_stream,
     })
 }
 
-/// 成功响应按上游 Content-Type 选择插槽，非成功响应固定 buffered。
+/// 成功响应按请求插件输出的 stream 选择插槽，未执行请求插件时默认 stream。
+/// 非成功响应固定 buffered。
 /// plugin-context 仅作为不透明字节传给响应插件。空插槽调用 provider 原生 adapter。
 async fn handle_response<P: ProviderProtocol>(
     state: &AppState,
@@ -688,17 +698,19 @@ async fn handle_response<P: ProviderProtocol>(
     let ReceivedUpstreamResponse {
         response: upstream_response,
         plugin_context,
+        request_plugin_stream,
     } = upstream;
     let plugin_context_present = plugin_context.is_some();
     let plugin_context_bytes = plugin_context.as_ref().map_or(0, Vec::len);
     let status = upstream_response.status();
     let raw_headers = upstream_response.headers().clone();
-    let upstream_declares_sse = is_sse_response(&raw_headers);
-    let is_stream = status.is_success() && upstream_declares_sse;
+    let is_stream = status.is_success() && request_plugin_stream.unwrap_or(true);
     let response_mode_source = if !status.is_success() {
         "http_status"
+    } else if request_plugin_stream.is_some() {
+        "request_plugin_stream"
     } else {
-        "content_type"
+        "default_stream"
     };
     let response_slot = if is_stream {
         PluginSlot::StreamResponse
@@ -714,7 +726,7 @@ async fn handle_response<P: ProviderProtocol>(
             resource_id = %attempt.resource_id,
             upstream_status = status.as_u16(),
             response_mode_source,
-            upstream_declares_sse,
+            request_plugin_stream = ?request_plugin_stream,
             selected_plugin_slot = response_slot.as_str(),
             "宿主已为本次 attempt 选择响应插件插槽"
         );
@@ -849,14 +861,6 @@ async fn handle_response<P: ProviderProtocol>(
         }
     };
     Ok((ProtocolResponse::Buffered(response), None))
-}
-
-fn is_sse_response(headers: &HeaderMap) -> bool {
-    headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(';').next())
-        .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/event-stream"))
 }
 
 fn finish_buffered_response(

@@ -32,6 +32,7 @@ impl Guest for GptCodexRequestPlugin {
                 .map(from_common_header)
                 .collect(),
             body: transformed.body,
+            stream: transformed.stream,
             plugin_context: transformed.plugin_context,
         })
     }

@@ -11,6 +11,9 @@ interface common-types {
     record transform-output {
         headers: list<header>,
         body: list<u8>,
+        /// 下游响应交付模式：成功响应按此字段选择流式或非流式插槽，
+        /// 非成功响应固定选择非流式插槽。独立于上游请求 body 中的 stream。
+        %stream: bool,
         /// 与最终 header/body 同属一次 attempt 的权威响应阶段上下文。
         plugin-context: plugin-context,
     }
