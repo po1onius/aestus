@@ -1,8 +1,4 @@
-use std::{
-    env,
-    net::{IpAddr, SocketAddr},
-    num::NonZeroU32,
-};
+use std::{env, net::SocketAddr, num::NonZeroU32};
 
 use axum_client_addr::{ChainHeader, ClientIpConfig, IpCidr};
 use chrono_tz::Tz;
@@ -69,7 +65,7 @@ const DEFAULT_EMAIL_CODE_COOLDOWN_SECONDS: u64 = 60;
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub bind_addr: SocketAddr,
-    /// 仅信任配置中列出的代理 IP，并且只读取 X-Forwarded-For。
+    /// 仅信任配置中列出的代理 IP / CIDR 网段，并且只读取 X-Forwarded-For。
     pub client_ip_config: ClientIpConfig,
     pub public_rate_limits: PublicRateLimitConfig,
     pub database_url: String,
@@ -418,12 +414,13 @@ fn parse_trusted_proxy_ips() -> AppResult<ClientIpConfig> {
         );
         return Ok(ClientIpConfig::default());
     };
-    // 先按单个 IP 校验，拒绝 CIDR、域名、端口以及列表中的空项。
-    let ips = raw
+    // 复用库解析单个 IP 和 IPv4 / IPv6 CIDR；单个 IP 对应 /32 或 /128。
+    // 拒绝域名、端口、空项以及主机位非零的网段，不隐式扩大配置的信任范围。
+    let networks = raw
         .split(',')
         .map(|item| {
             item.trim()
-                .parse::<IpAddr>()
+                .parse::<IpCidr>()
                 .map_err(|source| AppError::InvalidConfig {
                     key: KEY,
                     value: raw.clone(),
@@ -434,16 +431,15 @@ fn parse_trusted_proxy_ips() -> AppResult<ClientIpConfig> {
     let mut builder = ClientIpConfig::builder()
         .trusted_proxies()
         .chain_header_order([ChainHeader::x_forwarded_for()]);
-    for ip in &ips {
-        // /32 或 /128 仅覆盖该 IP；不会把所在私网或容器网段整体标为可信。
-        builder = builder.proxy(IpCidr::new_host(*ip));
+    for network in &networks {
+        builder = builder.proxy(*network);
     }
     let config = builder.build().map_err(|source| AppError::InvalidConfig {
         key: KEY,
         value: raw,
         source: Box::new(source),
     })?;
-    info!(config_key = KEY, trusted_proxy_ips = ?ips, "可信代理配置已加载，请求来源 IP 仅解析 XFF");
+    info!(config_key = KEY, trusted_proxy_networks = ?networks, "可信代理 IP / CIDR 配置已加载，请求来源 IP 仅解析 XFF");
     Ok(config)
 }
 
