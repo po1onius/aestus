@@ -12,3 +12,4 @@ DROP TABLE IF EXISTS users;
 DROP TABLE IF EXISTS tenant_codes;
 DROP TABLE IF EXISTS tenants;
 DROP TABLE gpt_policy_violation_logs;
+DROP TABLE console_audit_logs;

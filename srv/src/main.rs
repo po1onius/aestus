@@ -62,7 +62,7 @@ async fn run() -> err::AppResult<()> {
         provider::gpt::codex_http::header::cloudflare_cookie_store(),
     )?;
     // worker 在组合根显式启动；AppState 只取得不可反向控制 worker 的事件发布端口。
-    let (request_events, _worker_runtime) = worker::start(
+    let (request_events, audit_logs, _worker_runtime) = worker::start(
         db_pool.clone(),
         clickhouse.clone(),
         config.request_log_table.clone(),
@@ -75,6 +75,7 @@ async fn run() -> err::AppResult<()> {
         clickhouse,
         http_clients,
         request_events,
+        audit_logs,
     )?;
     user::bootstrap_admin(&state).await?;
     // 任务集合必须覆盖 HTTP 服务的完整生命周期；退出或后续启动步骤失败时会统一停止
@@ -94,9 +95,12 @@ async fn run() -> err::AppResult<()> {
     );
     let app = api::build_router(state);
 
-    axum::serve(listener, app)
-        .await
-        .map_err(|source| err::AppError::Startup {
-            message: format!("HTTP 服务异常退出: {source}"),
-        })
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    .map_err(|source| err::AppError::Startup {
+        message: format!("HTTP 服务异常退出: {source}"),
+    })
 }

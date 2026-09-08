@@ -85,7 +85,12 @@ pub fn build_router(state: AppState) -> Router {
     // Dashboard 只接收表单和资源配置，不继承 LLM 上传场景的 64 MiB 上限；跨域能力也只
     // 授予对外网关协议，避免任意站点直接调用管理端 Bearer API。
     let gateway_router = gateway::router().layer(cors);
-    let console_router = console::router().layer(DefaultBodyLimit::max(CONSOLE_MAX_BODY_BYTES));
+    let console_router = console::router()
+        .layer(DefaultBodyLimit::max(CONSOLE_MAX_BODY_BYTES))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            console::audit::record_request,
+        ));
     let router = Router::new()
         .route("/healthz", get(healthz))
         .merge(gateway_router)

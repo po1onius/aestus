@@ -31,6 +31,7 @@ export const pluginsPath = `${consoleApiPath}/plugins`;
 export const pluginSuitesPath = `${consoleApiPath}/plugin-suites`;
 export const providerGroupsPath = `${consoleApiPath}/provider-groups`;
 export const requestLogsPath = `${consoleApiPath}/request-logs`;
+export const auditLogsPath = `${consoleApiPath}/audit-logs`;
 export const policyLogsPath = `${consoleApiPath}/policy-logs`;
 export const usagePath = `${consoleApiPath}/usage`;
 export const usersPath = `${consoleApiPath}/users`;
@@ -51,6 +52,7 @@ export const consolePagePaths = {
   usage: "/console/usage",
   gatewayApiKeys: "/console/gateway-api-keys",
   requestLogs: "/console/request-logs",
+  auditLogs: "/console/audit-logs",
 } satisfies Record<DashboardPage, string>;
 
 export const dashboardRoutes: DashboardRoute[] = [
@@ -88,6 +90,11 @@ export const dashboardRoutes: DashboardRoute[] = [
     path: consolePagePaths.gatewayApiKeys,
     label: "API Key",
     tenantOnly: true,
+  },
+  {
+    page: "auditLogs",
+    path: consolePagePaths.auditLogs,
+    label: "审计日志",
   },
   {
     page: "requestLogs",

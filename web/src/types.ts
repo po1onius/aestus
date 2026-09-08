@@ -15,7 +15,8 @@ export type DashboardPage =
   | "users"
   | "usage"
   | "gatewayApiKeys"
-  | "requestLogs";
+  | "requestLogs"
+  | "auditLogs";
 export type DashboardTheme = "light" | "dark";
 export type AccountImportMode = "oauth" | "refreshToken";
 export type AccountProviderKey = "gpt" | "claude" | "grok";
@@ -579,4 +580,33 @@ export interface OauthAuthorizationResponse {
   redirect_uri: string;
   state: string;
   expires_at: string;
+}
+
+
+export interface AuditLogRecord {
+  id: string;
+  occurred_at: string;
+  request_id: string | null;
+  user_id: string | null;
+  username: string | null;
+  role: UserRole | null;
+  tenant_id: string | null;
+  method: string;
+  path: string;
+  status_code: number;
+  duration_ms: number;
+  peer_ip: string | null;
+  user_agent: string | null;
+}
+
+export interface AuditLogCursor {
+  before_occurred_at: string;
+  before_id: string;
+}
+
+export interface ListAuditLogsResponse {
+  date: string;
+  timezone: string;
+  items: AuditLogRecord[];
+  next_cursor: AuditLogCursor | null;
 }

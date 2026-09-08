@@ -1,4 +1,5 @@
 mod account;
+pub(super) mod audit;
 pub(crate) mod auth;
 mod gateway_api_keys;
 mod pagination;
@@ -48,6 +49,7 @@ pub fn router() -> Router<AppState> {
         .nest("/request-logs", statistics::request_logs_router())
         .nest("/policy-logs", statistics::policy_logs_router())
         .nest("/usage", statistics::usage_router())
+        .nest("/audit-logs", statistics::audit_logs_router())
         .nest("/tenants", tenants::router())
         .nest("/users", users::router())
         // 控制台 API 未知路径必须返回 JSON 404，不能落入 SPA 的 index.html fallback。

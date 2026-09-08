@@ -2,6 +2,7 @@
 //!
 //! 日志接口负责 HTTP 参数和授权范围，具体读写归 logs 模块；用量统计独立查询日聚合。
 
+mod audit_logs;
 pub(super) mod gpt_account_usage;
 mod policy_logs;
 mod request_logs;
@@ -24,4 +25,9 @@ pub(super) fn policy_logs_router() -> Router<AppState> {
 /// 当前用户用量概览与独立时间趋势接口不依赖日志明细分页，直接使用 ClickHouse 聚合结果。
 pub(super) fn usage_router() -> Router<AppState> {
     usage::router()
+}
+
+/// 控制台请求审计，权限由接口内的已鉴权身份确定。
+pub(super) fn audit_logs_router() -> Router<AppState> {
+    audit_logs::router()
 }

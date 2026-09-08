@@ -310,3 +310,24 @@ CREATE TABLE gpt_policy_violation_logs (
 
 CREATE INDEX idx_gpt_policy_violation_logs_tenant_time
     ON gpt_policy_violation_logs (tenant_id, occurred_at DESC, id DESC);
+
+
+-- 控制台请求审计，身份为请求时快照，无外键；仅保存元数据。
+CREATE TABLE console_audit_logs (
+    id UUID PRIMARY KEY,
+    occurred_at TIMESTAMPTZ NOT NULL,
+    request_id TEXT,
+    user_id UUID,
+    username TEXT,
+    role TEXT,
+    tenant_id TEXT,
+    method TEXT NOT NULL,
+    path TEXT NOT NULL,
+    status_code INTEGER NOT NULL CHECK (status_code BETWEEN 100 AND 599),
+    duration_ms BIGINT NOT NULL CHECK (duration_ms >= 0),
+    peer_ip TEXT,
+    user_agent TEXT
+);
+CREATE INDEX idx_console_audit_logs_time ON console_audit_logs (occurred_at DESC, id DESC);
+CREATE INDEX idx_console_audit_logs_tenant_time ON console_audit_logs (tenant_id, occurred_at DESC, id DESC);
+CREATE INDEX idx_console_audit_logs_user_time ON console_audit_logs (tenant_id, user_id, occurred_at DESC, id DESC);

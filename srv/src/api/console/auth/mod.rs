@@ -1,5 +1,5 @@
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::State,
     routing::{get, post},
 };
@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::{
+    api::console::audit::AuditContext,
     err::{AppError, AppResult},
     state::AppState,
     tenant::{self, Tenant},
@@ -101,6 +102,7 @@ async fn send_register_email_code(
 
 async fn register(
     State(state): State<AppState>,
+    Extension(audit): Extension<AuditContext>,
     Json(payload): Json<RegisterRequest>,
 ) -> AppResult<Json<AuthResponse>> {
     let username = user::normalize_username(&payload.username)?;
@@ -128,6 +130,7 @@ async fn register(
     let user =
         user::register_with_tenant_code(&mut conn, tenant_code, username, email, payload.password)
             .await?;
+    audit.record_user(&user);
     let tenant = load_public_tenant(&mut conn, &user).await?;
     let token = user::issue_jwt(&state, &user)?;
 
@@ -144,6 +147,7 @@ async fn register(
 
 async fn login(
     State(state): State<AppState>,
+    Extension(audit): Extension<AuditContext>,
     Json(payload): Json<LoginRequest>,
 ) -> AppResult<Json<AuthResponse>> {
     let mut conn = state.db_conn().await?;
@@ -160,6 +164,7 @@ async fn login(
         warn!(user_id = %user.id, username = %user.username, "用户登录密码错误");
         return Err(AppError::InvalidDashboardToken);
     }
+    audit.record_user(&user);
     if !user.enabled {
         warn!(user_id = %user.id, username = %user.username, email = %user.email, "禁用用户尝试登录");
         return Err(AppError::InvalidDashboardToken);

@@ -90,6 +90,7 @@ Docker 镜像也已包含前端构建产物并配置托管目录，无需单独�
 | 用量 | `/console/usage` | `/api/console/usage` |
 | 网关 API Key | `/console/gateway-api-keys` | `/api/console/gateway-api-keys` |
 | 请求日志与 Policy 日志 | `/console/request-logs` | `/api/console/request-logs`、`/api/console/policy-logs` |
+| 审计日志 | `/console/audit-logs` | `/api/console/audit-logs` |
 
 Provider 的 OAuth 账号和上游官方 Key 分别使用
 `/api/console/providers/{provider}/accounts` 与
@@ -186,7 +187,7 @@ GPT 搜索上游路径默认是 `/alpha/search`，可通过 `AESTUS_GPT_UPSTREAM
 ## 请求日志与用量
 
 业务日志统一由 `srv/src/logs` 模块管理：`request` 负责请求事件聚合、ClickHouse 读写和
-明细保留策略，`policy` 负责策略日志模型及 PostgreSQL 读写，`runtime` 管理日志 writer
+明细保留策略，`policy` 负责策略日志模型及 PostgreSQL 读写，`audit` 负责控制台审计，`runtime` 管理日志 writer
 任务和聚合状态的超时回收。请求日志和用量查询共用 `logs/calendar` 的业务日边界计算。
 `worker` 负责请求事件分发及后台消费者组装，额度扣减独立消费 usage 事件；核心请求链路
 继续通过 `request/events` 发布事实，Provider 负责协议识别。控制台日志 API 负责鉴权、
@@ -251,6 +252,45 @@ ClickHouse 请求明细默认保留 30 天，可通过 `AESTUS_REQUEST_LOG_RETEN
 
 `AESTUS_TIMEZONE` 必须是 IANA 时区，例如 `UTC` 或 `Asia/Shanghai`。它定义全部用户共用的业务日
 边界；产生聚合数据后修改该值需要重建日聚合，不应将它当作普通的运行时开关。
+
+## 控制台请求审计
+
+Axum 中间件覆盖 `/api/console` 的请求，包括登录、注册、查询、修改操作、鉴权拒绝、
+未知路径和不支持的 HTTP 方法；审计查询本身也会生成一条记录。模型 API、静态页面和
+健康检查不进入审计。`api/console/audit` 负责采集，`logs/audit` 使用独立有界队列写入
+PostgreSQL `console_audit_logs`，不经过模型请求聚合。
+
+每条记录保存服务端生成的 UUID v7 审计 ID、请求进入中间件的时间、关联 request ID、
+用户 ID / 用户名 / 角色 / 租户快照、HTTP 方法、完整路径（不含 query）、响应状态码、
+处理耗时、TCP 对端 IP 和 User-Agent。耗时从进入中间件计至产生响应，不包含响应体向
+客户端传输完成的时间；HTTP 状态仅表示接口结果，不推断具体数据变更。
+不采集请求体、响应体、查询字符串、Authorization 或 Cookie；request ID 最多保留
+128 个字符，User-Agent 最多保留 512 个字符。关联 request ID 可以来自客户端，
+唯一性以服务端生成的审计 ID 为准。
+
+鉴权 extractor 在 JWT 校验并查到用户后写入身份快照，后续用户/租户停用或角色校验失败
+仍保留该身份。登录在密码验证通过后、注册在用户创建成功后补充身份。错误密码、无效
+token、未知路径及未执行身份校验的公开接口不记录推测的操作者，相关身份字段为空。
+采集不增加用户查询、不读取正文，也不改变原有鉴权结果。
+
+`peer_ip` 只取实际 TCP 连接信息，不信任 `Forwarded` / `X-Forwarded-For` / `X-Real-IP`。
+经过反向代理访问时记录的是代理地址。首版尚未配置可信代理，因此不会把转发头当作
+终端用户的真实 IP。
+
+平台管理员可以查看全局审计；租户 owner 只看本租户已确认身份的记录；普通用户只看
+自己的记录。未确认身份的记录仅平台管理员可见。查询范围完全由登录身份决定，接口
+不接受 `tenant_id` 或 `user_id` 参数。页面支持日期选择、前后翻页及请求详情；
+`GET /api/console/audit-logs` 接受 `date`（服务时区自然日，默认当天）、`limit`（默认
+100，最多 500），以及成对的 `before_occurred_at`、`before_id` 游标，按时间和 ID 倒序。
+审计表暂不自动清理，也不使用请求日志的 30 天查询限制。
+
+首版为尽力记录的操作追踪：请求产生响应后通过 `try_send` 投递，队列容量为 4096；
+队列满或关闭时丢弃记录，写入失败仅输出诊断，不阻塞或回滚控制台操作。请求在产生响应前
+被取消或 panic、进程退出时尚未写入的记录可能缺失，尚不提供与业务事务一致的审计保证。
+
+表和索引直接定义在初始化 migration `00000000000000_init` 中，不使用外键。
+已执行旧版初始化 migration 的数据库不会因再次执行 migrate 自动补表；开发环境需手动
+使用空数据库重新初始化。本次没有新增历史数据迁移，也不会自动重建已有数据库。
 
 ## 目录结构
 

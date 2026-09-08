@@ -73,6 +73,7 @@ import { shiftDateInputValue, todayInputValue } from "./lib/format";
 import { ProvidersPage } from "./pages/ProvidersPage";
 import { GatewayApiKeysPage } from "./pages/GatewayApiKeysPage";
 import { PluginsPage } from "./pages/PluginsPage";
+import { AuditLogsPage } from "./pages/AuditLogsPage";
 import { RequestLogsPage } from "./pages/RequestLogsPage";
 import { TenantsPage } from "./pages/TenantsPage";
 import { UsersPage } from "./pages/UsersPage";
@@ -203,6 +204,8 @@ export function App() {
   const [requestOverrideBodyRows, setRequestOverrideBodyRows] = useState<OverrideEntry[]>([]);
   const [requestLogs, setRequestLogs] = useState<RequestLogRecord[]>([]);
   const [requestLogView, setRequestLogView] = useState<RequestLogView>("requests");
+  const [auditLogRefreshRevision, setAuditLogRefreshRevision] = useState(0);
+  const [auditLogsLoading, setAuditLogsLoading] = useState(false);
   const [policyLogRefreshRevision, setPolicyLogRefreshRevision] = useState(0);
   const [requestLogDate, setRequestLogDate] = useState(() => todayInputValue("UTC"));
   const [requestLogNonSuccessOnly, setRequestLogNonSuccessOnly] = useState(false);
@@ -1050,6 +1053,10 @@ export function App() {
   }
 
   async function refreshActiveTab() {
+    if (activePage === "auditLogs") {
+      setAuditLogRefreshRevision((value) => value + 1);
+      return;
+    }
     if (activePage === "tenants") {
       setTenantRefreshSignal((value) => value + 1);
       return;
@@ -2810,7 +2817,7 @@ export function App() {
       currentUser={currentUser}
       tenant={currentTenant}
       theme={theme}
-      refreshing={activePageLoading(
+      refreshing={activePage === "auditLogs" ? auditLogsLoading : activePageLoading(
         activePage,
         providerGroupsVisible ? providerGroupsLoading : loading,
         usersLoading,
@@ -3058,7 +3065,9 @@ export function App() {
       onLogout={logout}
       onToggleTheme={() => setTheme((current) => (current === "light" ? "dark" : "light"))}
     >
-      {activePage === "tenants" ? (
+      {activePage === "auditLogs" ? (
+        <AuditLogsPage key={currentUser.id} token={authToken} timezone={serviceTimezone} role={currentUser.role} refreshRevision={auditLogRefreshRevision} onLoadingChange={setAuditLogsLoading} />
+      ) : activePage === "tenants" ? (
         <TenantsPage token={authToken ?? ""} refreshSignal={tenantRefreshSignal} />
       ) : activePage === "usage" ? (
         <Suspense

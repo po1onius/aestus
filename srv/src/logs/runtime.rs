@@ -12,6 +12,7 @@ use tokio::{
 use tracing::info;
 
 use super::{
+    audit::AuditLogPublisher,
     policy::PolicyLogWriter,
     request::{lifecycle::RequestLogLifecycle, writer::RequestLogWriter},
 };
@@ -56,7 +57,8 @@ pub(crate) fn start(
     clickhouse: Client,
     request_log_table: String,
     service_timezone: Tz,
-) -> (RequestLogConsumer, LogsRuntime) {
+) -> (RequestLogConsumer, AuditLogPublisher, LogsRuntime) {
+    let (audit_logs, audit_task) = AuditLogPublisher::start(db_pool.clone());
     let (policy_log, policy_log_task) = PolicyLogWriter::new(db_pool);
     let (writer, writer_task) =
         RequestLogWriter::spawn(clickhouse, Arc::from(request_log_table), service_timezone);
@@ -70,8 +72,9 @@ pub(crate) fn start(
             lifecycle: RequestLogLifecycle::new(writer, policy_log),
             stale_sweep,
         },
+        audit_logs,
         LogsRuntime {
-            tasks: vec![writer_task, policy_log_task],
+            tasks: vec![writer_task, policy_log_task, audit_task],
         },
     )
 }

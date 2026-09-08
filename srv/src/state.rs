@@ -12,6 +12,7 @@ use crate::{
         http_client::{HttpClientProfile, HttpClients},
         redis::RedisConnection,
     },
+    logs::audit::AuditLogPublisher,
     plugin::runtime::PluginRuntime,
     request::events::RequestEventPublisher,
 };
@@ -34,6 +35,7 @@ struct AppStateInner {
     plugin_runtime: PluginRuntime,
     clickhouse: ClickHouseClient,
     request_events: RequestEventPublisher,
+    audit_logs: AuditLogPublisher,
 }
 
 impl AppState {
@@ -44,6 +46,7 @@ impl AppState {
         clickhouse: ClickHouseClient,
         http_clients: HttpClients,
         request_events: RequestEventPublisher,
+        audit_logs: AuditLogPublisher,
     ) -> AppResult<Self> {
         let email_client = EmailClient::new(&config)?;
         let plugin_runtime = PluginRuntime::new()?;
@@ -58,6 +61,7 @@ impl AppState {
                 plugin_runtime,
                 clickhouse,
                 request_events,
+                audit_logs,
             }),
         })
     }
@@ -110,10 +114,14 @@ impl AppState {
         &self.inner.request_events
     }
 
-    /// Dashboard statistics 使用的 ClickHouse 只读客户端。
+    /// 控制台审计的独立非阻塞发布端口。
+    pub(crate) fn audit_logs(&self) -> &AuditLogPublisher {
+        &self.inner.audit_logs
+    }
+
+    /// 日志与用量查询使用的 ClickHouse 客户端。
     ///
-    /// 查询 SQL、结果 DTO 和访问控制继续由 `api::console::statistics` 管理；AppState 仅提供
-    /// 基础设施句柄，worker 不再承担读路径职责。
+    /// 日志 SQL 与 DTO 归 logs 管理，访问控制归 API；AppState 仅提供基础设施句柄。
     pub fn clickhouse(&self) -> &ClickHouseClient {
         &self.inner.clickhouse
     }

@@ -8,6 +8,7 @@ import {
   PlugZap,
   RefreshCw,
   ScrollText,
+  ShieldCheck,
   ServerCog,
   Sun,
   UsersRound,
@@ -48,6 +49,7 @@ const sideNavIndicatorPositions = [
   "lg:translate-y-33",
   "lg:translate-y-44",
   "lg:translate-y-55",
+  "lg:translate-y-66",
 ] as const;
 
 /**
@@ -78,7 +80,7 @@ export function DashboardShell({
       <main
         className={cx(
           "min-h-screen bg-slate-50 text-slate-950 transition-colors dark:bg-slate-950 dark:text-slate-100 lg:grid lg:grid-cols-[15rem_minmax(0,1fr)]",
-          activePage === "requestLogs" && "lg:h-screen lg:overflow-hidden",
+          (activePage === "requestLogs" || activePage === "auditLogs") && "lg:h-screen lg:overflow-hidden",
         )}
       >
         <aside className="border-b border-slate-200 bg-white transition-colors dark:border-slate-800 dark:bg-slate-900 lg:sticky lg:top-0 lg:h-screen lg:border-r lg:border-b-0">
@@ -130,7 +132,7 @@ export function DashboardShell({
         <div
           className={cx(
             "min-w-0 p-4 sm:p-6",
-            activePage === "requestLogs" && "lg:flex lg:h-screen lg:flex-col lg:overflow-hidden",
+            (activePage === "requestLogs" || activePage === "auditLogs") && "lg:flex lg:h-screen lg:flex-col lg:overflow-hidden",
           )}
         >
         <header className="mb-5 flex flex-wrap items-center justify-between gap-4">
@@ -202,6 +204,8 @@ function RouteIcon({ page }: { page: DashboardPage }) {
       return <ChartNoAxesCombined size={18} />;
     case "gatewayApiKeys":
       return <KeyRound size={18} />;
+    case "auditLogs":
+      return <ShieldCheck size={18} />;
     case "requestLogs":
       return <ScrollText size={18} />;
   }

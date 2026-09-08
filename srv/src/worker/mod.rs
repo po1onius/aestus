@@ -12,7 +12,7 @@ use tracing::{info, warn};
 
 use crate::{
     infra::db::DbPool,
-    logs::{self, LogsRuntime, RequestLogConsumer},
+    logs::{self, LogsRuntime, RequestLogConsumer, audit::AuditLogPublisher},
     request::events::{RequestEvent, RequestEventPublisher},
 };
 
@@ -45,9 +45,9 @@ pub fn start(
     clickhouse: ClickHouseClient,
     request_log_table: String,
     service_timezone: Tz,
-) -> (RequestEventPublisher, WorkerRuntime) {
+) -> (RequestEventPublisher, AuditLogPublisher, WorkerRuntime) {
     let (publisher, event_rx) = RequestEventPublisher::channel(REQUEST_EVENT_QUEUE_CAPACITY);
-    let (request_log, logs_runtime) = logs::start(
+    let (request_log, audit_logs, logs_runtime) = logs::start(
         db_pool.clone(),
         clickhouse,
         request_log_table,
@@ -63,6 +63,7 @@ pub fn start(
     );
     (
         publisher,
+        audit_logs,
         WorkerRuntime {
             tasks: vec![event_router_task, quota_task],
             _logs: logs_runtime,

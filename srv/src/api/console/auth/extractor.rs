@@ -5,6 +5,7 @@ use axum::{
 use tracing::warn;
 
 use crate::{
+    api::console::audit::AuditContext,
     err::{AppError, AppResult},
     state::AppState,
     tenant,
@@ -32,7 +33,7 @@ impl FromRequestParts<AppState> for CurrentUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        require_user(state, &parts.headers).await.map(Self)
+        require_user(state, parts).await.map(Self)
     }
 }
 
@@ -43,7 +44,7 @@ impl FromRequestParts<AppState> for AdminUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        require_admin(state, &parts.headers).await.map(Self)
+        require_admin(state, parts).await.map(Self)
     }
 }
 
@@ -54,19 +55,21 @@ impl FromRequestParts<AppState> for PlatformAdminUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        require_platform_admin(state, &parts.headers)
-            .await
-            .map(Self)
+        require_platform_admin(state, parts).await.map(Self)
     }
 }
 
-pub(crate) async fn require_user(state: &AppState, headers: &HeaderMap) -> AppResult<User> {
-    let token = extract_bearer_token(headers)?;
+pub(crate) async fn require_user(state: &AppState, parts: &Parts) -> AppResult<User> {
+    let token = extract_bearer_token(&parts.headers)?;
     let claims = user::decode_jwt(state, token)?;
     let mut conn = state.db_conn().await?;
     let user = user::find_by_id(&mut conn, claims.sub)
         .await?
         .ok_or(AppError::InvalidDashboardToken)?;
+
+    if let Some(audit) = parts.extensions.get::<AuditContext>() {
+        audit.record_user(&user);
+    }
 
     if !user.enabled {
         warn!(user_id = %user.id, username = %user.username, email = %user.email, "Dashboard JWT 对应用户已禁用");
@@ -80,8 +83,8 @@ pub(crate) async fn require_user(state: &AppState, headers: &HeaderMap) -> AppRe
     Ok(user)
 }
 
-pub(crate) async fn require_admin(state: &AppState, headers: &HeaderMap) -> AppResult<User> {
-    let user = require_user(state, headers).await?;
+pub(crate) async fn require_admin(state: &AppState, parts: &Parts) -> AppResult<User> {
+    let user = require_user(state, parts).await?;
     if !user.is_tenant_owner() {
         warn!(user_id = %user.id, role = %user.role, tenant_id = ?user.tenant_id, "非租户 owner 用户访问租户管理接口");
         return Err(AppError::Forbidden);
@@ -89,11 +92,8 @@ pub(crate) async fn require_admin(state: &AppState, headers: &HeaderMap) -> AppR
     Ok(user)
 }
 
-pub(crate) async fn require_platform_admin(
-    state: &AppState,
-    headers: &HeaderMap,
-) -> AppResult<User> {
-    let user = require_user(state, headers).await?;
+pub(crate) async fn require_platform_admin(state: &AppState, parts: &Parts) -> AppResult<User> {
+    let user = require_user(state, parts).await?;
     if !user.is_platform_admin() {
         warn!(user_id = %user.id, role = %user.role, tenant_id = ?user.tenant_id, "非平台管理员访问平台管理接口");
         return Err(AppError::Forbidden);
