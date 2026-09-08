@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::{
-    api::console::audit::AuditContext,
+    api::{console::audit::AuditContext, rate_limit::PublicRateLimitRuntime},
+    config::PublicRateLimitConfig,
     err::{AppError, AppResult},
     state::AppState,
     tenant::{self, Tenant},
@@ -74,11 +75,31 @@ impl From<Tenant> for PublicTenant {
     }
 }
 
-pub fn router() -> Router<AppState> {
+pub(super) fn router(
+    limits: &PublicRateLimitConfig,
+    runtime: &mut PublicRateLimitRuntime,
+) -> Router<AppState> {
     Router::new()
-        .route("/register/email-code", post(send_register_email_code))
-        .route("/register", post(register))
-        .route("/login", post(login))
+        .route(
+            "/register/email-code",
+            runtime.limit(
+                post(send_register_email_code),
+                "/api/console/auth/register/email-code",
+                limits.email_code,
+            ),
+        )
+        .route(
+            "/register",
+            runtime.limit(
+                post(register),
+                "/api/console/auth/register",
+                limits.register,
+            ),
+        )
+        .route(
+            "/login",
+            runtime.limit(post(login), "/api/console/auth/login", limits.login),
+        )
         .route("/me", get(me))
 }
 

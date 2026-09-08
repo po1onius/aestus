@@ -96,7 +96,7 @@ export function AuditLogsPage({ token, timezone, role, refreshRevision, onLoadin
       ) : (
         <div className="min-h-0 w-full flex-1 overflow-auto overscroll-contain">
           <table className={cx(tableClass, "min-w-[84rem] [&_th]:sticky [&_th]:top-0 [&_th]:z-10")}>
-            <thead><tr><th>时间（{data.timezone}）</th><th>操作者</th><th>租户</th><th>请求</th><th>HTTP 状态 / 耗时</th><th>连接来源 IP</th><th>详情</th></tr></thead>
+            <thead><tr><th>时间（{data.timezone}）</th><th>操作者</th><th>租户</th><th>请求</th><th>HTTP 状态 / 耗时</th><th>来源 IP</th><th>详情</th></tr></thead>
             <tbody>{data.items.map((log) => (
               <tr key={log.id}>
                 <td><div className={cellMainClass}>{formatDateTimeWithMilliseconds(log.occurred_at, data.timezone)}</div></td>
@@ -107,7 +107,7 @@ export function AuditLogsPage({ token, timezone, role, refreshRevision, onLoadin
                 <td><div className={cellMainClass}>{log.tenant_id ?? "—"}</div></td>
                 <td><div className="max-w-md break-all text-sm text-slate-800 dark:text-slate-200"><strong>{log.method}</strong> {log.path}</div></td>
                 <td><div className={cx("whitespace-nowrap text-sm", log.status_code >= 400 ? "text-red-700 dark:text-red-400" : "text-slate-800 dark:text-slate-200")}>{log.status_code} / {formatDuration(log.duration_ms)}</div></td>
-                <td><div className={cellMainClass}>{log.peer_ip ?? "未记录"}</div></td>
+                <td><div className={cellMainClass}>{log.client_ip ?? "未记录"}</div></td>
                 <td>
                   <details className="max-w-sm text-xs text-slate-600 dark:text-slate-400">
                     <summary className="cursor-pointer whitespace-nowrap text-sm text-indigo-700 dark:text-indigo-400">查看详情</summary>
@@ -115,6 +115,7 @@ export function AuditLogsPage({ token, timezone, role, refreshRevision, onLoadin
                       <dt>审计 ID</dt><dd>{log.id}</dd>
                       <dt>请求 ID</dt><dd>{log.request_id ?? "未记录"}</dd>
                       <dt>用户 ID</dt><dd>{log.user_id ?? "未确认身份"}</dd>
+                      <dt>连接对端 IP</dt><dd>{log.peer_ip ?? "未记录"}</dd>
                       <dt>User-Agent</dt><dd>{log.user_agent ?? "未记录"}</dd>
                     </dl>
                   </details>

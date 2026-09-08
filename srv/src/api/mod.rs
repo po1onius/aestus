@@ -1,5 +1,9 @@
+mod client_ip;
 pub mod console;
 pub mod gateway;
+mod rate_limit;
+
+pub(crate) use rate_limit::PublicRateLimitRuntime;
 
 use axum::{
     Json, Router,
@@ -34,7 +38,7 @@ struct HealthResponse<'a> {
 ///
 /// 网关接口和管理面板接口分开挂载，避免管理面板鉴权、中间件和请求边界策略
 /// 影响 OpenAI 兼容接口的行为。
-pub fn build_router(state: AppState) -> Router {
+pub fn build_router(state: AppState) -> (Router, PublicRateLimitRuntime) {
     let cors = CorsLayer::new()
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
         .allow_headers([
@@ -85,19 +89,27 @@ pub fn build_router(state: AppState) -> Router {
     // Dashboard 只接收表单和资源配置，不继承 LLM 上传场景的 64 MiB 上限；跨域能力也只
     // 授予对外网关协议，避免任意站点直接调用管理端 Bearer API。
     let gateway_router = gateway::router().layer(cors);
-    let console_router = console::router()
-        .layer(DefaultBodyLimit::max(CONSOLE_MAX_BODY_BYTES))
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            console::audit::record_request,
-        ));
+    let mut rate_limit_runtime = PublicRateLimitRuntime::default();
+    // 请求顺序：来源 IP → 审计 → 对应公开接口限流 → extractor / handler。
+    // 因此 429 也会进入审计，且拒绝发生在正文解析、数据库和密码计算之前。
+    let console_router =
+        console::router(&state.config().public_rate_limits, &mut rate_limit_runtime)
+            .layer(DefaultBodyLimit::max(CONSOLE_MAX_BODY_BYTES))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                console::audit::record_request,
+            ))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                client_ip::resolve_request_ip,
+            ));
     let router = Router::new()
         .route("/healthz", get(healthz))
         .merge(gateway_router)
         .nest("/api/console", console_router);
     let router = mount_web_dist_if_configured(router, &state);
 
-    router
+    let router = router
         .with_state(state)
         .layer(PropagateRequestIdLayer::new(
             REQUEST_ID_HEADER.parse().expect("请求头名称固定有效"),
@@ -107,7 +119,8 @@ pub fn build_router(state: AppState) -> Router {
             TraceLayer::new_for_http()
                 .make_span_with(tower_http::trace::DefaultMakeSpan::new().level(Level::INFO))
                 .on_response(tower_http::trace::DefaultOnResponse::new().level(Level::INFO)),
-        )
+        );
+    (router, rate_limit_runtime)
 }
 
 fn mount_web_dist_if_configured(router: Router<AppState>, state: &AppState) -> Router<AppState> {

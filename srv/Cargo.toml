@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 axum = { version = "0.8.9", features = ["multipart"] }
+axum-client-addr = "0.2.0"
 base64 = "0.22.1"
 bcrypt = "0.19.2"
 bytes = "1.11.1"
@@ -35,6 +36,7 @@ thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal"] }
 tokio-util = { version = "0.7.17", features = ["io"] }
 tower-http = { version = "0.6.11", features = ["cors", "trace", "request-id", "util", "fs"] }
+tower_governor = { version = "0.8.0", default-features = false, features = ["axum", "tracing"] }
 tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }

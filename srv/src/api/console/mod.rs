@@ -14,6 +14,8 @@ use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::get}
 use serde::Serialize;
 
 use crate::{
+    api::rate_limit::PublicRateLimitRuntime,
+    config::PublicRateLimitConfig,
     provider::{claude::maintenance::ClaudeMaintenance, gpt::maintenance::GptMaintenance},
     state::AppState,
 };
@@ -27,11 +29,17 @@ struct ConsoleStatusResponse<'a> {
 /// 控制台 API 路由，统一挂载于 `/api/console`。
 ///
 /// 按业务资源组织 URL；角色权限和租户数据范围由各接口的鉴权逻辑确定。
-pub fn router() -> Router<AppState> {
+pub(super) fn router(
+    limits: &PublicRateLimitConfig,
+    runtime: &mut PublicRateLimitRuntime,
+) -> Router<AppState> {
     tracing::info!(api_prefix = "/api/console", "注册控制台 API 路由");
     Router::new()
-        .route("/status", get(status))
-        .nest("/auth", auth::router())
+        .route(
+            "/status",
+            runtime.limit(get(status), "/api/console/status", limits.status),
+        )
+        .nest("/auth", auth::router(limits, runtime))
         .nest("/gateway-api-keys", gateway_api_keys::router())
         .nest("/plugins", plugins::router())
         .nest("/plugin-suites", plugins::suites_router())

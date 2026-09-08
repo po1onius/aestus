@@ -326,6 +326,7 @@ CREATE TABLE console_audit_logs (
     status_code INTEGER NOT NULL CHECK (status_code BETWEEN 100 AND 599),
     duration_ms BIGINT NOT NULL CHECK (duration_ms >= 0),
     peer_ip TEXT,
+    client_ip TEXT,
     user_agent TEXT
 );
 CREATE INDEX idx_console_audit_logs_time ON console_audit_logs (occurred_at DESC, id DESC);

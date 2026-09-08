@@ -1,13 +1,12 @@
 //! 控制台 HTTP 审计采集。只读取请求元数据，不消费正文、不改变鉴权结果。
 
 use std::{
-    net::SocketAddr,
     sync::{Arc, OnceLock},
     time::Instant,
 };
 
 use axum::{
-    extract::{ConnectInfo, OriginalUri, Request, State},
+    extract::{OriginalUri, Request, State},
     http::header::USER_AGENT,
     middleware::Next,
     response::Response,
@@ -17,6 +16,7 @@ use tracing::debug;
 use uuid::Uuid;
 
 use crate::{
+    api::client_ip::RequestClientIp,
     logs::audit::{AuditActor, AuditLogRecord},
     state::AppState,
     user::User,
@@ -65,11 +65,12 @@ pub(crate) async fn record_request(
         .get(USER_AGENT)
         .and_then(|value| value.to_str().ok())
         .map(|value| value.chars().take(512).collect());
-    // 只信任连接信息；反向代理部署时这里明确记录代理地址，不信任客户端伪造的转发头。
-    let peer_ip = request
+    // 与限流共用外层中间件解析结果，避免重复解析以及 IP 判定规则分歧。
+    let ips = request
         .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|peer| peer.0.ip().to_string());
+        .get::<RequestClientIp>()
+        .copied()
+        .unwrap_or_default();
     let context = AuditContext::default();
     request.extensions_mut().insert(context.clone());
     let response = next.run(request).await;
@@ -89,7 +90,8 @@ pub(crate) async fn record_request(
         path,
         status_code,
         duration_ms,
-        peer_ip,
+        peer_ip: ips.peer_ip.map(|ip| ip.to_string()),
+        client_ip: ips.client_ip.map(|ip| ip.to_string()),
         user_agent,
     });
     response

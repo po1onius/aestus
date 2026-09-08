@@ -596,6 +596,7 @@ export interface AuditLogRecord {
   status_code: number;
   duration_ms: number;
   peer_ip: string | null;
+  client_ip: string | null;
   user_agent: string | null;
 }
 

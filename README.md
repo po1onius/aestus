@@ -253,6 +253,41 @@ ClickHouse 请求明细默认保留 30 天，可通过 `AESTUS_REQUEST_LOG_RETEN
 `AESTUS_TIMEZONE` 必须是 IANA 时区，例如 `UTC` 或 `Asia/Shanghai`。它定义全部用户共用的业务日
 边界；产生聚合数据后修改该值需要重建日聚合，不应将它当作普通的运行时开关。
 
+## 公开接口限流
+
+`api/rate_limit` 使用 `tower_governor` 按来源 IP 对以下接口分别限流。限流在正文解析、
+数据库访问、密码校验和发送邮件之前执行；超限立即返回 HTTP 429，不排队等待。
+
+| 接口 | 持续补充速率 | 突发容量 | 配置名称中的接口标识 |
+| --- | --- | --- | --- |
+| `POST /api/console/auth/login` | 30 次/分钟 | 10 次 | `LOGIN` |
+| `POST /api/console/auth/register` | 6 次/分钟 | 2 次 | `REGISTER` |
+| `POST /api/console/auth/register/email-code` | 6 次/分钟 | 2 次 | `EMAIL_CODE` |
+| `GET /api/console/status` | 60 次/分钟 | 20 次 | `STATUS` |
+
+使用 `AESTUS_PUBLIC_RATE_LIMIT_<接口标识>_PER_MINUTE` 和
+`AESTUS_PUBLIC_RATE_LIMIT_<接口标识>_BURST` 分别配置速率和容量，均须为大于 0 的
+整数；非法值或容量恢复时间超出库可表示范围的组合会阻止启动。例如 `AESTUS_PUBLIC_RATE_LIMIT_LOGIN_PER_MINUTE=30`
+与 `AESTUS_PUBLIC_RATE_LIMIT_LOGIN_BURST=10` 表示初始允许连续请求 10 次，此后
+每 2 秒补充一次额度，最多累计 10 次；不是按自然分钟重置的固定窗口。
+Makefile、Compose 和 `deploy/.env.example` 均已包含这八项配置。
+
+同一 IP 的不同接口独立计数，所有放行的请求都会消耗额度，包括后续参数校验、登录或
+注册失败的请求；携带 Authorization 也不会跳过公开接口限流。Axum 自动支持的
+`HEAD /api/console/status` 与 GET 共用额度。`/healthz`、静态资源、需凭证的
+控制台接口及模型网关接口不进入此限流层。注册验证码原有的按邮箱发送冷却保持独立生效。
+
+超限响应为 `{"error":{"code":"public_rate_limited","message":"请求过于频繁，请稍后再试"}}`，
+并附带以秒为单位的 `Retry-After`。审计包在限流层外侧，因此 429 也会尝试写入审计；
+限流拒绝发生在身份校验之前，身份字段为空，仅平台管理员可见。
+
+来源 IP 由 `api/client_ip` 统一解析，审计和限流共用同一结果，遵循下述
+`AESTUS_TRUSTED_PROXY_IPS` 规则。IPv4 映射 IPv6 地址规范化为 IPv4，避免同一地址
+形成两个计数。缺少 TCP 连接信息时公开接口返回 500 并记录配置诊断，不跳过限流。
+
+额度保存在进程内，不增加 Redis 或数据库访问；每 60 秒清理额度已完全恢复的 IP。
+进程重启会重置额度，多副本各自计数，整体允许量会随副本数增加。
+
 ## 控制台请求审计
 
 Axum 中间件覆盖 `/api/console` 的请求，包括登录、注册、查询、修改操作、鉴权拒绝、
@@ -262,7 +297,7 @@ PostgreSQL `console_audit_logs`，不经过模型请求聚合。
 
 每条记录保存服务端生成的 UUID v7 审计 ID、请求进入中间件的时间、关联 request ID、
 用户 ID / 用户名 / 角色 / 租户快照、HTTP 方法、完整路径（不含 query）、响应状态码、
-处理耗时、TCP 对端 IP 和 User-Agent。耗时从进入中间件计至产生响应，不包含响应体向
+处理耗时、TCP 对端 IP、解析后的来源 IP 和 User-Agent。耗时从进入中间件计至产生响应，不包含响应体向
 客户端传输完成的时间；HTTP 状态仅表示接口结果，不推断具体数据变更。
 不采集请求体、响应体、查询字符串、Authorization 或 Cookie；request ID 最多保留
 128 个字符，User-Agent 最多保留 512 个字符。关联 request ID 可以来自客户端，
@@ -273,9 +308,30 @@ PostgreSQL `console_audit_logs`，不经过模型请求聚合。
 token、未知路径及未执行身份校验的公开接口不记录推测的操作者，相关身份字段为空。
 采集不增加用户查询、不读取正文，也不改变原有鉴权结果。
 
-`peer_ip` 只取实际 TCP 连接信息，不信任 `Forwarded` / `X-Forwarded-For` / `X-Real-IP`。
-经过反向代理访问时记录的是代理地址。首版尚未配置可信代理，因此不会把转发头当作
-终端用户的真实 IP。
+`peer_ip` 始终保留实际 TCP 对端地址；`client_ip` 保存按可信代理规则解析出的来源地址。
+页面主要展示来源 IP，详情中保留连接对端 IP。没有 TCP 连接信息时，两者均为空。
+
+通过 `AESTUS_TRUSTED_PROXY_IPS` 配置可信代理，支持逗号分隔的 IPv4 / IPv6 地址：
+
+```env
+AESTUS_TRUSTED_PROXY_IPS=127.0.0.1,10.0.0.10,::1
+```
+
+默认空列表，不信任任何代理。配置只接受单个 IP，不接受 CIDR、域名、端口或列表中的
+空项；非法配置直接阻止启动。部署配置填写的是网关实际看到的代理 TCP 对端 IP，
+容器或 NAT 场景要使用转换后的地址。可信代理必须正确覆盖或追加 `X-Forwarded-For`。
+
+解析复用 `axum-client-addr`，只启用 XFF，不读取 `Forwarded` 或 `X-Real-IP`。
+对端 IP 未命中时直接使用 `peer_ip`，忽略全部转发头；命中后按顺序处理多行 XFF，
+从右向左跳过可信代理，取第一个非可信地址作为 `client_ip`。在找到该地址前遇到
+无法解析的 hop、XFF 缺失或链中没有非可信地址时，记录诊断并使用 `peer_ip`，不会
+拒绝请求。IPv4 与其映射 IPv6 形式在可信匹配时等价；`client_ip` 统一使用规范化地址，
+`peer_ip` 保留原始 TCP 对端地址。
+
+例如对端为可信的 `10.0.0.10`，另一个可信代理为 `10.0.0.11`，收到
+`X-Forwarded-For: 198.51.100.99, 203.0.113.8, 10.0.0.11` 时，来源为 `203.0.113.8`；
+更左侧的 `198.51.100.99` 不参与决定结果。解析仅使用内存中的配置和请求头，不增加
+网络请求、数据库查询或异步写入等待。
 
 平台管理员可以查看全局审计；租户 owner 只看本租户已确认身份的记录；普通用户只看
 自己的记录。未确认身份的记录仅平台管理员可见。查询范围完全由登录身份决定，接口

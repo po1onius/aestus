@@ -1,7 +1,12 @@
-use std::{env, net::SocketAddr, num::NonZeroU32};
+use std::{
+    env,
+    net::{IpAddr, SocketAddr},
+    num::NonZeroU32,
+};
 
+use axum_client_addr::{ChainHeader, ClientIpConfig, IpCidr};
 use chrono_tz::Tz;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::err::{AppError, AppResult};
 
@@ -64,6 +69,9 @@ const DEFAULT_EMAIL_CODE_COOLDOWN_SECONDS: u64 = 60;
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub bind_addr: SocketAddr,
+    /// 仅信任配置中列出的代理 IP，并且只读取 X-Forwarded-For。
+    pub client_ip_config: ClientIpConfig,
+    pub public_rate_limits: PublicRateLimitConfig,
     pub database_url: String,
     pub database_pool_size: usize,
     pub redis_url: String,
@@ -132,6 +140,8 @@ impl AppConfig {
     pub fn from_env() -> AppResult<Self> {
         Ok(Self {
             bind_addr: parse_env("AESTUS_BIND_ADDR", default_bind_addr())?,
+            client_ip_config: parse_trusted_proxy_ips()?,
+            public_rate_limits: PublicRateLimitConfig::from_env()?,
             database_url: required_env("DATABASE_URL")?,
             database_pool_size: parse_env("AESTUS_DATABASE_POOL_SIZE", DEFAULT_DATABASE_POOL_SIZE)?,
             redis_url: required_env("REDIS_URL")?,
@@ -314,12 +324,127 @@ impl AppConfig {
     }
 }
 
+/// 每个公开接口独立配置持续补充速率和突发容量，均必须大于零。
+#[derive(Debug, Clone, Copy)]
+pub struct PublicRateLimitQuota {
+    pub per_minute: NonZeroU32,
+    pub burst: NonZeroU32,
+}
+
+impl PublicRateLimitQuota {
+    pub fn replenish_period(&self) -> std::time::Duration {
+        // 向上取整，不把配置速率向上放宽；u32 速率保证周期非零。
+        std::time::Duration::from_nanos(
+            60_000_000_000_u64.div_ceil(u64::from(self.per_minute.get())),
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PublicRateLimitConfig {
+    pub login: PublicRateLimitQuota,
+    pub register: PublicRateLimitQuota,
+    pub email_code: PublicRateLimitQuota,
+    pub status: PublicRateLimitQuota,
+}
+
+impl PublicRateLimitConfig {
+    fn from_env() -> AppResult<Self> {
+        fn quota(
+            rate_key: &'static str,
+            burst_key: &'static str,
+            per_minute: u32,
+            burst: u32,
+        ) -> AppResult<PublicRateLimitQuota> {
+            let quota = PublicRateLimitQuota {
+                per_minute: parse_env(
+                    rate_key,
+                    NonZeroU32::new(per_minute).expect("默认速率非零"),
+                )?,
+                burst: parse_env(burst_key, NonZeroU32::new(burst).expect("默认容量非零"))?,
+            };
+            // governor 以 u64 纳秒记录额度恢复时间，拒绝无法表示的速率/容量组合。
+            u64::try_from(quota.replenish_period().as_nanos() * u128::from(quota.burst.get()))
+                .map_err(|source| AppError::InvalidConfig {
+                    key: burst_key,
+                    value: quota.burst.to_string(),
+                    source: Box::new(source),
+                })?;
+            Ok(quota)
+        }
+        Ok(Self {
+            login: quota(
+                "AESTUS_PUBLIC_RATE_LIMIT_LOGIN_PER_MINUTE",
+                "AESTUS_PUBLIC_RATE_LIMIT_LOGIN_BURST",
+                30,
+                10,
+            )?,
+            register: quota(
+                "AESTUS_PUBLIC_RATE_LIMIT_REGISTER_PER_MINUTE",
+                "AESTUS_PUBLIC_RATE_LIMIT_REGISTER_BURST",
+                6,
+                2,
+            )?,
+            email_code: quota(
+                "AESTUS_PUBLIC_RATE_LIMIT_EMAIL_CODE_PER_MINUTE",
+                "AESTUS_PUBLIC_RATE_LIMIT_EMAIL_CODE_BURST",
+                6,
+                2,
+            )?,
+            status: quota(
+                "AESTUS_PUBLIC_RATE_LIMIT_STATUS_PER_MINUTE",
+                "AESTUS_PUBLIC_RATE_LIMIT_STATUS_BURST",
+                60,
+                20,
+            )?,
+        })
+    }
+}
+
 fn required_env(key: &'static str) -> AppResult<String> {
     match env::var(key) {
         Ok(value) if !value.trim().is_empty() => Ok(value),
         Ok(_) | Err(env::VarError::NotPresent) => Err(AppError::MissingConfig { key }),
         Err(source) => Err(AppError::ReadConfig { key, source }),
     }
+}
+
+fn parse_trusted_proxy_ips() -> AppResult<ClientIpConfig> {
+    const KEY: &str = "AESTUS_TRUSTED_PROXY_IPS";
+    let Some(raw) = optional_env_string(KEY)? else {
+        info!(
+            config_key = KEY,
+            "未配置可信代理，请求来源 IP 使用 TCP 对端地址"
+        );
+        return Ok(ClientIpConfig::default());
+    };
+    // 先按单个 IP 校验，拒绝 CIDR、域名、端口以及列表中的空项。
+    let ips = raw
+        .split(',')
+        .map(|item| {
+            item.trim()
+                .parse::<IpAddr>()
+                .map_err(|source| AppError::InvalidConfig {
+                    key: KEY,
+                    value: raw.clone(),
+                    source: Box::new(source),
+                })
+        })
+        .collect::<AppResult<Vec<_>>>()?;
+    let mut builder = ClientIpConfig::builder()
+        .trusted_proxies()
+        .chain_header_order([ChainHeader::x_forwarded_for()]);
+    for ip in &ips {
+        // /32 或 /128 仅覆盖该 IP；不会把所在私网或容器网段整体标为可信。
+        builder = builder.proxy(IpCidr::new_host(*ip));
+    }
+    let config = builder.build().map_err(|source| AppError::InvalidConfig {
+        key: KEY,
+        value: raw,
+        source: Box::new(source),
+    })?;
+    info!(config_key = KEY, trusted_proxy_ips = ?ips, "可信代理配置已加载，请求来源 IP 仅解析 XFF");
+    Ok(config)
 }
 
 fn default_bind_addr() -> SocketAddr {

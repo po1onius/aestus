@@ -19,6 +19,7 @@ diesel::table! {
         status_code -> Int4,
         duration_ms -> Int8,
         peer_ip -> Nullable<Text>,
+        client_ip -> Nullable<Text>,
         user_agent -> Nullable<Text>,
     }
 }
@@ -47,5 +48,6 @@ pub(crate) struct AuditLogRecord {
     pub status_code: i32,
     pub duration_ms: i64,
     pub peer_ip: Option<String>,
+    pub client_ip: Option<String>,
     pub user_agent: Option<String>,
 }

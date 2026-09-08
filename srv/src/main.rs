@@ -93,7 +93,7 @@ async fn run() -> err::AppResult<()> {
         request_log_retention_days = state.config().request_log_retention_days.get(),
         "aestus gateway 启动完成"
     );
-    let app = api::build_router(state);
+    let (app, _rate_limit_runtime) = api::build_router(state);
 
     axum::serve(
         listener,
