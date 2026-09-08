@@ -1,26 +1,25 @@
 import { consolePagePaths } from "../config";
-import { useState } from "react";
 import {
   ArrowDown,
-  ArrowDownLeft,
   ArrowRight,
   ArrowUpRight,
   AudioLines,
+  Blocks,
   Check,
   CheckCheck,
   ChevronRight,
   Code2,
-  Copy,
   Fingerprint,
   Image,
   Layers3,
-  Menu,
   Network,
   Search,
   ShieldCheck,
+  ShieldAlert,
   Terminal,
+  TrendingUp,
+  WifiOff,
   Workflow,
-  X,
 } from "lucide-react";
 import openaiLogo from "@lobehub/icons-static-svg/icons/openai.svg";
 import claudeLogo from "@lobehub/icons-static-svg/icons/claude.svg";
@@ -28,26 +27,6 @@ import tokenGatewayLogo from "../assets/token-gateway-logo.svg";
 import "./home.css";
 
 const consoleEntryPath = consolePagePaths.usage;
-const examples = [
-  {
-    id: "responses",
-    label: "文本生成",
-    path: "/v1/responses",
-    body: '{\n    "model": "<YOUR_GPT_MODEL>",\n    "input": "用一句话介绍 Aestus",\n    "stream": true\n  }',
-  },
-  {
-    id: "messages",
-    label: "Claude",
-    path: "/v1/messages",
-    body: '{\n    "model": "<YOUR_CLAUDE_MODEL>",\n    "max_tokens": 1024,\n    "messages": [{"role": "user", "content": "你好，Aestus"}]\n  }',
-  },
-  {
-    id: "images",
-    label: "图像生成",
-    path: "/v1/images/generations",
-    body: '{\n    "model": "gpt-image-2",\n    "prompt": "暖白背景上的极简建筑摄影",\n    "size": "1024x1024"\n  }',
-  },
-] as const;
 
 function Brand() {
   return (
@@ -149,29 +128,6 @@ function GatewayDiagram() {
 }
 
 export function HomePage() {
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [exampleIndex, setExampleIndex] = useState(0);
-  const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "error">(
-    "idle",
-  );
-  const example = examples[exampleIndex];
-  const baseUrl = "<AESTUS_BASE_URL>";
-  const code = `curl "${baseUrl}${example.path}" \\\n  -H "Authorization: Bearer <AESTUS_GATEWAY_KEY>" \\\n  -H "Content-Type: application/json" \\\n${example.id === "messages" ? '  -H "anthropic-version: 2023-06-01" \\\n' : ""}  -d '${example.body}'`;
-
-  async function copyExample() {
-    try {
-      await navigator.clipboard.writeText(code);
-      setCopyStatus("copied");
-      console.info("[homepage] 接入示例已复制", { endpoint: example.path });
-    } catch (error) {
-      setCopyStatus("error");
-      console.error("[homepage] 接入示例复制失败", {
-        endpoint: example.path,
-        error,
-      });
-    }
-  }
-
   return (
     <div className="aestus-home">
       <a className="home-skip-link" href="#main-content">
@@ -180,39 +136,14 @@ export function HomePage() {
       <header className="home-header">
         <div className="home-container home-header-inner">
           <Brand />
-          <nav className="home-desktop-nav" aria-label="主导航">
-            <a href="#capabilities">账号托管</a>
-            <a href="#architecture">托管流程</a>
-            <a href="#integration">
-              快速接入 <ArrowUpRight size={12} />
-            </a>
+          <nav className="home-header-nav" aria-label="主导航">
+            <span>文档</span>
+            <span>咨询</span>
           </nav>
           <a className="home-console-link" href={consoleEntryPath}>
             进入控制台 <ArrowUpRight size={16} />
           </a>
-          <button
-            className="home-menu-toggle"
-            type="button"
-            aria-expanded={menuOpen}
-            aria-controls="home-mobile-nav"
-            aria-label={menuOpen ? "关闭导航" : "打开导航"}
-            onClick={() => setMenuOpen(!menuOpen)}
-          >
-            {menuOpen ? <X size={22} /> : <Menu size={22} />}
-          </button>
         </div>
-        {menuOpen && (
-          <nav
-            id="home-mobile-nav"
-            className="home-mobile-nav"
-            aria-label="移动端导航"
-            onClick={() => setMenuOpen(false)}
-          >
-            <a href="#capabilities">账号托管</a>
-            <a href="#architecture">托管流程</a>
-            <a href="#integration">快速接入</a>
-          </nav>
-        )}
       </header>
 
       <main id="main-content">
@@ -237,9 +168,6 @@ export function HomePage() {
               <a className="home-button home-button-dark" href={consoleEntryPath}>
                 开始账号托管 <ArrowUpRight size={18} />
               </a>
-              <a className="home-text-link" href="#architecture">
-                了解托管方式 <ArrowRight size={17} />
-              </a>
             </div>
             <div className="hero-notes">
               <span>
@@ -259,32 +187,6 @@ export function HomePage() {
             <a href="#capabilities">
               探索 Aestus <ArrowDown size={14} />
             </a>
-          </div>
-        </section>
-
-        <section className="home-protocols" aria-label="支持的协议和功能">
-          <div className="home-container protocols-inner">
-            <span className="protocol-label">自有账号托管，标准协议调用</span>
-            <div>
-              <img src={openaiLogo} alt="" />
-              <span>
-                OpenAI <small>compatible</small>
-              </span>
-            </div>
-            <div>
-              <img src={claudeLogo} alt="" />
-              <span>
-                Anthropic <small>compatible</small>
-              </span>
-            </div>
-            <div>
-              <Image size={22} />
-              <span>Image API</span>
-            </div>
-            <div>
-              <Search size={22} />
-              <span>Web Search</span>
-            </div>
           </div>
         </section>
 
@@ -421,180 +323,161 @@ export function HomePage() {
 
         <section
           id="architecture"
-          className="home-container architecture-section"
+          className="home-container pain-points-section"
+          aria-labelledby="pain-points-title"
         >
-          <div className="architecture-title">
-            <div className="home-eyebrow">02 / FROM ACCOUNTS TO TEAM</div>
-            <h2>
-              从账号托管，
+          <div className="pain-points-intro">
+            <div className="home-eyebrow">02 / LESS FRICTION. MORE VALUE.</div>
+            <h2 id="pain-points-title">
+              解决 <em>3</em> 大痛点，
               <br />
-              <span>到整个团队的 AI 能力。</span>
+              <span>让 AI 回归生产力。</span>
             </h2>
             <p>
-              空间管理员统一管理账号，成员按授权使用。
+              从套餐成本、共享隐私，到连接质量。
               <br />
-              三步，让自有资源服务团队。
+              少一些使用负担，多一份专注创造的自由。
             </p>
+            <div className="pain-points-topics" aria-label="成本、隐私、连接">
+              <span>成本</span>
+              <i />
+              <span>隐私</span>
+              <i />
+              <span>连接</span>
+            </div>
             <a href="#integration" className="home-text-link">
-              查看成员接入示例 <ArrowRight size={17} />
+              探索项目特点 <ArrowRight size={17} />
             </a>
           </div>
-          <ol className="architecture-steps">
+          <ol className="pain-points-list">
             {[
               {
                 number: "01",
-                title: "托管自有账号",
-                text: "空间管理员导入账号或官方 API Key，归入工作空间的资源组。",
-                icon: Code2,
+                label: "COST EFFICIENCY",
+                title: "低阶套餐，不够划算。",
+                text: "高阶套餐的价格线性增长，额度却成倍提升，限制更少、权益更多。低阶套餐看似门槛低，实际性价比未必高。",
+                icon: TrendingUp,
               },
               {
                 number: "02",
-                title: "授权团队成员",
-                text: "按 Provider 分组分配使用权限，设置成员额度与并发。",
-                icon: Network,
+                label: "PRIVACY & SECURITY",
+                title: "共享账号，隐私也被共享。",
+                text: "直接共享账号，号主的聊天记录也可能对他人可见。个人对话与敏感数据暴露在同一账号下，隐私与数据安全难以保障。",
+                icon: ShieldAlert,
               },
               {
                 number: "03",
-                title: "通过网关 Key 调用",
-                text: "成员在已授权组中创建自己的 Key，以标准 API 使用托管资源。",
-                icon: ArrowDownLeft,
+                label: "CONNECTION STABILITY",
+                title: "连接不稳，思路随时中断。",
+                text: "AI 服务通常以流式响应持续输出内容。低质量的代理网络容易波动、断连，让尚未完成的回答和连贯的工作节奏一起中断。",
+                icon: WifiOff,
               },
-            ].map(({ number, title, text, icon: Icon }) => (
+            ].map(({ number, label, title, text, icon: Icon }) => (
               <li key={number}>
-                <span className="step-number">{number}</span>
+                <span className="pain-point-number">{number}</span>
                 <div>
+                  <span className="pain-point-label">{label}</span>
                   <h3>{title}</h3>
                   <p>{text}</p>
                 </div>
-                <Icon size={22} />
+                <span className="pain-point-icon" aria-hidden="true">
+                  <Icon size={21} strokeWidth={1.5} />
+                </span>
               </li>
             ))}
           </ol>
         </section>
 
-        <section id="integration" className="integration-section">
-          <div className="home-container integration-inner">
-            <div className="integration-copy">
-              <div className="home-eyebrow">03 / ONE KEY FOR YOUR WORK</div>
-              <h2>
-                账号在专属空间托管。
-                <br />
-                <span>成员用 Key 即可接入。</span>
-              </h2>
+        <section
+          id="integration"
+          className="integration-section"
+          aria-labelledby="integration-title"
+        >
+          <div className="home-container">
+            <div className="integration-heading">
+              <div>
+                <div className="home-eyebrow">03 / OPEN BY DESIGN</div>
+                <h2 id="integration-title">
+                  接入熟悉的协议，<br />
+                  <span>扩展自己的可能。</span>
+                </h2>
+              </div>
               <p>
-                在已获授权的资源组中创建网关 Key，配置到应用。
-                <br />
-                无需分发上游账号凭证，沿用熟悉的 API 调用方式。
+                以标准协议连接应用，以 WASM 插件定制处理逻辑。<br />
+                从即刻接入，到按需扩展。
               </p>
-              <a
-                className="home-button home-button-light"
-                href={consolePagePaths.gatewayApiKeys}
-              >
-                管理 API Key <ArrowUpRight size={17} />
-              </a>
-              <span className="integration-note">
-                使用平台提供的注册码加入工作空间；首位注册者成为空间管理员。
-              </span>
             </div>
-            <div className="code-window">
-              <div className="code-window-bar">
-                <span>
-                  <Terminal size={14} /> 第一个请求
-                </span>
-                <span>cURL</span>
-              </div>
-              <div className="code-toolbar">
-                <div
-                  className="code-tabs"
-                  role="tablist"
-                  aria-label="API 接入示例"
-                >
-                  {examples.map((item, index) => (
-                    <button
-                      id={`example-tab-${item.id}`}
-                      key={item.id}
-                      role="tab"
-                      type="button"
-                      aria-selected={exampleIndex === index}
-                      aria-controls="example-panel"
-                      tabIndex={exampleIndex === index ? 0 : -1}
-                      className={exampleIndex === index ? "active" : ""}
-                      onClick={() => {
-                        setExampleIndex(index);
-                        setCopyStatus("idle");
-                      }}
-                      onKeyDown={(event) => {
-                        const next =
-                          event.key === "ArrowRight"
-                            ? (index + 1) % examples.length
-                            : event.key === "ArrowLeft"
-                              ? (index + examples.length - 1) % examples.length
-                              : event.key === "Home"
-                                ? 0
-                                : event.key === "End"
-                                  ? examples.length - 1
-                                  : null;
-                        if (next !== null) {
-                          event.preventDefault();
-                          setExampleIndex(next);
-                          setCopyStatus("idle");
-                          document
-                            .getElementById(`example-tab-${examples[next].id}`)
-                            ?.focus();
-                        }
-                      }}
-                    >
-                      {item.label}
-                    </button>
-                  ))}
+
+            <div className="integration-features">
+              <article className="integration-card protocol-feature">
+                <div className="integration-card-label">
+                  <Code2 size={18} strokeWidth={1.5} />
+                  <span>STANDARD PROTOCOLS</span>
                 </div>
-                <button
-                  className="copy-code"
-                  type="button"
-                  onClick={() => void copyExample()}
-                  aria-label="复制接入示例"
+                <h3>熟悉的 API，<br />连接更丰富的 AI 能力。</h3>
+                <p className="integration-description">
+                  提供 OpenAI 与 Anthropic 风格接口，沿用熟悉的调用方式。
+                  配置网关地址与 Key，将 AI 能力接入你的应用与工作流。
+                </p>
+                <div className="protocol-interface">
+                  <div className="protocol-interface-heading">
+                    <span>API INTERFACE</span>
+                    <span>兼容协议</span>
+                  </div>
+                  <div className="protocol-endpoint">
+                    <img src={openaiLogo} alt="" />
+                    <span>OpenAI</span>
+                    <code>/v1/responses</code>
+                  </div>
+                  <div className="protocol-endpoint">
+                    <img src={claudeLogo} alt="" />
+                    <span>Anthropic</span>
+                    <code>/v1/messages</code>
+                  </div>
+                  <div className="protocol-capabilities">
+                    <span><Terminal size={13} />文本生成</span>
+                    <span><Image size={13} />图片生成与编辑</span>
+                    <span><Search size={13} />Codex 搜索</span>
+                  </div>
+                </div>
+                <a className="integration-card-link" href={consolePagePaths.gatewayApiKeys}>
+                  配置 API Key <ArrowUpRight size={16} />
+                </a>
+              </article>
+
+              <article className="integration-card wasm-feature">
+                <div className="integration-card-label">
+                  <Blocks size={18} strokeWidth={1.5} />
+                  <span>WEBASSEMBLY PLUGINS</span>
+                </div>
+                <h3>处理逻辑，<br />由你的插件定义。</h3>
+                <p className="integration-description">
+                  为请求、非流式响应与流式响应编写自定义转换。
+                  将插件组合成套件，按 Key 绑定，让协议适配与业务定制灵活落地。
+                </p>
+                <div
+                  className="wasm-visual"
+                  role="img"
+                  aria-label="插件套件包含请求转换插槽，以及按交付模式选择的非流式或流式响应转换插槽。"
                 >
-                  {copyStatus === "copied" ? (
-                    <Check size={15} />
-                  ) : (
-                    <Copy size={15} />
-                  )}
-                  <span>{copyStatus === "copied" ? "已复制" : "复制"}</span>
-                </button>
-              </div>
-              <div
-                id="example-panel"
-                role="tabpanel"
-                aria-labelledby={`example-tab-${example.id}`}
-                tabIndex={0}
-              >
-                <pre>
-                  <code>
-                    {code.split("\n").map((line, index) => (
-                      <span className="code-line" key={index}>
-                        <span className="line-number" aria-hidden="true">
-                          {index + 1}
-                        </span>
-                        <span
-                          className={
-                            line.trim().startsWith('"') ? "code-json" : ""
-                          }
-                        >
-                          {line}
-                        </span>
-                        {"\n"}
-                      </span>
-                    ))}
-                  </code>
-                </pre>
-              </div>
-              <div className="code-footnote" role="status">
-                {copyStatus === "error"
-                  ? "复制失败，请直接选中上方代码复制。"
-                  : copyStatus === "copied"
-                    ? "示例已复制，请替换网关地址、Key 与模型后调用。"
-                    : "替换网关地址、Key，并选择已获授权的模型。"}
-              </div>
+                  <div className="wasm-module">
+                    <Blocks size={29} strokeWidth={1.25} />
+                    <div><strong>WASM</strong><span>你的插件套件</span></div>
+                    <span className="wasm-file">.wasm</span>
+                  </div>
+                  <div className="wasm-slots">
+                    <div><Code2 size={17} /><span>请求转换</span><small>REQUEST</small></div>
+                    <div><Layers3 size={17} /><span>非流式响应</span><small>RESPONSE</small></div>
+                    <div><AudioLines size={17} /><span>流式响应</span><small>STREAM</small></div>
+                  </div>
+                </div>
+                <div className="wasm-feature-footer">
+                  <span>GPT / Claude · OAuth 文本调用</span>
+                  <a className="integration-card-link" href={consolePagePaths.plugins}>
+                    管理插件 <ArrowUpRight size={16} />
+                  </a>
+                </div>
+              </article>
             </div>
           </div>
         </section>
