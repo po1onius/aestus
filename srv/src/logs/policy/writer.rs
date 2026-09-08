@@ -11,12 +11,14 @@ use crate::{
     err::{AppError, AppResult},
     infra::db::{DbPool, get_connection},
     provider::gpt::sql::account::find_email_by_id,
-    request::{events::GptPolicyErrorCode, policy_log::gpt_policy_violation_logs},
+    request::events::GptPolicyErrorCode,
 };
+
+use super::model::gpt_policy_violation_logs;
 
 const POLICY_LOG_QUEUE_CAPACITY: usize = 4096;
 
-pub(super) struct PolicyLogTask {
+pub(in crate::logs) struct PolicyLogTask {
     pub request_id: Uuid,
     pub tenant_id: String,
     pub username: String,
@@ -26,12 +28,12 @@ pub(super) struct PolicyLogTask {
     pub error_code: GptPolicyErrorCode,
 }
 
-pub(super) struct PolicyLogWriter {
+pub(in crate::logs) struct PolicyLogWriter {
     tx: mpsc::Sender<PolicyLogTask>,
 }
 
 impl PolicyLogWriter {
-    pub(super) fn new(db_pool: DbPool) -> (Self, JoinHandle<()>) {
+    pub(in crate::logs) fn new(db_pool: DbPool) -> (Self, JoinHandle<()>) {
         let (tx, mut rx) = mpsc::channel::<PolicyLogTask>(POLICY_LOG_QUEUE_CAPACITY);
         let task = tokio::spawn(async move {
             info!(
@@ -66,7 +68,7 @@ impl PolicyLogWriter {
         (Self { tx }, task)
     }
 
-    pub(super) fn dispatch(&self, task: PolicyLogTask) {
+    pub(in crate::logs) fn dispatch(&self, task: PolicyLogTask) {
         let request_id = task.request_id;
         let resource_id = task.resource_id;
         let error_code = task.error_code.as_str();

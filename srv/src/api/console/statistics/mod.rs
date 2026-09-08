@@ -1,9 +1,7 @@
 //! Dashboard 日志查询、统计与分析接口。
 //!
-//! 本模块拥有 Dashboard 只读查询；后台 worker 只负责异步写入。请求日志明细和当前用户
-//! 用量聚合按独立模块维护，后续 provider、错误率等统计继续在同级扩展。
+//! 日志接口负责 HTTP 参数和授权范围，具体读写归 logs 模块；用量统计独立查询日聚合。
 
-mod calendar;
 pub(super) mod gpt_account_usage;
 mod policy_logs;
 mod request_logs;

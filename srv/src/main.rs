@@ -3,6 +3,7 @@ mod config;
 mod err;
 mod gateway_key;
 mod infra;
+mod logs;
 mod plugin;
 mod provider;
 mod request;
@@ -48,7 +49,12 @@ async fn run() -> err::AppResult<()> {
     let clickhouse = clickhouse::build_client(&config);
     // 请求日志表由部署初始化脚本创建；服务在启动 worker 前同步可配置 TTL，确保任何新写入
     // 都遵循当前保留策略。同步失败代表 ClickHouse 表或权限配置错误，必须终止启动。
-    clickhouse::configure_request_log_retention(&clickhouse, &config).await?;
+    logs::request::configure_retention(
+        &clickhouse,
+        &config.request_log_table,
+        config.request_log_retention_days,
+    )
+    .await?;
     // 组合根显式登记 ChatGPT Codex 专用 cookie store。通用 HTTP client 不感知 GPT，
     // provider 只有在访问 ChatGPT/Codex 账号上游时才会选择对应 client profile。
     let http_clients = HttpClients::build(

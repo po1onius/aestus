@@ -13,7 +13,7 @@ use crate::request::events::{
 };
 
 use super::{
-    super::policy_log::{PolicyLogTask, PolicyLogWriter},
+    super::policy::{PolicyLogTask, PolicyLogWriter},
     writer::RequestLogWriter,
 };
 
@@ -169,14 +169,14 @@ impl RequestLogEntry {
 ///
 /// 单个事件消费循环按接收顺序调用本类型，因此普通 `HashMap` 已足够，不需要请求热路径
 /// 共享锁或 `DashMap`。事件缺失只影响日志完整性，不会回调或阻塞核心请求。
-pub(super) struct RequestLogLifecycle {
+pub(in crate::logs) struct RequestLogLifecycle {
     entries: HashMap<Uuid, RequestLogEntry>,
     writer: RequestLogWriter,
     policy_log: PolicyLogWriter,
 }
 
 impl RequestLogLifecycle {
-    pub(super) fn new(writer: RequestLogWriter, policy_log: PolicyLogWriter) -> Self {
+    pub(in crate::logs) fn new(writer: RequestLogWriter, policy_log: PolicyLogWriter) -> Self {
         Self {
             entries: HashMap::new(),
             writer,
@@ -184,7 +184,7 @@ impl RequestLogLifecycle {
         }
     }
 
-    pub(super) fn handle(&mut self, event: RequestEvent) {
+    pub(in crate::logs) fn handle(&mut self, event: RequestEvent) {
         match event {
             RequestEvent::GptPolicyViolationObserved {
                 request_id,
@@ -487,7 +487,7 @@ impl RequestLogLifecycle {
     }
 
     /// 回收因允许丢失完成事件而残留的聚合条目。
-    pub(super) fn evict_stale_entries(&mut self, now: DateTime<Utc>) {
+    pub(in crate::logs) fn evict_stale_entries(&mut self, now: DateTime<Utc>) {
         let stale_before = now - Duration::hours(REQUEST_LOG_STALE_AFTER_HOURS);
         let stale_request_ids = self
             .entries

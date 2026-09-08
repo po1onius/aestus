@@ -21,7 +21,7 @@ use crate::{
     user::{self, User},
 };
 
-use super::calendar::{current_service_date, local_day_start_utc};
+use crate::logs::calendar::{current_service_date, local_day_start_utc};
 
 const USAGE_YEAR_DAYS: u64 = 365;
 

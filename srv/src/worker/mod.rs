@@ -1,31 +1,24 @@
 //! 非核心后台功能的组合根。
 //!
 //! 核心请求链路只持有 [`RequestEventPublisher`] 并非阻塞地发布事实。本模块私有持有事件
-//! receiver、请求日志投影器、策略日志 writer 和额度执行器；队列或任务故障不会反向改变模型请求。
+//! receiver、日志消费者和额度执行器。日志聚合及写入生命周期由 logs 模块拥有。
 
-mod policy_log;
 mod quota;
-mod request_log;
 
-use std::time::Duration;
-
-use chrono::Utc;
 use chrono_tz::Tz;
 use clickhouse::Client as ClickHouseClient;
-use tokio::{sync::mpsc, task::JoinHandle, time};
+use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::{info, warn};
 
 use crate::{
     infra::db::DbPool,
+    logs::{self, LogsRuntime, RequestLogConsumer},
     request::events::{RequestEvent, RequestEventPublisher},
 };
 
-use policy_log::PolicyLogWriter;
 use quota::{QuotaDeductionTask, QuotaWorker};
-use request_log::RequestLogWorker;
 
 const REQUEST_EVENT_QUEUE_CAPACITY: usize = 4096;
-const REQUEST_LOG_STALE_SWEEP_INTERVAL_SECONDS: u64 = 60;
 
 /// 服务进程持有的全部非核心 worker 任务。
 ///
@@ -33,6 +26,7 @@ const REQUEST_LOG_STALE_SWEEP_INTERVAL_SECONDS: u64 = 60;
 /// 生命周期内保留它；退出或后续启动失败时 Drop 会停止所有后台任务。
 pub struct WorkerRuntime {
     tasks: Vec<JoinHandle<()>>,
+    _logs: LogsRuntime,
 }
 
 impl Drop for WorkerRuntime {
@@ -53,9 +47,12 @@ pub fn start(
     service_timezone: Tz,
 ) -> (RequestEventPublisher, WorkerRuntime) {
     let (publisher, event_rx) = RequestEventPublisher::channel(REQUEST_EVENT_QUEUE_CAPACITY);
-    let (policy_log, policy_log_task) = PolicyLogWriter::new(db_pool.clone());
-    let (request_log, request_log_writer_task) =
-        RequestLogWorker::new(clickhouse, request_log_table, service_timezone, policy_log);
+    let (request_log, logs_runtime) = logs::start(
+        db_pool.clone(),
+        clickhouse,
+        request_log_table,
+        service_timezone,
+    );
     let (quota, quota_task) = QuotaWorker::new(db_pool);
     let event_router_task = spawn_request_event_router(event_rx, request_log, quota);
 
@@ -67,27 +64,18 @@ pub fn start(
     (
         publisher,
         WorkerRuntime {
-            tasks: vec![
-                event_router_task,
-                quota_task,
-                request_log_writer_task,
-                policy_log_task,
-            ],
+            tasks: vec![event_router_task, quota_task],
+            _logs: logs_runtime,
         },
     )
 }
 
 fn spawn_request_event_router(
     mut rx: mpsc::Receiver<RequestEvent>,
-    mut request_log: RequestLogWorker,
+    mut request_log: RequestLogConsumer,
     quota: QuotaWorker,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut stale_sweep = time::interval(Duration::from_secs(
-            REQUEST_LOG_STALE_SWEEP_INTERVAL_SECONDS,
-        ));
-        stale_sweep.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
-
         loop {
             tokio::select! {
                 maybe_event = rx.recv() => {
@@ -112,9 +100,7 @@ fn spawn_request_event_router(
                     }
                     request_log.handle(event);
                 }
-                _ = stale_sweep.tick() => {
-                    request_log.evict_stale_entries(Utc::now());
-                }
+                () = request_log.maintain() => {}
             }
         }
 

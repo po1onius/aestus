@@ -6,20 +6,18 @@ use axum::{
     routing::get,
 };
 use chrono::{DateTime, NaiveDate, Utc};
-use diesel::prelude::*;
-use diesel_async::RunQueryDsl;
 use serde::{Deserialize, Serialize};
-use tracing::{error, info};
+use tracing::info;
 use uuid::Uuid;
 
 use crate::{
     api::console::auth,
     err::{AppError, AppResult},
-    request::policy_log::gpt_policy_violation_logs,
+    logs::policy::{PolicyLogCursor, PolicyLogQuery, PolicyLogRecord, query_policy_log_page},
     state::AppState,
 };
 
-use super::calendar::{current_service_date, local_day_range_utc};
+use crate::logs::calendar::{current_service_date, local_day_range_utc};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -28,23 +26,6 @@ struct ListPolicyLogsQuery {
     date: Option<NaiveDate>,
     before_occurred_at: Option<DateTime<Utc>>,
     before_id: Option<Uuid>,
-}
-
-#[derive(Queryable, Selectable, Serialize)]
-#[diesel(table_name = gpt_policy_violation_logs)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-struct PolicyLogRecord {
-    id: Uuid,
-    username: String,
-    account_email: Option<String>,
-    occurred_at: DateTime<Utc>,
-    error_code: String,
-}
-
-#[derive(Serialize)]
-struct PolicyLogCursor {
-    before_occurred_at: DateTime<Utc>,
-    before_id: Uuid,
 }
 
 #[derive(Serialize)]
@@ -64,8 +45,6 @@ async fn list_policy_logs(
     auth::AdminUser(owner): auth::AdminUser,
     Query(params): Query<ListPolicyLogsQuery>,
 ) -> AppResult<Json<ListPolicyLogsResponse>> {
-    use gpt_policy_violation_logs::dsl;
-
     // 租户范围只取鉴权结果，接口不接受客户端指定租户。
     let tenant_id = owner.tenant_id.as_deref().ok_or(AppError::Forbidden)?;
     let limit = params.limit.unwrap_or(100);
@@ -98,49 +77,26 @@ async fn list_policy_logs(
         }
     };
 
-    let mut query = dsl::gpt_policy_violation_logs
-        .filter(dsl::tenant_id.eq(tenant_id))
-        .filter(dsl::occurred_at.ge(start_at))
-        .filter(dsl::occurred_at.lt(end_at))
-        .into_boxed();
-    if let Some((at, id)) = cursor {
-        query = query.filter(
-            dsl::occurred_at
-                .lt(at)
-                .or(dsl::occurred_at.eq(at).and(dsl::id.lt(id))),
-        );
-    }
     let mut conn = state.db_conn().await?;
-    let mut items = query
-        .order((dsl::occurred_at.desc(), dsl::id.desc()))
-        .limit((limit + 1) as i64)
-        .select(PolicyLogRecord::as_select())
-        .load::<PolicyLogRecord>(&mut conn)
-        .await
-        .map_err(|source| {
-            error!(owner_id = %owner.id, tenant_id, %date, ?cursor, %source, "查询 Policy 日志失败");
-            AppError::DbQuery {
-                message: format!("查询 Policy 日志失败: {source}"),
-            }
-        })?;
-    let has_more = items.len() > limit;
-    items.truncate(limit);
-    let next_cursor = if has_more {
-        items.last().map(|row| PolicyLogCursor {
-            before_occurred_at: row.occurred_at,
-            before_id: row.id,
-        })
-    } else {
-        None
-    };
+    let page = query_policy_log_page(
+        &mut conn,
+        PolicyLogQuery {
+            tenant_id,
+            start_at,
+            end_at,
+            limit,
+            cursor,
+        },
+    )
+    .await?;
     info!(
         owner_id = %owner.id, tenant_id, %date, %timezone, limit, ?cursor,
-        count = items.len(), has_more, "Policy 日志查询完成"
+        count = page.items.len(), has_more = page.next_cursor.is_some(), "Policy 日志查询完成"
     );
     Ok(Json(ListPolicyLogsResponse {
         date,
         timezone: timezone.to_string(),
-        items,
-        next_cursor,
+        items: page.items,
+        next_cursor: page.next_cursor,
     }))
 }

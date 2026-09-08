@@ -1,4 +1,4 @@
-//! Dashboard 日期边界的单一实现。
+//! 日志与用量查询日期边界的单一实现。
 //!
 //! 请求日志与用量统计必须共用服务固定时区；否则同一条请求可能在明细页和
 //! 聚合页被归入不同日期。本模块只负责日历边界计算，不为无效时区做运行时降级。
@@ -8,7 +8,7 @@ use chrono_tz::Tz;
 
 use crate::err::{AppError, AppResult};
 
-pub(super) fn current_service_date(timezone: Tz) -> NaiveDate {
+pub(crate) fn current_service_date(timezone: Tz) -> NaiveDate {
     Utc::now().with_timezone(&timezone).date_naive()
 }
 
@@ -16,7 +16,7 @@ pub(super) fn current_service_date(timezone: Tz) -> NaiveDate {
 ///
 /// 少数 IANA 时区会恰好在午夜向前切换，使 00:00 不存在。逐分钟寻找该日第一个
 /// 有效本地时刻，能覆盖整点、半小时及历史时区切换，不引入固定 24 小时假设。
-pub(super) fn local_day_start_utc(timezone: Tz, date: NaiveDate) -> AppResult<DateTime<Utc>> {
+pub(crate) fn local_day_start_utc(timezone: Tz, date: NaiveDate) -> AppResult<DateTime<Utc>> {
     for minute_of_day in 0..(24 * 60) {
         let hour = minute_of_day / 60;
         let minute = minute_of_day % 60;
@@ -37,7 +37,7 @@ pub(super) fn local_day_start_utc(timezone: Tz, date: NaiveDate) -> AppResult<Da
     })
 }
 
-pub(super) fn local_day_range_utc(
+pub(crate) fn local_day_range_utc(
     timezone: Tz,
     date: NaiveDate,
 ) -> AppResult<(DateTime<Utc>, DateTime<Utc>)> {

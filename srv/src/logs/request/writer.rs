@@ -156,12 +156,12 @@ impl RequestLogRow {
 /// 日志属于 best-effort 能力：队列满或 worker 退出时丢弃当前日志并记录 error，绝不对
 /// 模型响应、资源释放或 SSE 收尾施加反向背压。
 #[derive(Clone)]
-pub(super) struct RequestLogWriter {
+pub(in crate::logs) struct RequestLogWriter {
     tx: mpsc::Sender<FinalizedRequestLogEntry>,
 }
 
 impl RequestLogWriter {
-    pub(super) fn spawn(
+    pub(in crate::logs) fn spawn(
         client: Client,
         table: Arc<str>,
         service_timezone: Tz,

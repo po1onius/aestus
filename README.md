@@ -185,6 +185,17 @@ GPT 搜索上游路径默认是 `/alpha/search`，可通过 `AESTUS_GPT_UPSTREAM
 
 ## 请求日志与用量
 
+业务日志统一由 `srv/src/logs` 模块管理：`request` 负责请求事件聚合、ClickHouse 读写和
+明细保留策略，`policy` 负责策略日志模型及 PostgreSQL 读写，`runtime` 管理日志 writer
+任务和聚合状态的超时回收。请求日志和用量查询共用 `logs/calendar` 的业务日边界计算。
+`worker` 负责请求事件分发及后台消费者组装，额度扣减独立消费 usage 事件；核心请求链路
+继续通过 `request/events` 发布事实，Provider 负责协议识别。控制台日志 API 负责鉴权、
+确定租户与用户范围、校验参数，再调用日志模块查询。程序运行诊断继续由
+`infra/logging` 的 tracing、stdout 和滚动文件承担。
+
+后续业务日志按类型在 `logs` 下扩展自己的模型、写入和查询入口；与模型请求无关的日志
+不经过请求事件聚合。请求日志与 Policy 日志保留各自的存储、分页和权限规则。
+
 调度成功时通过非阻塞 `try_send` 发送上游账号或官方 API Key 的内部 UUID；worker 每次收到
 资源事件就更新请求明细的 `resource_id`，收到结束事件后落库。未收到资源事件时该字段为空。
 队列满时允许丢弃事件，日志处理不影响核心请求。请求日志详情可查看该 ID。
@@ -207,9 +218,9 @@ adapter / observer 只返回识别结果，由通用 proxy / 流包装器发送�
 `error_code`，不使用外键。PostgreSQL writer 根据请求日志聚合的资源 ID，限定本租户和 GPT
 Provider 查询账号 `specific.email`，保存查询时的邮箱快照；资源事件缺失、账号已删除或
 未记录邮箱时保存 NULL。policy 表不保存资源 ID，ClickHouse 请求日志继续保存 `resource_id`。
-策略事件仅携带 `request_id`、发生时间和错误码。请求日志 worker 在已有请求聚合中保存
+策略事件仅携带 `request_id`、发生时间和错误码。日志模块的请求消费者在已有请求聚合中保存
 首次命中；重复事件不覆盖错误码或时间，一个下游请求最多生成一条特殊日志。在请求结束
-或沿用现有 24 小时超时回收流程收尾时，worker 使用已有鉴权快照生成 PostgreSQL 写入任务。
+或沿用现有 24 小时超时回收流程收尾时，日志模块使用已有鉴权快照生成 PostgreSQL 写入任务。
 策略字段仅存在于内存聚合中，不写入 ClickHouse 行或 `extra`，也不回查用户表。收尾时
 缺少鉴权快照会记录警告并跳过特殊日志，普通请求日志仍按原有流程写入。
 发布及 writer 投递均使用有界队列的 `try_send`；队列满允许丢弃，落库失败只记录诊断，
