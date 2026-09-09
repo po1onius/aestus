@@ -11,9 +11,10 @@ interface PolicyLogsPanelProps {
   token: string | null;
   timezone: string;
   refreshRevision: number;
+  onLoadingChange: (loading: boolean) => void;
 }
 
-export function PolicyLogsPanel({ token, timezone, refreshRevision }: PolicyLogsPanelProps) {
+export function PolicyLogsPanel({ token, timezone, refreshRevision, onLoadingChange }: PolicyLogsPanelProps) {
   const [date, setDate] = useState(() => todayInputValue(timezone));
   const [cursors, setCursors] = useState<Array<PolicyLogCursor | null>>([null]);
   const [retryRevision, setRetryRevision] = useState(0);
@@ -34,6 +35,11 @@ export function PolicyLogsPanel({ token, timezone, refreshRevision }: PolicyLogs
   const loading = result?.key !== queryKey;
   const data = loading ? null : result?.data;
   const error = loading ? null : result?.error;
+
+  useEffect(() => {
+    onLoadingChange(loading);
+    return () => onLoadingChange(false);
+  }, [loading, onLoadingChange]);
 
   useEffect(() => {
     const controller = new AbortController();

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { requestJson } from "../../api/client";
+import { useRequestScope } from "../../api/useRequestScope";
 import { providerGroupsPath } from "../../config";
 import { showErrorToast } from "../../lib/errors";
 import type {
@@ -48,30 +48,36 @@ export function useCurrentGroupAccess(
   user: DashboardUser | null,
   token: string | null,
 ) {
+  const { requestJson, beginRequest } = useRequestScope(token);
+  const userId = user?.id;
+  const role = user?.role;
   const [grants, setGrants] = useState<UserGroupGrant[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadedUserId, setLoadedUserId] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
-    if (!user || !token || user.role !== "tenant_user") {
+    const request = beginRequest("group-access");
+    if (!userId || !token || role !== "tenant_user") {
       setGrants([]);
       setLoading(false);
-      setLoadedUserId(user?.role === "tenant_user" ? null : (user?.id ?? null));
+      setLoadedUserId(role === "tenant_user" ? null : (userId ?? null));
       return;
     }
     setLoading(true);
     try {
-      setGrants(
-        await requestJson<UserGroupGrant[]>(`${providerGroupsPath}/access`, undefined, token),
-      );
+      const result = await requestJson<UserGroupGrant[]>(`${providerGroupsPath}/access`, { signal: request.signal }, token);
+      if (request.isCurrent()) setGrants(result);
     } catch (error) {
+      if (!request.isCurrent()) return;
       setGrants([]);
       showErrorToast("分组授权加载失败", error);
     } finally {
-      setLoading(false);
-      setLoadedUserId(user.id);
+      if (request.isCurrent()) {
+        setLoading(false);
+        setLoadedUserId(userId);
+      }
     }
-  }, [token, user]);
+  }, [token, userId, role, beginRequest, requestJson]);
 
   useEffect(() => {
     void reload();

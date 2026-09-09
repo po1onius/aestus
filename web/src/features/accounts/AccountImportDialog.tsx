@@ -1,5 +1,5 @@
 import { ClipboardCheck, ExternalLink, Loader2, Play, Save } from "lucide-react";
-import type { FormEvent } from "react";
+import { useEffect, useState } from "react";
 import { Modal } from "../../components/Modal";
 import { SlidingTabList } from "../../components/SlidingTabList";
 import { defaultGptClientId } from "../../config";
@@ -25,27 +25,24 @@ import type { AccountImportMode, AccountProviderKey, OauthAuthorizationResponse 
 interface AccountImportDialogProps {
   provider: AccountProviderKey;
   providerLabel: string;
-  mode: AccountImportMode;
+  initialMode: AccountImportMode;
   authorization: OauthAuthorizationResponse | null;
-  callbackUrl: string;
-  refreshToken: string;
-  clientId: string;
-  chatgptAccountId: string;
   saving: boolean;
   oauthLoading: boolean;
   onClose: () => void;
-  onModeChange: (mode: AccountImportMode) => void;
   onCreateAuthorization: () => void;
   onCopyAuthorizationUrl: () => void;
-  onCallbackUrlChange: (value: string) => void;
-  onRefreshTokenChange: (value: string) => void;
-  onClientIdChange: (value: string) => void;
-  onChatgptAccountIdChange: (value: string) => void;
-  onSubmitCallback: (event: FormEvent<HTMLFormElement>) => void;
-  onSubmitManual: (event: FormEvent<HTMLFormElement>) => void;
+  onSubmitCallback: (callbackUrl: string) => void;
+  onSubmitManual: (input: { refreshToken: string; clientId: string; chatgptAccountId: string }) => void;
 }
 
 export function AccountImportDialog(props: AccountImportDialogProps) {
+  const [mode, setMode] = useState(props.initialMode);
+  const [callbackUrl, setCallbackUrl] = useState("");
+  const [refreshToken, setRefreshToken] = useState("");
+  const [clientId, setClientId] = useState(defaultGptClientId);
+  const [chatgptAccountId, setChatgptAccountId] = useState("");
+  useEffect(() => { setCallbackUrl(""); }, [props.authorization]);
   const isClaude = props.provider === "claude";
   return (
     <Modal
@@ -58,31 +55,31 @@ export function AccountImportDialog(props: AccountImportDialogProps) {
       {props.provider === "gpt" && (
         <SlidingTabList
           count={2}
-          selectedIndex={props.mode === "oauth" ? 0 : 1}
+          selectedIndex={mode === "oauth" ? 0 : 1}
           ariaLabel="账号导入方式"
         >
           <button
-            className={cx(tabClass, props.mode === "oauth" ? tabSelectedClass : tabIdleClass)}
+            className={cx(tabClass, mode === "oauth" ? tabSelectedClass : tabIdleClass)}
             type="button"
-            onClick={() => props.onModeChange("oauth")}
+            onClick={() => setMode("oauth")}
             role="tab"
-            aria-selected={props.mode === "oauth"}
+            aria-selected={mode === "oauth"}
           >
             <span className={tabContentClass}>OAuth 导入</span>
           </button>
           <button
-            className={cx(tabClass, props.mode === "refreshToken" ? tabSelectedClass : tabIdleClass)}
+            className={cx(tabClass, mode === "refreshToken" ? tabSelectedClass : tabIdleClass)}
             type="button"
-            onClick={() => props.onModeChange("refreshToken")}
+            onClick={() => setMode("refreshToken")}
             role="tab"
-            aria-selected={props.mode === "refreshToken"}
+            aria-selected={mode === "refreshToken"}
           >
             <span className={tabContentClass}>RT 导入</span>
           </button>
         </SlidingTabList>
       )}
 
-      {props.mode === "oauth" ? (
+      {mode === "oauth" ? (
         <div>
           <div className="grid gap-4">
             <button
@@ -149,15 +146,15 @@ export function AccountImportDialog(props: AccountImportDialogProps) {
                 </p>
               </div>
             )}
-            <form className={fieldStack} onSubmit={props.onSubmitCallback}>
+            <form className={fieldStack} onSubmit={event => { event.preventDefault(); props.onSubmitCallback(callbackUrl); }}>
               <label className={fieldLabel} htmlFor="callbackUrl">
                 {isClaude ? "Authorization Result" : "Callback URL"}
               </label>
               <textarea
                 className={textareaClass}
                 id="callbackUrl"
-                value={props.callbackUrl}
-                onChange={(event) => props.onCallbackUrlChange(event.target.value)}
+                value={callbackUrl}
+                onChange={(event) => setCallbackUrl(event.target.value)}
                 maxLength={16 * 1024}
                 rows={4}
                 placeholder={
@@ -168,7 +165,7 @@ export function AccountImportDialog(props: AccountImportDialogProps) {
               />
               <button
                 className={`${buttonPrimary} mt-1 w-full`}
-                disabled={props.saving || props.callbackUrl.trim().length === 0}
+                disabled={props.saving || callbackUrl.trim().length === 0}
               >
                 {props.saving ? <Loader2 className={spinnerClass} size={18} /> : <Save size={18} />}
                 确认
@@ -178,13 +175,13 @@ export function AccountImportDialog(props: AccountImportDialogProps) {
         </div>
       ) : (
         <div>
-          <form className="grid gap-4" onSubmit={props.onSubmitManual}>
+          <form className="grid gap-4" onSubmit={event => { event.preventDefault(); props.onSubmitManual({ refreshToken, clientId, chatgptAccountId }); }}>
             <label className={fieldStack}>
               <span className={fieldLabel}>Client ID</span>
               <input
                 className={inputClass}
-                value={props.clientId}
-                onChange={(event) => props.onClientIdChange(event.target.value)}
+                value={clientId}
+                onChange={(event) => setClientId(event.target.value)}
                 placeholder={defaultGptClientId}
                 autoComplete="off"
                 maxLength={512}
@@ -194,8 +191,8 @@ export function AccountImportDialog(props: AccountImportDialogProps) {
               <span className={fieldLabel}>ChatGPT Account ID</span>
               <input
                 className={inputClass}
-                value={props.chatgptAccountId}
-                onChange={(event) => props.onChatgptAccountIdChange(event.target.value)}
+                value={chatgptAccountId}
+                onChange={(event) => setChatgptAccountId(event.target.value)}
                 placeholder="可选，手动指定 chatgpt_account_id"
                 autoComplete="off"
                 maxLength={512}
@@ -207,8 +204,8 @@ export function AccountImportDialog(props: AccountImportDialogProps) {
               </span>
               <textarea
                 className={textareaClass}
-                value={props.refreshToken}
-                onChange={(event) => props.onRefreshTokenChange(event.target.value)}
+                value={refreshToken}
+                onChange={(event) => setRefreshToken(event.target.value)}
                 rows={5}
                 placeholder="粘贴 refresh_token"
                 maxLength={32 * 1024}
@@ -217,7 +214,7 @@ export function AccountImportDialog(props: AccountImportDialogProps) {
             </label>
             <button
               className={`${buttonPrimary} mt-1 w-full`}
-              disabled={props.saving || props.refreshToken.trim().length === 0}
+              disabled={props.saving || refreshToken.trim().length === 0}
             >
               {props.saving ? <Loader2 className={spinnerClass} size={18} /> : <Save size={18} />}
               保存账号

@@ -49,6 +49,7 @@ interface RequestLogsViewProps extends RequestLogsPageProps {
   onViewChange: (view: RequestLogView) => void;
   token: string | null;
   policyRefreshRevision: number;
+  onPolicyLoadingChange: (loading: boolean) => void;
 }
 
 export function RequestLogsPage(props: RequestLogsViewProps) {
@@ -96,7 +97,7 @@ export function RequestLogsPage(props: RequestLogsViewProps) {
       </SlidingTabList>
       <div id="log-tab-panel" role="tabpanel" aria-labelledby={`log-tab-${props.view}`} tabIndex={0} className="flex min-h-0 min-w-0 flex-1 flex-col">
         {props.view === "policy" ? (
-          <PolicyLogsPanel token={props.token} timezone={props.timezone} refreshRevision={props.policyRefreshRevision} />
+          <PolicyLogsPanel token={props.token} timezone={props.timezone} refreshRevision={props.policyRefreshRevision} onLoadingChange={props.onPolicyLoadingChange} />
         ) : (
           <RequestLogTable {...props} />
         )}

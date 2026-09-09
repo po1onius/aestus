@@ -3,7 +3,7 @@ import { AnimatePresence } from "motion/react";
 import { type FormEvent, useEffect, useState } from "react";
 import { Boxes, Loader2, Plus, Power, RefreshCw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
-import { requestJson } from "../api/client";
+import { useRequestScope } from "../api/useRequestScope";
 import { tenantsPath } from "../config";
 import {
   TenantCodeDialog,
@@ -31,6 +31,7 @@ interface TenantCodeDialogState {
 }
 
 export function TenantsPage({ token, refreshSignal }: TenantsPageProps) {
+  const { requestJson, beginRequest } = useRequestScope(token);
   const [tenants, setTenants] = useState<TenantSummary[]>([]);
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
@@ -46,13 +47,15 @@ export function TenantsPage({ token, refreshSignal }: TenantsPageProps) {
   }, [token, refreshSignal]);
 
   async function loadTenants() {
+    const request = beginRequest("tenants");
     setLoading(true);
     try {
-      setTenants(await requestJson<TenantSummary[]>(tenantsPath, undefined, token));
+      const result = await requestJson<TenantSummary[]>(tenantsPath, { signal: request.signal }, token);
+      if (request.isCurrent()) setTenants(result);
     } catch (error) {
-      showErrorToast("租户加载失败", error);
+      if (request.isCurrent()) showErrorToast("租户加载失败", error);
     } finally {
-      setLoading(false);
+      if (request.isCurrent()) setLoading(false);
     }
   }
 

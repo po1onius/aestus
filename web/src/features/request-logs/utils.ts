@@ -1,14 +1,5 @@
 import type { AccountStatus, RequestLogErrorResponse, RequestLogRecord } from "../../types";
 
-export function requestLogAutoLoadKey(
-  userId: string,
-  date: string,
-  nonSuccessOnly: boolean,
-  tenantId: string,
-) {
-  return `${userId}:${date}:${nonSuccessOnly ? "non-success" : "all"}:${tenantId || "all-tenants"}`;
-}
-
 function logStatusCode(log: RequestLogRecord) {
   return numberFromUnknown(requestLogErrorResponse(log)?.status_code) ?? 0;
 }

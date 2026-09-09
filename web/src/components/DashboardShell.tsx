@@ -33,7 +33,6 @@ interface DashboardShellProps {
   tenant: DashboardTenant | null;
   theme: DashboardTheme;
   refreshing: boolean;
-  overlays: ReactNode;
   children: ReactNode;
   onNavigate: (path: string) => void;
   onRefresh: () => void;
@@ -53,7 +52,7 @@ const sideNavIndicatorPositions = [
 ] as const;
 
 /**
- * 管理面板的稳定壳层：统一侧栏、顶栏、Toast 和浮层挂载位置。
+ * 管理面板的稳定壳层：统一侧栏、顶栏和 Toast。
  * 领域页面作为 children 注入，因此新增 provider 或页面时无需改动壳层布局。
  */
 export function DashboardShell({
@@ -64,7 +63,6 @@ export function DashboardShell({
   tenant,
   theme,
   refreshing,
-  overlays,
   children,
   onNavigate,
   onRefresh,
@@ -185,7 +183,6 @@ export function DashboardShell({
         {children}
         </div>
       </main>
-      {overlays}
     </>
   );
 }

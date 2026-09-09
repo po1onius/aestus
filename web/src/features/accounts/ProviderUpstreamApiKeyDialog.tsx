@@ -1,5 +1,5 @@
 import { Loader2, Save } from "lucide-react";
-import type { FormEvent } from "react";
+import { useState } from "react";
 import { Modal } from "../../components/Modal";
 import {
   buttonPrimary,
@@ -11,20 +11,23 @@ import {
   textareaClass,
 } from "../../lib/ui";
 
-interface ProviderUpstreamApiKeyDialogProps {
-  providerLabel: string;
+export interface ProviderUpstreamApiKeyDialogInput {
   apiKey: string;
   baseUrl: string;
+}
+
+interface ProviderUpstreamApiKeyDialogProps {
+  providerLabel: string;
   baseUrlPlaceholder: string;
   saving: boolean;
-  onApiKeyChange: (value: string) => void;
-  onBaseUrlChange: (value: string) => void;
-  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onSubmit: (input: ProviderUpstreamApiKeyDialogInput) => void;
   onClose: () => void;
 }
 
 /** GPT 与 Claude 共用的官方 API Key 导入边界，provider 只决定文案和默认 Base URL。 */
 export function ProviderUpstreamApiKeyDialog(props: ProviderUpstreamApiKeyDialogProps) {
+  const [apiKey, setApiKey] = useState<string>(() => "");
+  const [baseUrl, setBaseUrl] = useState<string>(() => props.baseUrlPlaceholder);
   return (
     <Modal
       titleId="providerOfficialKeyTitle"
@@ -33,15 +36,15 @@ export function ProviderUpstreamApiKeyDialog(props: ProviderUpstreamApiKeyDialog
       onClose={props.onClose}
     >
       <div>
-        <form className="grid gap-4" onSubmit={props.onSubmit}>
+        <form className="grid gap-4" onSubmit={event => { event.preventDefault(); props.onSubmit({ apiKey, baseUrl }); }}>
           <label className={fieldStack}>
             <span className={fieldLabel}>
               API Key<span className={requiredMark}>*</span>
             </span>
             <textarea
               className={textareaClass}
-              value={props.apiKey}
-              onChange={(event) => props.onApiKeyChange(event.target.value)}
+              value={apiKey}
+              onChange={(event) => setApiKey(event.target.value)}
               rows={4}
               placeholder={`粘贴 ${props.providerLabel} 官方 API Key`}
               maxLength={4 * 1024}
@@ -54,8 +57,8 @@ export function ProviderUpstreamApiKeyDialog(props: ProviderUpstreamApiKeyDialog
             </span>
             <input
               className={inputClass}
-              value={props.baseUrl}
-              onChange={(event) => props.onBaseUrlChange(event.target.value)}
+              value={baseUrl}
+              onChange={(event) => setBaseUrl(event.target.value)}
               placeholder={props.baseUrlPlaceholder}
               autoComplete="off"
               maxLength={2 * 1024}
@@ -66,8 +69,8 @@ export function ProviderUpstreamApiKeyDialog(props: ProviderUpstreamApiKeyDialog
             className={`${buttonPrimary} mt-1 w-full`}
             disabled={
               props.saving ||
-              props.apiKey.trim().length === 0 ||
-              props.baseUrl.trim().length === 0
+              apiKey.trim().length === 0 ||
+              baseUrl.trim().length === 0
             }
           >
             {props.saving ? <Loader2 className={spinnerClass} size={18} /> : <Save size={18} />}

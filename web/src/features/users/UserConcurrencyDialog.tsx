@@ -1,5 +1,5 @@
 import { Loader2, Save } from "lucide-react";
-import type { FormEvent } from "react";
+import { useState } from "react";
 import { Modal } from "../../components/Modal";
 import {
   buttonPrimary,
@@ -11,17 +11,20 @@ import {
 } from "../../lib/ui";
 import type { DashboardUser } from "../../types";
 
+export interface UserConcurrencyDialogInput {
+  value: string;
+}
+
 interface UserConcurrencyDialogProps {
   user: DashboardUser;
-  value: string;
   maxValue: number;
   saving: boolean;
-  onValueChange: (value: string) => void;
-  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onSubmit: (input: UserConcurrencyDialogInput) => void;
   onClose: () => void;
 }
 
 export function UserConcurrencyDialog(props: UserConcurrencyDialogProps) {
+  const [value, setValue] = useState<string>(() => props.user.max_concurrency?.toString() ?? "");
   return (
     <Modal
       titleId="userConcurrencyTitle"
@@ -30,7 +33,7 @@ export function UserConcurrencyDialog(props: UserConcurrencyDialogProps) {
       closeDisabled={props.saving}
       onClose={props.onClose}
     >
-      <form className="grid gap-4" onSubmit={props.onSubmit}>
+      <form className="grid gap-4" onSubmit={event => { event.preventDefault(); props.onSubmit({ value }); }}>
         <label className={fieldStack}>
           <span className={fieldLabel}>每 Provider 最大并发数</span>
           <input
@@ -40,8 +43,8 @@ export function UserConcurrencyDialog(props: UserConcurrencyDialogProps) {
             max={props.maxValue}
             step="1"
             inputMode="numeric"
-            value={props.value}
-            onChange={(event) => props.onValueChange(event.target.value)}
+            value={value}
+            onChange={(event) => setValue(event.target.value)}
             placeholder="不限"
             disabled={props.saving}
             autoFocus

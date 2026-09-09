@@ -39,30 +39,3 @@ export function normalizeDashboardPath(
 function stripTrailingSlash(pathname: string) {
   return pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
 }
-
-export function activePageLoading(
-  activePage: DashboardPage,
-  accountsLoading: boolean,
-  usersLoading: boolean,
-  pluginsLoading: boolean,
-  apiKeysLoading: boolean,
-  requestLogsLoading: boolean,
-  usageLoading: boolean,
-) {
-  if (activePage === "usage") {
-    return usageLoading;
-  }
-  if (activePage === "users") {
-    return usersLoading;
-  }
-  if (activePage === "plugins") {
-    return pluginsLoading;
-  }
-  if (activePage === "gatewayApiKeys") {
-    return apiKeysLoading;
-  }
-  if (activePage === "requestLogs") {
-    return requestLogsLoading;
-  }
-  return accountsLoading;
-}

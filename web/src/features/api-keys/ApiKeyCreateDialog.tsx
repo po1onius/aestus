@@ -1,6 +1,6 @@
 import { pluginSourceLabel } from "../plugins/access";
 import { Loader2, Save } from "lucide-react";
-import type { FormEvent } from "react";
+import { useState } from "react";
 import { Modal } from "../../components/Modal";
 import { ProviderGroupPicker } from "../../components/ProviderGroupPicker";
 import {
@@ -13,36 +13,40 @@ import {
 } from "../../lib/ui";
 import type { PluginSuiteSummary, ProviderGroup } from "../../types";
 
-interface ApiKeyCreateDialogProps {
+export interface ApiKeyCreateDialogInput {
   name: string;
   selectedModels: string[];
+  groupId: string;
+  pluginSuiteId: string;
+}
+
+interface ApiKeyCreateDialogProps {
   saving: boolean;
   groups: ProviderGroup[];
-  groupId: string;
   plugins: PluginSuiteSummary[];
-  pluginSuiteId: string;
-  onNameChange: (value: string) => void;
-  onModelsChange: (models: string[]) => void;
-  onGroupChange: (groupId: string) => void;
-  onPluginChange: (suiteId: string) => void;
-  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onSubmit: (input: ApiKeyCreateDialogInput) => void;
   onClose: () => void;
 }
 
 export function ApiKeyCreateDialog(props: ApiKeyCreateDialogProps) {
-  const selectedGroup = props.groups.find((group) => group.id === props.groupId) ?? null;
-  const selectedModelSet = new Set(props.selectedModels);
+  const [name, setName] = useState<string>(() => "");
+  const [selectedModels, setSelectedModels] = useState<string[]>(() => []);
+  const [groupId, setGroupId] = useState<string>(() => props.groups[0]?.id ?? "");
+  const [pluginSuiteId, setPluginSuiteId] = useState<string>(() => "");
+  function selectGroup(groupId: string) { setGroupId(groupId); setSelectedModels([]); setPluginSuiteId(""); }
+  const selectedGroup = props.groups.find((group) => group.id === groupId) ?? null;
+  const selectedModelSet = new Set(selectedModels);
   const compatiblePlugins = selectedGroup
     ? props.plugins.filter(
-        (plugin) => plugin.provider === selectedGroup.provider && plugin.enabled,
-      )
+      (plugin) => plugin.provider === selectedGroup.provider && plugin.enabled,
+    )
     : [];
 
   function toggleModel(model: string) {
-    props.onModelsChange(
+    setSelectedModels(
       selectedModelSet.has(model)
-        ? props.selectedModels.filter((item) => item !== model)
-        : [...props.selectedModels, model],
+        ? selectedModels.filter((item) => item !== model)
+        : [...selectedModels, model],
     );
   }
 
@@ -54,15 +58,15 @@ export function ApiKeyCreateDialog(props: ApiKeyCreateDialogProps) {
       onClose={props.onClose}
     >
       <div>
-        <form className="grid gap-4" onSubmit={props.onSubmit}>
+        <form className="grid gap-4" onSubmit={event => { event.preventDefault(); props.onSubmit({ name, selectedModels, groupId, pluginSuiteId }); }}>
           <label className={fieldStack}>
             <span className={fieldLabel}>
               名称<span className={requiredMark}>*</span>
             </span>
             <input
               className={inputClass}
-              value={props.name}
-              onChange={(event) => props.onNameChange(event.target.value)}
+              value={name}
+              onChange={(event) => setName(event.target.value)}
               placeholder="例如 production"
               autoComplete="off"
               maxLength={128}
@@ -73,9 +77,9 @@ export function ApiKeyCreateDialog(props: ApiKeyCreateDialogProps) {
             <span className={fieldLabel}>Provider 分组<span className={requiredMark}>*</span></span>
             <ProviderGroupPicker
               groups={props.groups}
-              value={props.groupId}
+              value={groupId}
               disabled={props.saving}
-              onChange={props.onGroupChange}
+              onChange={selectGroup}
             />
           </div>
           <fieldset className={fieldStack} disabled={props.saving || !selectedGroup}>
@@ -106,7 +110,7 @@ export function ApiKeyCreateDialog(props: ApiKeyCreateDialogProps) {
             </div>
             {selectedGroup && (
               <span className="text-xs text-slate-500 dark:text-slate-400">
-                已选择 {props.selectedModels.length}/{selectedGroup.allowed_models.length} 个模型
+                已选择 {selectedModels.length}/{selectedGroup.allowed_models.length} 个模型
               </span>
             )}
           </fieldset>
@@ -114,9 +118,9 @@ export function ApiKeyCreateDialog(props: ApiKeyCreateDialogProps) {
             <span className={fieldLabel}>插件套件</span>
             <select
               className={inputClass}
-              value={props.pluginSuiteId}
+              value={pluginSuiteId}
               disabled={props.saving || !selectedGroup}
-              onChange={(event) => props.onPluginChange(event.target.value)}
+              onChange={(event) => setPluginSuiteId(event.target.value)}
             >
               <option value="">不使用插件</option>
               {compatiblePlugins.map((plugin) => (
@@ -133,9 +137,9 @@ export function ApiKeyCreateDialog(props: ApiKeyCreateDialogProps) {
             className={`${buttonPrimary} mt-1 w-full`}
             disabled={
               props.saving ||
-              !props.groupId ||
-              props.name.trim().length === 0 ||
-              props.selectedModels.length === 0
+              !groupId ||
+              name.trim().length === 0 ||
+              selectedModels.length === 0
             }
           >
             {props.saving ? <Loader2 className={spinnerClass} size={18} /> : <Save size={18} />}

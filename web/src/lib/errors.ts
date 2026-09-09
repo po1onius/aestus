@@ -14,6 +14,7 @@ export function errorMessageFrom(error: unknown) {
 
 /** 统一错误提示出口，后续错误码和 request ID 映射只需在此维护。 */
 export function showErrorToast(title: string, error: unknown, toastId?: string) {
+  if (error instanceof DOMException && error.name === "AbortError") return;
   console.error(`[dashboard] ${title}`, error);
   // 带 token 请求的 401 已由 App 的统一失效处理展示，避免每个业务 catch 再弹一次。
   if (isDashboardAuthError(error)) {

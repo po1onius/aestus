@@ -1,6 +1,6 @@
 import { pluginSourceLabel } from "../plugins/access";
 import { Loader2, Save } from "lucide-react";
-import type { FormEvent } from "react";
+import { useState } from "react";
 import { Modal } from "../../components/Modal";
 import {
   buttonPrimary,
@@ -12,18 +12,21 @@ import {
 } from "../../lib/ui";
 import type { ApiKey, PluginSuiteSummary } from "../../types";
 
+export interface ApiKeyPluginDialogInput {
+  pluginSuiteId: string;
+}
+
 interface ApiKeyPluginDialogProps {
   apiKey: ApiKey;
   plugins: PluginSuiteSummary[];
-  pluginSuiteId: string;
   saving: boolean;
-  onPluginChange: (suiteId: string) => void;
-  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onSubmit: (input: ApiKeyPluginDialogInput) => void;
   onClose: () => void;
 }
 
 /** 只修改网关 Key 的套件绑定，不混入名称、分组或模型白名单编辑状态。 */
 export function ApiKeyPluginDialog(props: ApiKeyPluginDialogProps) {
+  const [pluginSuiteId, setPluginSuiteId] = useState<string>(() => props.apiKey.plugin_suite_id ?? "");
   const compatiblePlugins = props.plugins.filter(
     (plugin) => plugin.provider === props.apiKey.group?.provider && plugin.enabled,
   );
@@ -40,7 +43,7 @@ export function ApiKeyPluginDialog(props: ApiKeyPluginDialogProps) {
       closeDisabled={props.saving}
       onClose={props.onClose}
     >
-      <form className="grid gap-4" onSubmit={props.onSubmit}>
+      <form className="grid gap-4" onSubmit={event => { event.preventDefault(); props.onSubmit({ pluginSuiteId }); }}>
         <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm dark:border-slate-700 dark:bg-slate-950/60">
           <div className="font-medium text-slate-800 dark:text-slate-200">
             {props.apiKey.group?.name ?? "分组已删除，Key 无效"}
@@ -54,9 +57,9 @@ export function ApiKeyPluginDialog(props: ApiKeyPluginDialogProps) {
           <span className={fieldLabel}>插件套件</span>
           <select
             className={inputClass}
-            value={props.pluginSuiteId}
+            value={pluginSuiteId}
             disabled={props.saving}
-            onChange={(event) => props.onPluginChange(event.target.value)}
+            onChange={(event) => setPluginSuiteId(event.target.value)}
           >
             <option value="">不使用插件</option>
             {!currentPlugin && props.apiKey.plugin_suite_id && (
@@ -80,7 +83,7 @@ export function ApiKeyPluginDialog(props: ApiKeyPluginDialogProps) {
 
         <button
           className={`${buttonPrimary} mt-1 w-full`}
-          disabled={props.saving || !props.apiKey.group || props.pluginSuiteId === originalSuiteId}
+          disabled={props.saving || !props.apiKey.group || pluginSuiteId === originalSuiteId}
         >
           {props.saving ? <Loader2 className={spinnerClass} size={18} /> : <Save size={18} />}
           保存插件绑定
