@@ -166,7 +166,7 @@ impl ProviderProtocol for GptImageEditsProxy {
             image_count,
             intermediate_body_bytes,
             transformed_body_bytes = body.len(),
-            "GPT Images edits 请求已归一化为 gpt-image-2 JSON 并注入真实资源凭证"
+            "GPT Images edits 请求已归一化为 gpt-image-2.5 JSON 并注入真实资源凭证"
         );
         Ok(())
     }

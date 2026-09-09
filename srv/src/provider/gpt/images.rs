@@ -1,6 +1,6 @@
 //! OpenAI Images API 与 ChatGPT Codex Images 端点之间的纯协议转换。
 //!
-//! 网关固定使用 `gpt-image-2` buffered 协议，只在调度前限制 `model` 与 `stream`。
+//! 网关固定使用 `gpt-image-2.5` buffered 协议，只在调度前限制 `model` 与 `stream`。
 //! 其他参数保持原值并交给实际 Account/API Key 上游解释，避免网关字段白名单落后于上游。
 
 use std::convert::Infallible;
@@ -12,7 +12,7 @@ use serde_json::{Map, Value};
 
 use crate::provider::protocol::TokenUsage;
 
-pub(super) const CODEX_IMAGE_MODEL: &str = "gpt-image-2";
+pub(super) const CODEX_IMAGE_MODEL: &str = "gpt-image-2.5";
 
 /// 调度前验证调用方请求，并返回用于模型白名单授权和请求日志的有效模型。
 pub(super) fn inspect_generations_body(body: &[u8]) -> Result<&'static str, String> {

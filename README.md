@@ -204,8 +204,8 @@ GPT Codex 套件在 `stream=false` 时由宿主完整读取上游 SSE，交给�
 
 `POST /v1/images/generations` 和 `POST /v1/images/edits` 进入与 Responses 相同的鉴权、
 模型白名单、资源调度、重试、maintenance、额度和请求日志流程。当前公开的是所有 GPT
-资源都能一致执行的 buffered `gpt-image-2` 子集：`model` 可以省略，省略时按
-`gpt-image-2` 授权并向上游显式补齐；显式模型只接受 `gpt-image-2`。共同支持
+资源都能一致执行的 buffered `gpt-image-2.5` 子集：`model` 可以省略，省略时按
+`gpt-image-2.5` 授权并向上游显式补齐；显式模型只接受 `gpt-image-2.5`。共同支持
 `prompt`、`background`、`n`、`quality` 和 `size`，不支持 `stream=true`，其他参数会返回
 请求错误而不会被静默忽略。
 
@@ -226,7 +226,7 @@ JSON 转换，转换结果在同一次网关请求的全部尝试中复用。两
 curl http://127.0.0.1:8080/v1/images/generations \
   -H 'authorization: Bearer <AESTUS_GATEWAY_KEY>' \
   -H 'content-type: application/json' \
-  -d '{"model":"gpt-image-2","prompt":"一只坐在月球上的橘猫","size":"1024x1024"}'
+  -d '{"model":"gpt-image-2.5","prompt":"一只坐在月球上的橘猫","size":"1024x1024"}'
 ```
 
 ```bash

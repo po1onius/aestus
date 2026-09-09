@@ -98,7 +98,7 @@ impl ProviderProtocol for GptImageGenerationsProxy {
             UpstreamResourceKind::ApiKey => (
                 codex_header::build_official_api_key_upstream_headers(&request.headers),
                 // OpenAI Images 在 model 缺失时可能选择其他默认模型。两类资源都物化并
-                // 写入 gpt-image-2，确保调度结果不会改变调用方实际使用的模型。
+                // 写入 gpt-image-2.5，确保调度结果不会改变调用方实际使用的模型。
                 UpstreamRequestBodyMode::MaterializeOriginal,
             ),
         };
@@ -166,7 +166,7 @@ impl ProviderProtocol for GptImageGenerationsProxy {
             resource_id = %resource.id,
             upstream_model = images::CODEX_IMAGE_MODEL,
             transformed_body_bytes = body.len(),
-            "GPT Images 请求已归一化为 gpt-image-2 JSON 并注入真实资源凭证"
+            "GPT Images 请求已归一化为 gpt-image-2.5 JSON 并注入真实资源凭证"
         );
         Ok(())
     }
