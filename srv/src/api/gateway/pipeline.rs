@@ -117,6 +117,7 @@ where
         let model = inspection.requested_model;
         let sticky_key = inspection.sticky_key;
         let log_fields = inspection.log_fields;
+        let normalized_body = inspection.normalized_body;
         state.request_events().emit(RequestEvent::RequestInspected {
             request_id,
             details: RequestInspectionDetails {
@@ -161,6 +162,7 @@ where
             body_cache_request_id = %body.request_id(),
             body_cache_storage = body.storage_kind(),
             body_bytes = body.len(),
+            normalized_body_bytes = normalized_body.as_ref().map(|bytes| bytes.len()),
             body_memory_limit_bytes = state.config().body_memory_limit_bytes,
             "通用 gateway 预处理完成：原始请求已检查、模型已授权、请求体可重放"
         );
@@ -176,6 +178,7 @@ where
                 uri,
                 headers,
                 body,
+                normalized_body,
             },
             group_id,
             sticky_key,

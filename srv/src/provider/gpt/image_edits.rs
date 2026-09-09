@@ -32,7 +32,7 @@ use crate::{
 /// OpenAI `/v1/images/edits` 的 GPT operation adapter。
 ///
 /// 调用方使用 multipart；Codex OAuth Account 和 OpenAI Official API Key 上游都使用
-/// `images[].image_url` JSON。adapter 在 body override 前完成统一转换，因而混合资源组
+/// `images[].image_url` JSON。adapter 在调度前转换一次并复用，因而混合资源组
 /// 共享相同的 model/stream 限制、override、重试、额度和日志语义；其他参数交给上游解释。
 pub struct GptImageEditsProxy;
 
@@ -46,14 +46,14 @@ impl ProviderProtocol for GptImageEditsProxy {
         let content_type = multipart_content_type(headers).map(str::to_owned);
         async move {
             let content_type = content_type.map_err(|message| AppError::BadRequest { message })?;
-            let requested_model = images::inspect_edits_body(&content_type, body)
+            let normalized_body = images::transform_edits_multipart_body(&content_type, body)
                 .await
-                .map_err(|message| AppError::BadRequest { message })?
-                .to_owned();
+                .map_err(|message| AppError::BadRequest { message })?;
             Ok(RequestInspection {
-                requested_model,
+                requested_model: images::CODEX_IMAGE_MODEL.to_owned(),
                 sticky_key: None,
                 log_fields: RequestLogFields::default(),
+                normalized_body: Some(normalized_body),
             })
         }
     }
@@ -115,35 +115,9 @@ impl ProviderProtocol for GptImageEditsProxy {
             method: target.method,
             url: target.url,
             headers,
-            // 两种资源都先物化为 JSON 中间结构，确保 body override 不需要理解调用方
-            // multipart boundary，并在 Account 与 Official API Key 上具有同一语义。
-            body: UpstreamRequestBodyMode::MaterializeOriginal,
+            // 两种资源共用调度前保存的 JSON；proxy 优先使用 normalized_body。
+            body: UpstreamRequestBodyMode::ReplayOriginal,
         })
-    }
-
-    fn transform_body_before_override(
-        resource: &UpstreamResource,
-        request: &ReplayableRequest,
-        body: Bytes,
-    ) -> impl Future<Output = AppResult<Bytes>> + Send {
-        let content_type = multipart_content_type(&request.headers).map(str::to_owned);
-        let resource_id = resource.id;
-        async move {
-            let content_type = content_type.map_err(|message| AppError::ProviderUpstream {
-                provider: Self::provider_name().to_owned(),
-                message: format!(
-                    "图片编辑请求通过调度前检查后丢失 multipart Content-Type: resource_id={resource_id}, {message}"
-                ),
-            })?;
-            images::transform_edits_multipart_body(&content_type, body)
-                .await
-                .map_err(|message| AppError::ProviderUpstream {
-                    provider: Self::provider_name().to_owned(),
-                    message: format!(
-                        "图片编辑请求通过调度前检查后无法再次转换: resource_id={resource_id}, {message}"
-                    ),
-                })
-        }
     }
 
     fn finalize_upstream_request(

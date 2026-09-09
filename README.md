@@ -199,8 +199,10 @@ Account 与 Official API Key 一致的编辑子集不包含 `mask`、`input_fide
 `output_format` 等额外参数。
 
 账号资源会请求 Codex `/images/generations`；官方 API Key 资源请求其 Base URL 下的相同
-路径。图片编辑分别请求 `/images/edits`，两类资源都会在 resource override 后编码成
-包含 data URL 的标准 Images JSON。两个图片上游路径可分别通过
+路径。图片编辑分别请求 `/images/edits`；调度前完成一次 multipart 解析、Base64 编码和
+JSON 转换，转换结果在同一次网关请求的全部尝试中复用。两类资源分别在这份不可变正文上
+应用自己的 resource override，并在覆盖后校验最终 Images JSON，不会沿用上一次尝试的
+覆盖结果。两个图片上游路径可分别通过
 `AESTUS_GPT_UPSTREAM_IMAGE_GENERATIONS_PATH` 和 `AESTUS_GPT_UPSTREAM_IMAGE_EDITS_PATH`
 覆盖。
 

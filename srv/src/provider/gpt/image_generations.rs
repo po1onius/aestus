@@ -46,6 +46,7 @@ impl ProviderProtocol for GptImageGenerationsProxy {
         let result = images::inspect_generations_body(&body)
             .map(str::to_owned)
             .map(|requested_model| RequestInspection {
+                normalized_body: None,
                 requested_model,
                 sticky_key: None,
                 log_fields: RequestLogFields::default(),

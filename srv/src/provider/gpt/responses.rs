@@ -77,6 +77,7 @@ impl ProviderProtocol for GptResponsesProxy {
                     message: format!("请求体 reasoning 字段无法序列化为 JSON: {source}"),
                 })?;
             Ok(RequestInspection {
+                normalized_body: None,
                 requested_model: metadata.model,
                 sticky_key,
                 log_fields: RequestLogFields {

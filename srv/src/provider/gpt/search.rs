@@ -81,6 +81,7 @@ impl ProviderProtocol for GptSearchProxy {
                 })?;
 
             Ok(RequestInspection {
+                normalized_body: None,
                 requested_model: model.to_owned(),
                 // Codex 在同一线程的 search/open/click/find 请求中复用 id。保持资源粘性可
                 // 避免上游的搜索引用或加密上下文被切换到另一个账号后失效。

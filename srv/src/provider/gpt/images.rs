@@ -24,17 +24,6 @@ pub(super) fn transform_generations_body(body: &[u8]) -> Result<Bytes, String> {
     build_codex_generations_body(body).map(Bytes::from)
 }
 
-/// 图片编辑在进入资源调度前完整解析一次 multipart，以便请求格式错误直接按 OpenAI
-/// invalid_request 返回，而不是占用账号后才表现成上游故障。返回值固定为授权模型。
-pub(super) async fn inspect_edits_body(
-    content_type: &str,
-    body: Bytes,
-) -> Result<&'static str, String> {
-    transform_edits_multipart_body(content_type, body)
-        .await
-        .map(|_| CODEX_IMAGE_MODEL)
-}
-
 /// 把调用方 multipart 转成可应用 JSON Merge Patch 的中间结构。
 ///
 /// 图片统一保存为 data URL。Codex Account 与 OpenAI Official 现在都接受相同的
@@ -124,10 +113,9 @@ pub(super) struct FinalizedEditsBody {
 pub(super) fn finalize_edits_body(body: &[u8]) -> Result<FinalizedEditsBody, String> {
     let value: Value = serde_json::from_slice(body)
         .map_err(|error| format!("图片编辑中间请求不是合法 JSON: {error}"))?;
-    let mut output = value
-        .as_object()
-        .cloned()
-        .ok_or_else(|| "图片编辑中间请求必须是 JSON object".to_owned())?;
+    let Value::Object(mut output) = value else {
+        return Err("图片编辑中间请求必须是 JSON object".to_owned());
+    };
     normalize_edits_object(&mut output)?;
     let image_count = output
         .get("images")

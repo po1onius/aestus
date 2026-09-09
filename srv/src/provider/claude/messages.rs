@@ -74,6 +74,7 @@ impl ProviderProtocol for ClaudeMessagesProxy {
                 _ => None,
             };
             Ok(RequestInspection {
+                normalized_body: None,
                 requested_model: metadata.model,
                 sticky_key,
                 log_fields: RequestLogFields {

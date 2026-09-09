@@ -32,11 +32,14 @@ pub const MAX_SSE_ITEM_BYTES: usize = 500 * 1024 * 1024;
 /// provider 对调用方原始请求执行一次协议检查后，交给通用 pipeline 的统一结果。
 ///
 /// provider 内部可以使用私有强类型 DTO 完成 JSON 解析、必填字段校验和协议归一化；通用层
-/// 只消费模型授权、调度粘性与日志所需结果，不持有也不感知 provider 私有解析类型。
+/// 消费模型授权、调度粘性、日志及可复用正文，不持有也不感知 provider 私有解析类型。
 pub struct RequestInspection {
     pub requested_model: String,
     pub sticky_key: Option<String>,
     pub log_fields: RequestLogFields,
+    /// 可选的、与资源无关的归一化正文，供所有原生 attempt 在 override 前复用。
+    /// 保留原始请求缓存供插件使用；Bytes clone 不复制图片等大块内容。
+    pub normalized_body: Option<Bytes>,
 }
 
 /// provider gateway 可以暴露给模型调用方的协议无关错误类别。
@@ -235,12 +238,13 @@ impl UpstreamFeedback {
     }
 }
 
-/// 可供每次上游 attempt 重放的调用方原始请求。
+/// 可供每次上游 attempt 重放的调用方原始请求，以及可选的资源无关归一化正文。
 pub struct ReplayableRequest {
     pub request_id: uuid::Uuid,
     pub uri: Uri,
     pub headers: HeaderMap,
     pub body: CachedBody,
+    pub normalized_body: Option<Bytes>,
 }
 
 /// provider 构造出的上游请求草稿。
@@ -450,8 +454,8 @@ pub trait ProviderProtocol: Send + Sync + 'static {
 
     /// 一次解析并提取通用 pipeline 需要的全部请求信息。
     ///
-    /// 原始 body 仍由请求缓存负责透传和重放；该方法不得修改请求体，也不要把 provider
-    /// 私有 DTO 暴露给通用层。
+    /// 原始 body 仍由请求缓存负责透传和重放；需要预转换的 operation 可返回独立的
+    /// normalized_body，避免调度后及重试时重复转换，不向通用层暴露 provider 私有 DTO。
     /// `headers` 只用于需要结合 Content-Type 解释请求体的协议（例如 Images edits 的
     /// multipart boundary）。普通 JSON 协议可以忽略它。检查允许异步执行，使 adapter
     /// 能直接复用成熟的流式 multipart 解析库，而不在 Tokio runtime 内阻塞线程。
@@ -479,20 +483,9 @@ pub trait ProviderProtocol: Send + Sync + 'static {
         request: &ReplayableRequest,
     ) -> AppResult<UpstreamRequestDraft>;
 
-    /// 在通用 JSON Merge Patch body override 之前，把调用方 wire body 转为可覆盖的
-    /// JSON。默认保持原字节；multipart 等非 JSON operation 必须在此转成中间 JSON，
-    /// 从而继续享有与其他 provider 请求一致的资源级 body override 能力。
-    fn transform_body_before_override(
-        _resource: &UpstreamResource,
-        _request: &ReplayableRequest,
-        body: Bytes,
-    ) -> impl Future<Output = AppResult<Bytes>> + Send {
-        std::future::ready(Ok(body))
-    }
-
     /// 在通用 header/body override 之后，一次性完成 provider 私有的上游请求最终化。
     ///
-    /// `body` 只有在草稿要求物化，或通用 body override 必须应用时才为 `Some`；
+    /// `body` 在已有归一化正文、草稿要求物化或通用 body override 必须应用时为 `Some`；
     /// header-only provider 不应迫使临时文件请求重新读入内存。实现必须在这里最终注入
     /// 真实凭证，从而覆盖调用方或管理员 override 中可能存在的认证 header；也可同时
     /// 替换完整 body，或写入与实际凭证绑定的 attribution。本 hook 不决定或新增重试策略。

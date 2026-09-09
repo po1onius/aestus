@@ -614,29 +614,27 @@ async fn finalize_upstream_request<P: ProviderProtocol>(
     let override_body_applied = !resource.request_override.body.is_empty();
     let provider_requested_body_materialization =
         matches!(&draft.body, UpstreamRequestBodyMode::MaterializeOriginal);
-    let (base_body, body_source) = match draft.body {
-        UpstreamRequestBodyMode::ReplayOriginal if !override_body_applied => {
-            (None, "original_cache")
+    // 调度前已经转换的正文是不可变基底：每个 attempt 只克隆 Bytes 句柄，
+    // 避免重新读取原始 multipart、重复 Base64 编码，也不会复用上一资源的 override。
+    let (base_body, body_source) = if let Some(body) = request.normalized_body.as_ref() {
+        (Some(body.clone()), "normalized_request")
+    } else {
+        match draft.body {
+            UpstreamRequestBodyMode::ReplayOriginal if !override_body_applied => {
+                (None, "original_cache")
+            }
+            UpstreamRequestBodyMode::ReplayOriginal => (
+                Some(request.body.replay_bytes().await?),
+                "override_materialized_original_cache",
+            ),
+            UpstreamRequestBodyMode::MaterializeOriginal => (
+                Some(request.body.replay_bytes().await?),
+                "provider_materialized_original_cache",
+            ),
         }
-        UpstreamRequestBodyMode::ReplayOriginal => (
-            Some(request.body.replay_bytes().await?),
-            "override_materialized_original_cache",
-        ),
-        UpstreamRequestBodyMode::MaterializeOriginal => (
-            Some(request.body.replay_bytes().await?),
-            "provider_materialized_original_cache",
-        ),
     };
 
-    // 通用 override 先处理两个请求要素；provider 随后在一个 hook 内同时最终化真实凭证
-    // header 和可选 body attribution，确保调用方或管理员都无法覆盖实际资源身份。
-    // multipart 等 operation 会先把 wire body 转成 JSON 中间表示，再进入所有 provider
-    // 共用的 Merge Patch。这样管理员 override 不需要理解 multipart boundary，也不会因
-    // Account/API Key 的上游编码差异失效。
-    let base_body = match base_body {
-        Some(body) => Some(P::transform_body_before_override(resource, request, body).await?),
-        None => None,
-    };
+    // 每个资源独立执行 Merge Patch 和最终协议/凭证校验，归一化基底始终保持不变。
     let mut body = resource.request_override.apply(
         allocation.request_id,
         resource,
