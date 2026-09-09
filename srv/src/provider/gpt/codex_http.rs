@@ -985,18 +985,6 @@ data: {"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded
     }
 
     #[derive(Debug, Deserialize)]
-    struct ResponseCompletedEvent {
-        #[serde(rename = "type")]
-        event_type: Option<String>,
-        response: Option<ResponseCompletedEnvelope>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    struct ResponseCompletedEnvelope {
-        usage: Option<ResponseCompletedUsage>,
-    }
-
-    #[derive(Debug, Deserialize)]
     struct ResponseCompletedUsage {
         input_tokens: i64,
         input_tokens_details: Option<ResponseCompletedInputTokensDetails>,
@@ -1031,18 +1019,6 @@ data: {"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded
                 total_tokens: value.total_tokens,
             }
         }
-    }
-
-    pub fn parse_response_completed_usage(body: &[u8]) -> Option<CodexTokenUsage> {
-        let event = serde_json::from_slice::<ResponseCompletedEvent>(body).ok()?;
-        if event.event_type.as_deref() != Some("response.completed") {
-            return None;
-        }
-
-        event
-            .response
-            .and_then(|response| response.usage)
-            .map(Into::into)
     }
 
     /// Codex `response.failed` 事件中的错误对象。
@@ -1080,18 +1056,6 @@ data: {"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded
         UsageNotIncluded,
     }
 
-    pub fn parse_response_failed_error(body: &[u8]) -> Option<CodexResponseError> {
-        let value = serde_json::from_slice::<Value>(body).ok()?;
-        if value.get("type").and_then(Value::as_str) != Some("response.failed") {
-            return None;
-        }
-
-        value
-            .get("response")
-            .and_then(|response| response.get("error"))
-            .and_then(|error| serde_json::from_value(error.clone()).ok())
-    }
-
     /// SSE `data:` 行解析结果。
     #[derive(Debug, Clone, PartialEq)]
     pub enum CodexSseData {
@@ -1101,15 +1065,30 @@ data: {"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded
     }
 
     pub fn parse_sse_data_json(data: &[u8]) -> Option<CodexSseData> {
-        if let Some(error) = parse_response_failed_error(data) {
-            return Some(CodexSseData::ResponseFailed(error));
+        // JSON 文本只解析一次；仅对目标事件的少量字段做类型转换，不复制完整 Value。
+        let value: Value = serde_json::from_slice(data).ok()?;
+        match value.get("type").and_then(Value::as_str) {
+            Some("response.failed") => {
+                if let Some(error) = value
+                    .pointer("/response/error")
+                    .and_then(|error| CodexResponseError::deserialize(error).ok())
+                {
+                    return Some(CodexSseData::ResponseFailed(error));
+                }
+            }
+            Some("response.completed") => {
+                if let Some(usage) = value
+                    .pointer("/response/usage")
+                    .and_then(|usage| ResponseCompletedUsage::deserialize(usage).ok())
+                {
+                    return Some(CodexSseData::ResponseCompleted(usage.into()));
+                }
+            }
+            _ => {}
         }
 
-        if let Some(usage) = parse_response_completed_usage(data) {
-            return Some(CodexSseData::ResponseCompleted(usage));
-        }
-
-        serde_json::from_slice(data).ok().map(CodexSseData::Other)
+        // 类型不匹配时仍保留原值，供 observer 按 type/code 识别策略日志。
+        Some(CodexSseData::Other(value))
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1118,28 +1097,35 @@ data: {"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded
         pub delimiter_len: usize,
     }
 
-    pub fn find_sse_event_boundary(buffer: &[u8]) -> Option<SseEventBoundary> {
-        buffer
-            .windows(2)
-            .position(|window| window == b"\n\n")
-            .map(|event_end| SseEventBoundary {
-                event_end,
-                delimiter_len: 2,
-            })
-            .or_else(|| {
-                buffer
-                    .windows(4)
-                    .position(|window| window == b"\r\n\r\n")
-                    .map(|event_end| SseEventBoundary {
-                        event_end,
-                        delimiter_len: 4,
-                    })
-            })
+    /// 从上次扫描位置继续，按字节顺序识别 LF / CRLF 空行。
+    /// 检查新字节时最多回看三个字节，支持分隔符跨 chunk；调用方切分或清空后重置游标。
+    pub fn find_sse_event_boundary(buffer: &[u8], scanned: &mut usize) -> Option<SseEventBoundary> {
+        while *scanned < buffer.len() {
+            let end = *scanned + 1;
+            *scanned = end;
+            if buffer[end - 1] != b'\n' {
+                continue;
+            }
+            let delimiter_len = if end >= 2 && buffer[end - 2] == b'\n' {
+                2
+            } else if end >= 4 && &buffer[end - 4..end] == b"\r\n\r\n" {
+                4
+            } else {
+                continue;
+            };
+            return Some(SseEventBoundary {
+                event_end: end - delimiter_len,
+                delimiter_len,
+            });
+        }
+        None
     }
 
-    pub fn collect_sse_event_data(event: &[u8]) -> Option<String> {
+    pub fn collect_sse_event_data(event: &[u8]) -> Option<std::borrow::Cow<'_, str>> {
+        use std::borrow::Cow;
+
         let text = std::str::from_utf8(event).ok()?;
-        let mut data = String::new();
+        let mut data: Option<Cow<'_, str>> = None;
 
         for line in text.lines() {
             let Some(value) = line.strip_prefix("data:") else {
@@ -1149,17 +1135,14 @@ data: {"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded
             if value == "[DONE]" {
                 return None;
             }
-            data.push_str(value);
+            match data.as_mut() {
+                Some(data) => data.to_mut().push_str(value),
+                // 常见的单行 data 直接借用原始事件，不再复制一份 JSON 字符串。
+                None => data = Some(Cow::Borrowed(value)),
+            }
         }
 
-        (!data.is_empty()).then_some(data)
-    }
-
-    pub fn original_sse_event_bytes(event: &[u8], delimiter: &[u8]) -> Bytes {
-        let mut bytes = Vec::with_capacity(event.len() + delimiter.len());
-        bytes.extend_from_slice(event);
-        bytes.extend_from_slice(delimiter);
-        Bytes::from(bytes)
+        data.filter(|data| !data.is_empty())
     }
 
     pub fn client_retry_failed_event() -> Bytes {

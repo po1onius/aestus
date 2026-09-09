@@ -261,6 +261,10 @@ Official API Key 和由响应插件接管的响应均不参与。这些 Account 
 adapter / observer 只返回识别结果，由通用 proxy / 流包装器发送日志事件；记录只增加日志
 事实，既有响应、maintenance 和请求日志结果判定继续执行。
 
+原生 GPT SSE 按到达顺序增量扫描 LF / CRLF 事件边界，每个事件的 JSON 文本只解析一次，
+用量、错误分类和策略日志复用解析结果。完整事件直接从字节缓冲切分，单行 `data:` 借用
+原始内容；透传保留上游原始字节，需转换的资源故障仍输出既有 client retry 事件。
+
 独立 PostgreSQL 表 `gpt_policy_violation_logs` 保存主键 `id`、鉴权时的 `tenant_id`、
 `username` 快照、上游账号邮箱 `account_email`、实际观察时间 `occurred_at`（TIMESTAMPTZ）和
 `error_code`，不使用外键。PostgreSQL writer 根据请求日志聚合的资源 ID，限定本租户和 GPT

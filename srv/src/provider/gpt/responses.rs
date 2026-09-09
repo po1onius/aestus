@@ -1,6 +1,7 @@
 use std::future::Future;
 
 use axum::{body::Bytes, http::HeaderMap};
+use bytes::BytesMut;
 use tracing::{info, warn};
 
 use crate::{
@@ -268,7 +269,8 @@ async fn process_upstream_response(
 struct GptSseObserver {
     policy_violation: Option<GptPolicyViolation>,
     resource_kind: UpstreamResourceKind,
-    sse_buffer: Vec<u8>,
+    sse_buffer: BytesMut,
+    sse_scanned: usize,
     usage: Option<TokenUsage>,
     error: Option<StreamErrorRecord>,
     feedback_emitted: bool,
@@ -279,7 +281,8 @@ impl GptSseObserver {
         Self {
             policy_violation: None,
             resource_kind,
-            sse_buffer: Vec::with_capacity(8192),
+            sse_buffer: BytesMut::with_capacity(8192),
+            sse_scanned: 0,
             usage: None,
             error: None,
             feedback_emitted: false,
@@ -288,16 +291,16 @@ impl GptSseObserver {
 
     fn process_buffered_events(&mut self) -> StreamUpdate {
         let mut update = StreamUpdate::default();
-        while let Some(boundary) = codex_response::find_sse_event_boundary(&self.sse_buffer) {
-            let event = self
+        while let Some(boundary) =
+            codex_response::find_sse_event_boundary(&self.sse_buffer, &mut self.sse_scanned)
+        {
+            // 将分隔符包含在原始事件中，透传无需搬移剩余字节或重新拼接事件。
+            let original = self
                 .sse_buffer
-                .drain(..boundary.event_end)
-                .collect::<Vec<_>>();
-            let delimiter = self
-                .sse_buffer
-                .drain(..boundary.delimiter_len)
-                .collect::<Vec<_>>();
-            let (output, feedback) = self.inspect_event(&event, &delimiter);
+                .split_to(boundary.event_end + boundary.delimiter_len)
+                .freeze();
+            self.sse_scanned = 0;
+            let (output, feedback) = self.inspect_event(original, boundary.event_end);
             update.output.push_back(output);
             if update.feedback.is_none() {
                 update.feedback = feedback;
@@ -312,7 +315,8 @@ impl GptSseObserver {
             );
             update
                 .output
-                .push_back(Bytes::from(std::mem::take(&mut self.sse_buffer)));
+                .push_back(self.sse_buffer.split().freeze());
+            self.sse_scanned = 0;
         }
         update.policy_violation = self.policy_violation.take();
         update
@@ -320,15 +324,17 @@ impl GptSseObserver {
 
     fn inspect_event(
         &mut self,
-        event: &[u8],
-        delimiter: &[u8],
+        original: Bytes,
+        event_end: usize,
     ) -> (Bytes, Option<UpstreamFeedback>) {
-        let original = codex_response::original_sse_event_bytes(event, delimiter);
-        let Some(data) = codex_response::collect_sse_event_data(event) else {
-            return (original, None);
+        let parsed = {
+            let Some(data) = codex_response::collect_sse_event_data(&original[..event_end]) else {
+                return (original, None);
+            };
+            codex_response::parse_sse_data_json(data.as_bytes())
         };
 
-        match codex_response::parse_sse_data_json(data.as_bytes()) {
+        match parsed {
             Some(CodexSseData::ResponseCompleted(usage)) => {
                 self.record_usage(usage);
                 (original, None)
@@ -433,7 +439,8 @@ impl StreamObserver for GptSseObserver {
         if !self.sse_buffer.is_empty() {
             update
                 .output
-                .push_back(Bytes::from(std::mem::take(&mut self.sse_buffer)));
+                .push_back(self.sse_buffer.split().freeze());
+            self.sse_scanned = 0;
         }
         StreamCompletion {
             policy_violation: update.policy_violation,
