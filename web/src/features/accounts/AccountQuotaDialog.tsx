@@ -4,15 +4,17 @@ import { formatDateTime, formatOptionalDateTime, formatPercent, formatTokenCount
 import { spinnerClass } from "../../lib/ui";
 import type {
   GptAccount,
-  GptAccountQuotaResponse,
+  GptAccountQuotaResult,
+  GptAccountWindowUsage,
   GptQuotaSnapshot,
   GptQuotaWindow,
+  GptWindowUsage,
 } from "../../types";
 import { creditsLabel, quotaStatusLabel } from "./utils";
 
 interface AccountQuotaDialogProps {
   account: GptAccount;
-  response: GptAccountQuotaResponse | null;
+  response: GptAccountQuotaResult | null;
   loading: boolean;
   error: string | null;
   onClose: () => void;
@@ -21,6 +23,9 @@ interface AccountQuotaDialogProps {
 /** GPT 账号额度弹窗集中展示查询状态和上游返回的所有额度窗口。 */
 export function AccountQuotaDialog(props: AccountQuotaDialogProps) {
   const accountLabel = props.account.email || props.account.account_id || props.account.id;
+  const gatewayUsage = props.response && "gateway_usage" in props.response
+    ? props.response.gateway_usage
+    : undefined;
   const snapshots = props.response
     ? props.response.snapshots.length > 0
       ? props.response.snapshots
@@ -68,7 +73,11 @@ export function AccountQuotaDialog(props: AccountQuotaDialogProps) {
           {snapshots.length > 0 ? (
             <div className="grid gap-3">
               {snapshots.map((snapshot, index) => (
-                <QuotaSnapshotCard key={`${snapshot.limit_id}-${index}`} snapshot={snapshot} />
+                <QuotaSnapshotCard
+                  key={`${snapshot.limit_id}-${index}`}
+                  snapshot={snapshot}
+                  gatewayUsage={snapshot.limit_id === "codex" ? gatewayUsage : undefined}
+                />
               ))}
             </div>
           ) : (
@@ -93,7 +102,10 @@ function QuotaSummary({ label, value }: { label: string; value: string }) {
   );
 }
 
-function QuotaSnapshotCard({ snapshot }: { snapshot: GptQuotaSnapshot }) {
+function QuotaSnapshotCard({ snapshot, gatewayUsage }: {
+  snapshot: GptQuotaSnapshot;
+  gatewayUsage?: GptAccountWindowUsage;
+}) {
   const title = snapshot.limit_name || (snapshot.limit_id === "codex" ? "Codex" : snapshot.limit_id);
 
   return (
@@ -114,14 +126,14 @@ function QuotaSnapshotCard({ snapshot }: { snapshot: GptQuotaSnapshot }) {
 
       {snapshot.primary || snapshot.secondary ? (
         <div className="mt-4 grid gap-3 md:grid-cols-2">
-          {snapshot.primary && <QuotaWindowCard label="主窗口" window={snapshot.primary} showGatewayUsage={snapshot.limit_id === "codex"} />}
-          {snapshot.secondary && <QuotaWindowCard label="次窗口" window={snapshot.secondary} showGatewayUsage={snapshot.limit_id === "codex"} />}
+          {snapshot.primary && <QuotaWindowCard label="主窗口" window={snapshot.primary} usage={gatewayUsage?.primary} />}
+          {snapshot.secondary && <QuotaWindowCard label="次窗口" window={snapshot.secondary} usage={gatewayUsage?.secondary} />}
         </div>
       ) : (
         <p className="mt-4 text-sm text-slate-500 dark:text-slate-400">未返回窗口用量。</p>
       )}
 
-      {snapshot.limit_id === "codex" && (snapshot.primary || snapshot.secondary) && (
+      {gatewayUsage && (snapshot.primary || snapshot.secondary) && (
         <p className="mt-3 text-xs leading-5 text-slate-500 dark:text-slate-400">
           Token 按请求开始时间统计至本次查询时间，仅包含本网关已记录的用量。
           窗口时间缺失、已过期或超出日志保留期时无法统计。
@@ -162,7 +174,11 @@ function QuotaSnapshotCard({ snapshot }: { snapshot: GptQuotaSnapshot }) {
   );
 }
 
-function QuotaWindowCard({ label, window, showGatewayUsage }: { label: string; window: GptQuotaWindow; showGatewayUsage: boolean }) {
+function QuotaWindowCard({ label, window, usage }: {
+  label: string;
+  window: GptQuotaWindow;
+  usage?: GptWindowUsage | null;
+}) {
   return (
     <div className="rounded-lg bg-slate-50 px-4 py-3 dark:bg-slate-950/50">
       <p className="text-xs font-medium text-slate-500 dark:text-slate-400">{label}</p>
@@ -176,16 +192,65 @@ function QuotaWindowCard({ label, window, showGatewayUsage }: { label: string; w
           {window.window_minutes !== null ? `${window.window_minutes} 分钟` : "未返回"}
         </span>
         <span>重置：{formatOptionalDateTime(window.resets_at)}</span>
-        {showGatewayUsage && (
+        {usage !== undefined && (
           <>
             <span>窗口开始：{formatOptionalDateTime(window.starts_at)}</span>
             <span className="font-medium text-slate-700 dark:text-slate-300">
               本窗口网关已记录 Token：
-              {window.gateway_total_tokens !== null ? formatTokenCount(window.gateway_total_tokens) : "无法统计"}
+              {usage !== null ? formatTokenCount(usage.total_tokens) : "无法统计"}
             </span>
           </>
         )}
       </div>
+      {usage && (
+        <div className="mt-3 border-t border-slate-200 pt-3 dark:border-slate-800">
+          <p className="text-xs font-medium text-slate-700 dark:text-slate-300">各用户 Token 用量</p>
+          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">占比按本网关本窗口 Token 总量计算。</p>
+          {usage.users.length > 0 ? (
+            <div className="mt-2 max-h-64 overflow-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="text-slate-500 dark:text-slate-400">
+                  <tr>
+                    <th scope="col" className="pb-2 font-medium">用户</th>
+                    <th scope="col" className="pb-2 text-right font-medium">Token</th>
+                    <th scope="col" className="whitespace-nowrap pb-2 pl-3 text-right font-medium">占比</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
+                  {usage.users.map((user) => (
+                    <tr key={user.user_id ?? "unattributed"}>
+                      <td className="py-2 pr-3 text-slate-700 dark:text-slate-300">
+                        <div className="break-all">{user.username || "未记录用户名"}</div>
+                        <div className="mt-0.5 break-all text-[10px] text-slate-500 dark:text-slate-400">
+                          {user.user_id || "未记录用户 ID"}
+                        </div>
+                      </td>
+                      <td className="whitespace-nowrap py-2 text-right tabular-nums text-slate-700 dark:text-slate-300">
+                        {formatTokenCount(user.total_tokens)}
+                      </td>
+                      <td className="whitespace-nowrap py-2 pl-3 text-right tabular-nums text-slate-700 dark:text-slate-300">
+                        {formatWindowTokenShare(user.total_tokens, usage.total_tokens)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">本窗口暂无已记录的 Token 用量。</p>
+          )}
+        </div>
+      )}
     </div>
   );
+}
+
+/** 用整数计算并四舍五入到百分比的小数点后两位，避免 Token 大整数精度丢失。 */
+function formatWindowTokenShare(userTokens: string, windowTokens: string) {
+  const total = BigInt(windowTokens);
+  if (total <= 0n) return "—";
+  const scaled = BigInt(userTokens) * 10000n;
+  if (scaled > 0n && scaled < total) return "<0.01%";
+  const hundredths = (scaled + total / 2n) / total;
+  return `${hundredths / 100n}.${(hundredths % 100n).toString().padStart(2, "0")}%`;
 }

@@ -217,6 +217,27 @@ export interface GptAccountQuotaResponse {
   quota_limit_removed: boolean;
 }
 
+export interface GptAccountQuotaWithUsageResponse extends GptAccountQuotaResponse {
+  gateway_usage: GptAccountWindowUsage;
+}
+
+export type GptAccountQuotaResult = GptAccountQuotaResponse | GptAccountQuotaWithUsageResponse;
+
+/** 仅租户 owner 的接口返回，对应主 Codex 额度的两个窗口。 */
+export interface GptAccountWindowUsage {
+  primary: GptWindowUsage | null;
+  secondary: GptWindowUsage | null;
+}
+
+export interface GptWindowUsage {
+  total_tokens: string;
+  users: {
+    user_id: string | null;
+    username: string | null;
+    total_tokens: string;
+  }[];
+}
+
 export interface GptQuotaSnapshot {
   limit_id: string;
   limit_name: string | null;
@@ -237,7 +258,6 @@ export interface GptQuotaWindow {
   starts_at: string | null;
   resets_at: string | null;
   reset_after_seconds: number | null;
-  gateway_total_tokens: string | null;
 }
 
 export interface GptCreditsSnapshot {

@@ -95,7 +95,7 @@ import type {
   DeleteProviderUpstreamApiKeyResponse,
   DeleteProviderGroupResponse,
   GptAccount,
-  GptAccountQuotaResponse,
+  GptAccountQuotaResult,
   ProviderCredentialTab,
   ProviderGroup,
   ProviderGroupSummary,
@@ -173,7 +173,7 @@ export function App() {
   const [users, setUsers] = useState<DashboardUserListItem[]>([]);
   const [accountQuotaTarget, setAccountQuotaTarget] = useState<GptAccount | null>(null);
   const [accountQuotaResponse, setAccountQuotaResponse] =
-    useState<GptAccountQuotaResponse | null>(null);
+    useState<GptAccountQuotaResult | null>(null);
   const [accountQuotaLoading, setAccountQuotaLoading] = useState(false);
   const [accountQuotaError, setAccountQuotaError] = useState<string | null>(null);
   const [rateLimitResetTarget, setRateLimitResetTarget] = useState<GptAccount | null>(null);
@@ -2357,8 +2357,9 @@ export function App() {
 
   /** 查询账号额度；手动查看与重置成功后的调度状态同步共用同一路径。 */
   async function fetchAccountQuota(account: GptAccount) {
-    const quota = await requestJson<GptAccountQuotaResponse>(
-      `${gptAccountsPath}/${account.id}/quota`,
+    const quotaEndpoint = currentUser?.role === "tenant_owner" ? "quota-with-usage" : "quota";
+    const quota = await requestJson<GptAccountQuotaResult>(
+      `${gptAccountsPath}/${account.id}/${quotaEndpoint}`,
       {
         method: "POST",
       },

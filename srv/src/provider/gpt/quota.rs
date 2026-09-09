@@ -94,9 +94,6 @@ pub struct GptQuotaWindow {
     pub starts_at: Option<DateTime<Utc>>,
     pub resets_at: Option<DateTime<Utc>>,
     pub reset_after_seconds: Option<i64>,
-    /// Dashboard 按账号和窗口汇总的本网关已记录 token；字符串避免前端整数精度丢失。
-    /// 未统计或窗口无法完整查询时为 None，成功查询但没有用量时为 "0"。
-    pub gateway_total_tokens: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -410,7 +407,6 @@ fn map_rate_limit_window(window: RateLimitWindowSnapshot) -> GptQuotaWindow {
         starts_at,
         resets_at,
         reset_after_seconds: window.reset_after_seconds,
-        gateway_total_tokens: None,
     }
 }
 

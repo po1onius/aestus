@@ -119,6 +119,10 @@ pub fn router() -> Router<AppState> {
         .route("/{id}", delete(delete_gpt_account))
         .route("/{id}/quota", post(refresh_gpt_account_quota))
         .route(
+            "/{id}/quota-with-usage",
+            post(refresh_gpt_account_quota_with_usage),
+        )
+        .route(
             "/{id}/rate-limit-reset-credits",
             get(list_gpt_account_rate_limit_reset_credits),
         )
@@ -515,7 +519,45 @@ async fn refresh_gpt_account_quota(
     dash_auth::CurrentUser(current_user): dash_auth::CurrentUser,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<quota::GptAccountQuotaResponse>> {
-    let service = ProviderResourceService::<GptMaintenance>::new(&state);
+    let account = find_quota_account(&state, &current_user, id).await?;
+    let quota = refresh_account_quota(&state, &current_user, &account).await?;
+    Ok(Json(quota))
+}
+
+#[derive(Serialize)]
+struct GptAccountQuotaWithUsageResponse {
+    #[serde(flatten)]
+    quota: quota::GptAccountQuotaResponse,
+    gateway_usage: gpt_account_usage::GptAccountWindowUsage,
+}
+
+/// 跨用户用量仅由租户 owner 专用接口返回，普通额度响应类型不包含这些字段。
+async fn refresh_gpt_account_quota_with_usage(
+    State(state): State<AppState>,
+    dash_auth::AdminUser(owner): dash_auth::AdminUser,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<GptAccountQuotaWithUsageResponse>> {
+    let account = find_quota_account(&state, &owner, id).await?;
+    let quota = refresh_account_quota(&state, &owner, &account).await?;
+    let gateway_usage = gpt_account_usage::query_window_usage(&state, &account, &quota).await?;
+    info!(
+        actor_user_id = %owner.id,
+        tenant_id = %account.tenant_id,
+        gpt_account_id = %account.id,
+        "租户 owner 查询 GPT 账号额度及窗口用户用量完成"
+    );
+    Ok(Json(GptAccountQuotaWithUsageResponse {
+        quota,
+        gateway_usage,
+    }))
+}
+
+async fn find_quota_account(
+    state: &AppState,
+    current_user: &crate::user::User,
+    id: Uuid,
+) -> AppResult<ProviderAccount> {
+    let service = ProviderResourceService::<GptMaintenance>::new(state);
     let tenant_id = current_user.tenant_id.clone().ok_or(AppError::Forbidden)?;
     let account = service
         .find_account(tenant_id.clone(), id)
@@ -529,21 +571,28 @@ async fn refresh_gpt_account_quota(
     let mut conn = state.db_conn().await?;
     group_access::require_permission(
         &mut conn,
-        &current_user,
+        current_user,
         account.group_id,
         GroupPermission::AccountQuotaView,
     )
     .await?;
     drop(conn);
+    Ok(account)
+}
 
+async fn refresh_account_quota(
+    state: &AppState,
+    current_user: &crate::user::User,
+    account: &ProviderAccount,
+) -> AppResult<quota::GptAccountQuotaResponse> {
+    let service = ProviderResourceService::<GptMaintenance>::new(state);
     // 只记录查询发起前仍生效的 quota 快照。查询期间若账号发生任意持久变化，后续 CAS
     // 会拒绝用旧的上游结果清理状态，防止覆盖新到达的额度耗尽回执。
     let limited_snapshot = account
         .quota_resets_at
         .filter(|quota_resets_at| *quota_resets_at > chrono::Utc::now())
         .map(|quota_resets_at| (quota_resets_at, account.updated_at));
-    let mut quota = quota::fetch_account_quota(&state, &account).await?;
-    gpt_account_usage::populate_window_usage(&state, &account, &mut quota).await?;
+    let mut quota = quota::fetch_account_quota(state, account).await?;
     let available_remaining_percent = quota.available_remaining_percent();
 
     if let (Some((expected_quota_resets_at, expected_updated_at)), Some(remaining_percent)) =
@@ -551,7 +600,7 @@ async fn refresh_gpt_account_quota(
     {
         match service
             .clear_account_quota_limit_if_snapshot(
-                tenant_id,
+                account.tenant_id.clone(),
                 account.id,
                 expected_quota_resets_at,
                 expected_updated_at,
@@ -596,7 +645,7 @@ async fn refresh_gpt_account_quota(
         "管理端 GPT 账号额度已刷新"
     );
 
-    Ok(Json(quota))
+    Ok(quota)
 }
 
 /// 查询指定 GPT OAuth 账号可用的人工额度重置记录。
