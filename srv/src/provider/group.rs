@@ -5,7 +5,7 @@ use diesel::prelude::*;
 use diesel::{dsl::now as db_now, pg::expression::extensions::IntervalDsl, sql_types::Timestamptz};
 use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 use serde::Serialize;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -104,7 +104,7 @@ pub struct ProviderGroupWithModels {
     pub allowed_models: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct ProviderGroupCounts {
     pub account_count: i64,
     pub upstream_api_key_count: i64,
@@ -255,9 +255,10 @@ pub async fn list_summaries(
 
     let group_ids = groups.iter().map(|group| group.id).collect::<Vec<_>>();
     let mut models_by_group = load_models_by_group_ids(conn, &group_ids).await?;
+    let mut counts_by_group = load_counts_by_group_ids(conn, &group_ids).await?;
     let mut summaries = Vec::with_capacity(groups.len());
     for group in groups {
-        let counts = load_counts(conn, group.id).await?;
+        let counts = counts_by_group.remove(&group.id).unwrap_or_default();
         let allowed_models = take_required_models(&mut models_by_group, group.id, &group.name)?;
         summaries.push(ProviderGroupSummary {
             group,
@@ -893,41 +894,70 @@ pub async fn delete(
     Ok(deleted)
 }
 
-async fn load_counts(
+/// 只聚合本次可见分组；三张表独立统计，避免多表 JOIN 放大计数。
+async fn load_counts_by_group_ids(
     conn: &mut AsyncPgConnection,
-    group_id: Uuid,
-) -> AppResult<ProviderGroupCounts> {
-    let account_count = provider_accounts::table
-        .filter(provider_accounts::group_id.eq(group_id))
-        .count()
-        .get_result(conn)
+    group_ids: &[Uuid],
+) -> AppResult<HashMap<Uuid, ProviderGroupCounts>> {
+    use diesel::{
+        dsl::{count_star, sql},
+        sql_types::BigInt,
+    };
+
+    let mut counts_by_group = HashMap::<Uuid, ProviderGroupCounts>::with_capacity(group_ids.len());
+    if group_ids.is_empty() {
+        return Ok(counts_by_group);
+    }
+
+    // eq_any 排除了未分组资源，查询结果的 group_id 必定非空。
+    let account_counts = provider_accounts::table
+        .filter(provider_accounts::group_id.eq_any(group_ids))
+        .group_by(provider_accounts::group_id)
+        .select((provider_accounts::group_id.assume_not_null(), count_star()))
+        .load::<(Uuid, i64)>(conn)
         .await
         .map_err(db_error)?;
-    let upstream_api_key_count = provider_api_keys::table
-        .filter(provider_api_keys::group_id.eq(group_id))
-        .count()
-        .get_result(conn)
+    let upstream_api_key_counts = provider_api_keys::table
+        .filter(provider_api_keys::group_id.eq_any(group_ids))
+        .group_by(provider_api_keys::group_id)
+        .select((provider_api_keys::group_id.assume_not_null(), count_star()))
+        .load::<(Uuid, i64)>(conn)
         .await
         .map_err(db_error)?;
-    let gateway_api_key_count = api_keys::table
-        .filter(api_keys::group_id.eq(group_id))
-        .count()
-        .get_result(conn)
+    let gateway_api_key_counts = api_keys::table
+        .filter(api_keys::group_id.eq_any(group_ids))
+        .group_by(api_keys::group_id)
+        .select((
+            api_keys::group_id,
+            count_star(),
+            sql::<BigInt>("COUNT(*) FILTER (WHERE enabled = TRUE)"),
+        ))
+        .load::<(Uuid, i64, i64)>(conn)
         .await
         .map_err(db_error)?;
-    let enabled_gateway_api_key_count = api_keys::table
-        .filter(api_keys::group_id.eq(group_id))
-        .filter(api_keys::enabled.eq(true))
-        .count()
-        .get_result(conn)
-        .await
-        .map_err(db_error)?;
-    Ok(ProviderGroupCounts {
-        account_count,
-        upstream_api_key_count,
-        gateway_api_key_count,
-        enabled_gateway_api_key_count,
-    })
+
+    debug!(
+        group_count = group_ids.len(),
+        account_group_count = account_counts.len(),
+        upstream_api_key_group_count = upstream_api_key_counts.len(),
+        gateway_api_key_group_count = gateway_api_key_counts.len(),
+        "Provider 分组资源统计已通过三次批量聚合查询完成"
+    );
+    for (group_id, count) in account_counts {
+        counts_by_group.entry(group_id).or_default().account_count = count;
+    }
+    for (group_id, count) in upstream_api_key_counts {
+        counts_by_group
+            .entry(group_id)
+            .or_default()
+            .upstream_api_key_count = count;
+    }
+    for (group_id, total, enabled) in gateway_api_key_counts {
+        let counts = counts_by_group.entry(group_id).or_default();
+        counts.gateway_api_key_count = total;
+        counts.enabled_gateway_api_key_count = enabled;
+    }
+    Ok(counts_by_group)
 }
 
 fn map_group_write_error(
