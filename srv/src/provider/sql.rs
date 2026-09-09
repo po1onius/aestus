@@ -102,15 +102,29 @@ pub mod account {
         Ok(account)
     }
 
-    pub async fn list_by_provider(
+    /// 启动同步使用不可变的 created_at/id 游标，复用 Provider 时间索引。
+    /// 并发删除不会像 OFFSET 分页一样跳过后续行；并发新增由写入端同步 runtime。
+    pub async fn list_runtime_sync_page(
         conn: &mut AsyncPgConnection,
         provider: &str,
+        before: Option<(DateTime<Utc>, Uuid)>,
+        limit: i64,
     ) -> AppResult<Vec<ProviderAccount>> {
         use provider_accounts::dsl;
 
-        dsl::provider_accounts
+        let mut query = dsl::provider_accounts
             .filter(dsl::provider.eq(provider))
+            .into_boxed();
+        if let Some((created_at, id)) = before {
+            query = query.filter(
+                dsl::created_at
+                    .lt(created_at)
+                    .or(dsl::created_at.eq(created_at).and(dsl::id.lt(id))),
+            );
+        }
+        query
             .order((dsl::created_at.desc(), dsl::id.desc()))
+            .limit(limit)
             .select(ProviderAccount::as_select())
             .load(conn)
             .await
@@ -653,15 +667,29 @@ pub mod api_key {
         Ok(api_key)
     }
 
-    pub async fn list_by_provider(
+    /// 启动同步使用不可变的 created_at/id 游标，复用 Provider 时间索引。
+    /// 并发删除不会像 OFFSET 分页一样跳过后续行；并发新增由写入端同步 runtime。
+    pub async fn list_runtime_sync_page(
         conn: &mut AsyncPgConnection,
         provider: &str,
+        before: Option<(DateTime<Utc>, Uuid)>,
+        limit: i64,
     ) -> AppResult<Vec<ProviderApiKey>> {
         use provider_api_keys::dsl;
 
-        dsl::provider_api_keys
+        let mut query = dsl::provider_api_keys
             .filter(dsl::provider.eq(provider))
+            .into_boxed();
+        if let Some((created_at, id)) = before {
+            query = query.filter(
+                dsl::created_at
+                    .lt(created_at)
+                    .or(dsl::created_at.eq(created_at).and(dsl::id.lt(id))),
+            );
+        }
+        query
             .order((dsl::created_at.desc(), dsl::id.desc()))
+            .limit(limit)
             .select(ProviderApiKey::as_select())
             .load(conn)
             .await

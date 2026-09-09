@@ -79,8 +79,8 @@ where
                 provider_group_name: auth.group_name().to_owned(),
             },
         });
-    // 用户并发槽位按 provider 独立登记，并覆盖从请求体上传到最终响应 body 结束的完整
-    // 生命周期。同一请求内部的上游重试发生在该 lease 内，不会重复占用用户并发。
+    // 用户并发槽位按 provider 独立登记：普通响应就绪即释放，流式响应持有到流结束。
+    // 上传和内部重试均在该 lease 内，不会重复占用，也不包含普通正文的下载时间。
     let concurrency_lease = match concurrency::acquire(
         state,
         request_id,
@@ -100,7 +100,7 @@ where
             });
         }
     };
-    let execution: AppResult<Response<Body>> = async {
+    let execution: AppResult<proxy::ProxyResponse> = async {
         let (body, inspection_bytes) = body_cache::cache_request_body(
             request,
             request_id,
@@ -203,7 +203,22 @@ where
     .await;
 
     match execution {
-        Ok(response) => Ok(concurrency::hold_response(response, concurrency_lease)),
+        Ok(proxy::ProxyResponse::Buffered(response)) => {
+            // 普通正文已经完整就绪，先释放槽位再交付；无需等待 HTTP 层继续读取 EOF。
+            if let Err(release_error) = concurrency_lease.release().await {
+                error!(
+                    request_id = %request_id,
+                    provider = P::provider_name(),
+                    error = %release_error,
+                    "普通响应就绪后释放用户并发失败，保留原响应；RAII guard 已提交兜底释放"
+                );
+            }
+            Ok(response)
+        }
+        Ok(proxy::ProxyResponse::Streaming(response)) => Ok(concurrency::hold_streaming_response(
+            response,
+            concurrency_lease,
+        )),
         Err(request_error) => {
             if let Err(release_error) = concurrency_lease.release().await {
                 error!(

@@ -213,42 +213,88 @@ fn log_maintenance_job_completion<P: MaintenanceProvider>(
     }
 }
 
-/// 服务启动只按 PostgreSQL 当前事实重建 Redis 投影，不发起 token refresh 或 API Key
-/// probe。所有到期工作留给随后启动的统一 ticker，启动路径不会被 provider 网络阻塞。
+/// 启动只增量同步 PostgreSQL 当前事实，保留其他实例的 runtime、版本和删除标记。
+/// 每页先释放数据库连接再发布投影，避免全量持有凭证或在 Redis I/O 时占用连接。
+/// 并发更新/删除由 store 的版本栅栏裁决；实际同步失败直接阻止本实例启动。
+/// token refresh 和 API Key probe 继续只由随后启动的 ticker 执行。
 pub(super) async fn bootstrap_provider_runtime<P: MaintenanceProvider>(
     state: &AppState,
 ) -> AppResult<usize> {
-    store::clear_runtime_index(state, P::NAME).await?;
-
-    let mut conn = state.db_conn().await?;
-    let accounts = sql::account::list_by_provider(&mut conn, P::NAME).await?;
-    let api_keys = sql::api_key::list_by_provider(&mut conn, P::NAME).await?;
-    drop(conn);
-
+    const PAGE_SIZE: i64 = 256;
     let mut ready_count = 0usize;
-    for account in accounts {
-        match reconcile_account::<P>(state, account).await {
-            Ok(true) => ready_count += 1,
-            Ok(false) => {}
-            Err(error) => {
-                warn!(provider = P::NAME, error = %error, "provider 账号 runtime 重建失败，已跳过")
+    let mut account_count = 0usize;
+    let mut api_key_count = 0usize;
+    let mut before = None;
+    loop {
+        let accounts = {
+            let mut conn = state.db_conn().await?;
+            sql::account::list_runtime_sync_page(&mut conn, P::NAME, before, PAGE_SIZE).await?
+        };
+        let Some(last) = accounts.last() else {
+            break;
+        };
+        before = Some((last.created_at, last.id));
+        let page_count = accounts.len();
+        for account in accounts {
+            let id = account.id;
+            if reconcile_account::<P>(state, account)
+                .await
+                .map_err(|error| {
+                    error!(provider = P::NAME, provider_account_id = %id, error = %error,
+                    "启动同步账号 runtime 失败，本实例停止启动");
+                    error
+                })?
+            {
+                ready_count += 1;
             }
         }
+        account_count += page_count;
+        info!(
+            provider = P::NAME,
+            page_count,
+            synced_account_count = account_count,
+            "启动同步已处理一页账号，保留共享调度状态"
+        );
     }
-    for api_key in api_keys {
-        match reconcile_api_key::<P>(state, api_key).await {
-            Ok(true) => ready_count += 1,
-            Ok(false) => {}
-            Err(error) => {
-                warn!(provider = P::NAME, error = %error, "provider API Key runtime 重建失败，已跳过")
+    before = None;
+    loop {
+        let api_keys = {
+            let mut conn = state.db_conn().await?;
+            sql::api_key::list_runtime_sync_page(&mut conn, P::NAME, before, PAGE_SIZE).await?
+        };
+        let Some(last) = api_keys.last() else {
+            break;
+        };
+        before = Some((last.created_at, last.id));
+        let page_count = api_keys.len();
+        for api_key in api_keys {
+            let id = api_key.id;
+            if reconcile_api_key::<P>(state, api_key)
+                .await
+                .map_err(|error| {
+                    error!(provider = P::NAME, provider_api_key_id = %id, error = %error,
+                    "启动同步官方 Key runtime 失败，本实例停止启动");
+                    error
+                })?
+            {
+                ready_count += 1;
             }
         }
+        api_key_count += page_count;
+        info!(
+            provider = P::NAME,
+            page_count,
+            synced_api_key_count = api_key_count,
+            "启动同步已处理一页官方 Key，保留共享调度状态"
+        );
     }
 
     info!(
         provider = P::NAME,
-        ready_runtime_count = ready_count,
-        "provider 上游资源 runtime 重建完成"
+        account_count,
+        api_key_count,
+        published_ready_count = ready_count,
+        "provider 上游资源增量同步完成；发布数量不代表并发变化中的全局 ready 总数"
     );
     Ok(ready_count)
 }

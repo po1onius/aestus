@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use redis::AsyncCommands;
 use sha2::{Digest, Sha256};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info};
 use uuid::Uuid;
 
 use crate::{
@@ -14,44 +14,10 @@ use crate::{
 const INFLIGHT_SCORE_WEIGHT: i64 = 1_000;
 const STICKY_SCORE_BONUS: i64 = 500;
 
-/// 原子登记一次资源占用。
-///
-/// 每个 lease 都使用独立 token。只有 token 首次写入 registry 时才增加资源 inflight，
-/// 从数据模型上保证 acquire 不会因为命令重放而重复计数。
-const ACQUIRE_LOAD_LUA: &str = r#"
-local current = tonumber(redis.call('HGET', KEYS[1], ARGV[1]) or '0')
-if redis.call('HEXISTS', KEYS[2], ARGV[2]) == 1 then
-    return {0, current}
-end
-redis.call('HSET', KEYS[2], ARGV[2], ARGV[1])
-return {1, redis.call('HINCRBY', KEYS[1], ARGV[1], 1)}
-"#;
+mod lease;
 
-/// 按唯一 lease token 原子释放资源占用。
-///
-/// Redis 命令可能已经执行、但调用方在收到响应前遇到连接取消。显式释放失败后 Drop 会
-/// 重试同一个 token；脚本只有在 registry 中实际删除 token 时才递减 inflight，因此重试
-/// 是严格幂等的，不会误减同一资源上其他请求的占用。
-const RELEASE_LOAD_LUA: &str = r#"
-local registered_member = redis.call('HGET', KEYS[2], ARGV[1])
-local current = tonumber(redis.call('HGET', KEYS[1], ARGV[2]) or '0')
-if not registered_member then
-    if current < 0 then
-        redis.call('HSET', KEYS[1], ARGV[2], 0)
-        current = 0
-    end
-    return {0, current}
-end
-if registered_member ~= ARGV[2] then
-    return {-1, current}
-end
-redis.call('HDEL', KEYS[2], ARGV[1])
-if current <= 1 then
-    redis.call('HSET', KEYS[1], ARGV[2], 0)
-    return {1, 0}
-end
-return {1, redis.call('HINCRBY', KEYS[1], ARGV[2], -1)}
-"#;
+pub use lease::UpstreamLease;
+use lease::read_loads;
 
 #[derive(Debug, Clone)]
 pub struct UpstreamAllocation {
@@ -67,72 +33,6 @@ impl UpstreamAllocation {
 
     pub fn resource_type(&self) -> &'static str {
         self.resource.kind.as_str()
-    }
-}
-
-/// 一次上游资源占用的 RAII lease。
-///
-/// 正常路径通过 `release` 保持原有同步释放和错误传播语义；如果请求 future 在释放前被
-/// 取消或 panic，Drop 会在后台补发同一个幂等释放操作，避免 inflight 计数长期泄漏。
-pub struct UpstreamLease {
-    state: AppState,
-    /// 单次 acquire 的唯一所有权标识；同一请求的不同重试也必须使用不同 token。
-    lease_id: Uuid,
-    allocation: Option<UpstreamAllocation>,
-}
-
-impl UpstreamLease {
-    fn new(state: AppState, lease_id: Uuid, allocation: UpstreamAllocation) -> Self {
-        Self {
-            state,
-            lease_id,
-            allocation: Some(allocation),
-        }
-    }
-
-    pub fn allocation(&self) -> &UpstreamAllocation {
-        self.allocation
-            .as_ref()
-            .expect("尚未释放的 UpstreamLease 必须持有 allocation")
-    }
-
-    pub async fn release(mut self) -> AppResult<()> {
-        let result = release_allocation(&self.state, self.lease_id, self.allocation()).await;
-        if result.is_ok() {
-            self.allocation.take();
-        }
-        result
-    }
-}
-
-impl Drop for UpstreamLease {
-    fn drop(&mut self) {
-        let Some(allocation) = self.allocation.take() else {
-            return;
-        };
-        let state = self.state.clone();
-        let lease_id = self.lease_id;
-        warn!(
-            request_id = %allocation.request_id,
-            lease_id = %lease_id,
-            provider = %allocation.resource.provider,
-            resource_type = allocation.resource_type(),
-            resource_id = %allocation.resource.id,
-            "上游资源 lease 在显式释放前结束，RAII guard 已提交兜底释放"
-        );
-        tokio::spawn(async move {
-            if let Err(error) = release_allocation(&state, lease_id, &allocation).await {
-                error!(
-                    request_id = %allocation.request_id,
-                    lease_id = %lease_id,
-                    provider = %allocation.resource.provider,
-                    resource_type = allocation.resource_type(),
-                    resource_id = %allocation.resource.id,
-                    error = %error,
-                    "RAII guard 兜底释放上游资源失败"
-                );
-            }
-        });
     }
 }
 
@@ -166,7 +66,7 @@ pub async fn acquire(
     let mut redis = state.redis();
     let sticky_hash = sticky_session_key.map(sticky_hash);
     // sticky 候选固定放在首位，使同分情况下继续保持原有的 sticky 优先语义。候选 payload
-    // 由 runtime store 批量读取，下面再用一次 HMGET 取得全部 inflight。
+    // 由 runtime store 批量读取，下面通过一次 pipeline 清理过期租约并取得全部 inflight。
     let mut candidate_resources = Vec::<(String, UpstreamResource, bool)>::new();
 
     if let Some(sticky_hash) = sticky_hash.as_deref()
@@ -230,7 +130,7 @@ pub async fn acquire(
         sticky_candidate = candidate_resources
             .first()
             .is_some_and(|(_, _, sticky_hit)| *sticky_hit),
-        "scheduler 候选 inflight 已通过单次 HMGET 批量读取"
+        "scheduler 候选 inflight 已通过单次 pipeline 清理过期租约并批量读取"
     );
 
     let mut selected = None;
@@ -272,34 +172,7 @@ pub async fn acquire(
         resource: selected.resource,
     };
     let member = allocation.resource_member();
-    let lease_id = Uuid::now_v7();
-    // guard 必须在 Redis await 前创建。如果命令已在 Redis 执行、但 future 随后被取消，
-    // Drop 仍会使用同一个 token 补发幂等释放，不留下无法归属的 inflight。
-    let mut lease = UpstreamLease::new(state.clone(), lease_id, allocation);
-    let acquire_result: Vec<i64> = redis::cmd("EVAL")
-        .arg(ACQUIRE_LOAD_LUA)
-        .arg(2)
-        .arg(load_key(provider))
-        .arg(lease_registry_key(provider))
-        .arg(&member)
-        .arg(lease_id.to_string())
-        .query_async(&mut redis)
-        .await
-        .map_err(redis_error)?;
-    let [registered, new_inflight_count] = acquire_result.as_slice() else {
-        return Err(AppError::Redis {
-            message: "登记 provider 上游资源 lease 时响应格式无效".to_owned(),
-        });
-    };
-    if *registered != 1 {
-        // UUID token 冲突时脚本没有修改任何 Redis 状态，因此必须解除 guard，避免 Drop
-        // 删除另一个请求极低概率持有的同名 token。
-        lease.allocation.take();
-        return Err(AppError::Redis {
-            message: format!("provider 上游资源 lease token 冲突: {lease_id}"),
-        });
-    }
-    let new_inflight_count = *new_inflight_count;
+    let (lease, new_inflight_count) = UpstreamLease::acquire(state.clone(), allocation).await?;
 
     if let Some(sticky_hash) = sticky_hash.as_deref() {
         let ttl = state.config().provider_session_sticky_ttl_seconds.max(1);
@@ -312,7 +185,7 @@ pub async fn acquire(
     let allocation = lease.allocation();
     info!(
         request_id = %allocation.request_id,
-        lease_id = %lease_id,
+        lease_id = %lease.id(),
         provider,
         provider_group_id = %group_id,
         resource_type = allocation.resource_type(),
@@ -325,62 +198,6 @@ pub async fn acquire(
         "provider 上游资源调度成功"
     );
     Ok(lease)
-}
-
-async fn release_allocation(
-    state: &AppState,
-    lease_id: Uuid,
-    allocation: &UpstreamAllocation,
-) -> AppResult<()> {
-    let mut redis = state.redis();
-    let provider = &allocation.resource.provider;
-    let member = allocation.resource_member();
-    let release_result: Vec<i64> = redis::cmd("EVAL")
-        .arg(RELEASE_LOAD_LUA)
-        .arg(2)
-        .arg(load_key(provider))
-        .arg(lease_registry_key(provider))
-        .arg(lease_id.to_string())
-        .arg(&member)
-        .query_async(&mut redis)
-        .await
-        .map_err(redis_error)?;
-    let [released, inflight_count] = release_result.as_slice() else {
-        return Err(AppError::Redis {
-            message: "释放 provider 上游资源 lease 时响应格式无效".to_owned(),
-        });
-    };
-    if *released < 0 {
-        return Err(AppError::Redis {
-            message: format!(
-                "provider 上游资源 lease token 与资源不匹配: lease_id={lease_id}, member={member}"
-            ),
-        });
-    }
-    info!(
-        request_id = %allocation.request_id,
-        lease_id = %lease_id,
-        provider,
-        resource_type = allocation.resource_type(),
-        resource_id = %allocation.resource.id,
-        inflight_count = *inflight_count,
-        release_applied = *released == 1,
-        "provider 上游资源占用已释放"
-    );
-    Ok(())
-}
-
-pub(super) async fn reset_loads(state: &AppState, provider: &str) -> AppResult<()> {
-    let mut redis = state.redis();
-    let deleted_keys: usize = redis
-        .del((load_key(provider), lease_registry_key(provider)))
-        .await
-        .map_err(redis_error)?;
-    info!(
-        provider,
-        deleted_keys, "provider scheduler 遗留负载与 lease registry 已清理"
-    );
-    Ok(())
 }
 
 pub async fn load_views(
@@ -424,41 +241,8 @@ pub async fn load_kind_views(
         .collect())
 }
 
-async fn read_loads(
-    redis: &mut crate::infra::redis::RedisConnection,
-    provider: &str,
-    members: &[String],
-) -> AppResult<Vec<i64>> {
-    if members.is_empty() {
-        return Ok(Vec::new());
-    }
-    let counts: Vec<Option<i64>> = redis::cmd("HMGET")
-        .arg(load_key(provider))
-        .arg(members)
-        .query_async(&mut *redis)
-        .await
-        .map_err(redis_error)?;
-    if counts.len() != members.len() {
-        return Err(AppError::Redis {
-            message: "读取 provider 上游资源负载数量不匹配".to_owned(),
-        });
-    }
-    Ok(counts
-        .into_iter()
-        .map(|count| count.unwrap_or_default().max(0))
-        .collect())
-}
-
 fn score(inflight_count: i64) -> i64 {
     inflight_count.max(0).saturating_mul(INFLIGHT_SCORE_WEIGHT)
-}
-
-fn load_key(provider: &str) -> String {
-    format!("provider:{provider}:resource:load")
-}
-
-fn lease_registry_key(provider: &str) -> String {
-    format!("provider:{provider}:resource:lease")
 }
 
 fn sticky_key(provider: &str, group_id: Uuid, hash: &str) -> String {

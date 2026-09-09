@@ -46,6 +46,13 @@ use crate::{
     state::AppState,
 };
 
+/// 保留最终交付模式，供 gateway 决定用户请求何时结束；不从响应头猜测生命周期。
+/// Streaming 的正文由本模块的字节流构造，不含 HTTP trailers。
+pub enum ProxyResponse {
+    Buffered(Response<Body>),
+    Streaming(Response<Body>),
+}
+
 pub async fn execute<P>(
     state: &AppState,
     request: ReplayableRequest,
@@ -54,7 +61,7 @@ pub async fn execute<P>(
     usage_attribution: UsageAttribution,
     plugin_binding: Option<PluginBinding>,
     plugin_original_body: Option<Bytes>,
-) -> AppResult<Response<Body>>
+) -> AppResult<ProxyResponse>
 where
     P: ProviderProtocol,
 {
@@ -306,8 +313,9 @@ where
                 policy_violation,
             }) => {
                 publish_policy_violation(state, request.request_id, policy_violation);
-                let feedback_result =
-                    apply_optional_feedback::<P::Maintenance>(state, allocation, feedback).await;
+                // 回执独立持有资源快照，不延长已完成请求的负载，也不阻塞最终响应。
+                let _feedback_task =
+                    spawn_feedback_submission::<P::Maintenance>(state, allocation, feedback);
                 if let Some(usage) = usage {
                     state.request_events().emit(RequestEvent::UsageObserved {
                         request_id: request.request_id,
@@ -317,8 +325,8 @@ where
                 }
                 release_buffered_lease::<P>(lease, status, attempt_number, max_attempts, false)
                     .await;
-                feedback_result?;
-                return finish_buffered_response(state, request.request_id, status, headers, body);
+                return finish_buffered_response(state, request.request_id, status, headers, body)
+                    .map(ProxyResponse::Buffered);
             }
             ProtocolResponse::Buffered(BufferedProtocolResponse::Retry {
                 upstream_status,
@@ -326,8 +334,8 @@ where
                 feedback,
             }) => {
                 let retry_next = attempt_number < max_attempts;
-                let feedback_result =
-                    apply_optional_feedback::<P::Maintenance>(state, allocation, feedback).await;
+                let feedback_task =
+                    spawn_feedback_submission::<P::Maintenance>(state, allocation, feedback);
                 if retry_next && exclude_current_resource {
                     exclude_resource_for_retry(
                         &mut excluded_resource_members,
@@ -344,7 +352,14 @@ where
                     retry_next,
                 )
                 .await;
-                feedback_result?;
+                // 先释放已结束 attempt 的负载，再等待状态迁移和隔离；下一次调度仍须
+                // 看到回执结果。请求被取消时，独立任务继续保存已经确认的故障事实。
+                if let Some(task) = feedback_task {
+                    task.await.map_err(|error| AppError::ProviderUpstream {
+                        provider: P::provider_name().to_owned(),
+                        message: format!("上游资源回执任务异常结束: {error}"),
+                    })??;
+                }
 
                 if retry_next {
                     continue;
@@ -372,7 +387,8 @@ where
                     usage_attribution,
                     response,
                     stream_plugin_session,
-                );
+                )
+                .map(ProxyResponse::Streaming);
             }
         }
     }
@@ -446,22 +462,41 @@ fn retry_exhausted_resource_error<P: ProviderProtocol>(
     }
 }
 
-async fn apply_optional_feedback<M: MaintenanceProvider>(
+/// 维护只持有资源快照，与请求的负载租约独立。重试方可等待此任务完成隔离；
+/// 最终响应和流式输出无需等待，任务自身记录结果，调用方取消也不会丢弃已知回执。
+fn spawn_feedback_submission<M: MaintenanceProvider>(
     state: &AppState,
     allocation: &UpstreamAllocation,
     feedback: Option<UpstreamFeedback>,
-) -> AppResult<()> {
-    let Some(feedback) = feedback else {
-        return Ok(());
-    };
-    maintenance::apply_upstream_feedback::<M>(
-        state,
-        allocation.request_id,
-        &allocation.resource,
-        feedback,
-    )
-    .await?;
-    Ok(())
+) -> Option<tokio::task::JoinHandle<AppResult<()>>> {
+    let feedback = feedback?;
+    let state = state.clone();
+    let allocation = allocation.clone();
+    Some(tokio::spawn(async move {
+        let feedback_kind = feedback.as_str();
+        let result = maintenance::apply_upstream_feedback::<M>(
+            &state,
+            allocation.request_id,
+            &allocation.resource,
+            feedback,
+        )
+        .await;
+        match &result {
+            Ok(applied) => info!(
+                request_id = %allocation.request_id, provider = M::NAME,
+                resource_type = allocation.resource_type(), resource_id = %allocation.resource.id,
+                feedback = feedback_kind, resource_feedback_applied = applied,
+                "上游资源回执处理完成，维护任务不占用请求负载"
+            ),
+            Err(error) => error!(
+                request_id = %allocation.request_id, provider = M::NAME,
+                resource_type = allocation.resource_type(), resource_id = %allocation.resource.id,
+                feedback = feedback_kind, error = %error,
+                "上游资源回执处理失败"
+            ),
+        }
+        result.map(|_| ())
+    }))
 }
 
 /// buffered 决策已经由封闭枚举固定，lease 清理失败不能再改变“返回”或“重试”的结果。
@@ -957,10 +992,6 @@ fn build_streaming_response<M: MaintenanceProvider>(
         })
 }
 
-/// feedback future 与下游输出彻底解耦。poll 状态机仍会在输出相关 item 前等待隔离完成；
-/// Drop 收尾则可以独立接管 future，避免客户端取消同时丢失已经确认的资源事实。
-type PendingFeedbackSubmission = Pin<Box<dyn Future<Output = ()> + Send>>;
-
 enum PendingPluginResult {
     Items(StreamPluginBatchOutput),
     Finish(StreamPluginFinishOutput),
@@ -985,6 +1016,9 @@ enum ManagedStreamError {
 struct ManagedUpstreamStream<M: MaintenanceProvider> {
     state: AppState,
     lease: Option<UpstreamLease>,
+    /// 上游 EOF 后插件仍可能产出 usage / feedback，使用独立快照而不继续占用负载。
+    allocation: UpstreamAllocation,
+    finished: bool,
     request_id: uuid::Uuid,
     usage_attribution: UsageAttribution,
     stream: futures_util::stream::BoxStream<'static, Result<Bytes, reqwest::Error>>,
@@ -994,7 +1028,6 @@ struct ManagedUpstreamStream<M: MaintenanceProvider> {
     pending_plugin_work: Option<PendingPluginWork>,
     plugin_upstream_eof: bool,
     output: VecDeque<Bytes>,
-    pending_feedback_submission: Option<PendingFeedbackSubmission>,
     stream_idle_timeout: Option<Duration>,
     stream_idle_sleep: Option<Pin<Box<tokio::time::Sleep>>>,
     pending_stream_error: Option<ManagedStreamError>,
@@ -1031,7 +1064,9 @@ impl<M: MaintenanceProvider> ManagedUpstreamStream<M> {
 
         Self {
             state,
+            allocation: lease.allocation().clone(),
             lease: Some(lease),
+            finished: false,
             request_id,
             usage_attribution,
             stream,
@@ -1041,7 +1076,6 @@ impl<M: MaintenanceProvider> ManagedUpstreamStream<M> {
             pending_plugin_work: None,
             plugin_upstream_eof: false,
             output: VecDeque::new(),
-            pending_feedback_submission: None,
             stream_idle_timeout,
             stream_idle_sleep,
             pending_stream_error: None,
@@ -1051,6 +1085,15 @@ impl<M: MaintenanceProvider> ManagedUpstreamStream<M> {
             usage: None,
             stream_error: None,
             marker: PhantomData,
+        }
+    }
+
+    /// 上游传输结束即移交负载释放；关闭源流，避免错误/取消后的连接继续占用资源。
+    /// 与 finished 分开：下游输出和插件终态处理可以晚于上游 EOF。
+    fn release_load(&mut self, reason: &'static str) {
+        if let Some(lease) = self.lease.take() {
+            self.stream = Box::pin(futures_util::stream::empty());
+            lease.release_in_background(reason);
         }
     }
 
@@ -1099,6 +1142,7 @@ impl<M: MaintenanceProvider> ManagedUpstreamStream<M> {
         // 与 reqwest 传输错误保持一致：先让 provider 完成残余协议解析，再丢弃不能构成
         // 完整 SSE 事件的输出。响应已经交给下游后不能安全重放，但公共网络波动仍不能
         // 归因到当前账号或 API Key，因此这里只终止流，不提交资源回执。
+        self.release_load("idle_timeout");
         self.complete_observer();
         self.output.clear();
         self.stream_error = Some(StreamErrorRecord {
@@ -1202,8 +1246,7 @@ impl<M: MaintenanceProvider> ManagedUpstreamStream<M> {
                 body: format!("{}: {}", failure.kind, failure.message),
             });
         }
-        // output 已先进入队列；start_feedback_submission 不再移动字节，而 poll 顺序保证
-        // pending feedback 完成前这些 item 不会出队。
+        // 回执独立提交，不阻塞字节输出、上游 EOF 检测或负载释放。
         if effects.feedback.is_some() && self.feedback_submitted {
             return Err(AppError::Plugin {
                 message: "stream 插件在同一响应中重复返回 feedback".to_owned(),
@@ -1215,6 +1258,7 @@ impl<M: MaintenanceProvider> ManagedUpstreamStream<M> {
 
     fn fail_plugin(&mut self, message: String) {
         error!(request_id = %self.request_id, provider = M::NAME, error = %message, "stream 响应插件状态机失败");
+        self.release_load("plugin_error");
         self.output.clear();
         self.plugin_sse_buffer.clear();
         self.plugin_session = None;
@@ -1228,7 +1272,7 @@ impl<M: MaintenanceProvider> ManagedUpstreamStream<M> {
 
     /// 在首个非空下游 chunk 产出前发布一次客户端视角的响应开始事实。
     ///
-    /// observer 可能为了拼接完整 SSE event 暂存多个上游 chunk，也可能先等待资源回执；
+    /// observer 可能为了拼接完整 SSE event 暂存多个上游 chunk；
     /// 因此必须在 `output` 真正出队时记录，不能使用上游响应头或原始字节到达时间代替。
     fn mark_response_started_once(&mut self, bytes: &Bytes) {
         if self.response_started_emitted || bytes.is_empty() {
@@ -1251,49 +1295,8 @@ impl<M: MaintenanceProvider> ManagedUpstreamStream<M> {
             return;
         };
         self.feedback_submitted = true;
-        self.start_feedback_submission(feedback);
-    }
-
-    fn start_feedback_submission(&mut self, feedback: UpstreamFeedback) {
-        let Some(allocation) = self.lease.as_ref().map(|lease| lease.allocation().clone()) else {
-            return;
-        };
-        let state = self.state.clone();
-        let feedback_kind = feedback.as_str();
-        let task = tokio::spawn(async move {
-            let result = maintenance::apply_upstream_feedback::<M>(
-                &state,
-                allocation.request_id,
-                &allocation.resource,
-                feedback,
-            )
-            .await;
-            match result {
-                Ok(applied) => info!(
-                    request_id = %allocation.request_id,
-                    provider = M::NAME,
-                    resource_type = allocation.resource_type(),
-                    resource_id = %allocation.resource.id,
-                    feedback = feedback_kind,
-                    resource_feedback_applied = applied,
-                    "流式上游事实的持久状态迁移与 runtime 隔离处理已完成"
-                ),
-                Err(error) => error!(
-                    request_id = %allocation.request_id,
-                    provider = M::NAME,
-                    resource_type = allocation.resource_type(),
-                    resource_id = %allocation.resource.id,
-                    feedback = feedback_kind,
-                    error = %error,
-                    "流式上游事实的持久状态迁移或 runtime 隔离失败"
-                ),
-            }
-        });
-        self.pending_feedback_submission = Some(Box::pin(async move {
-            if let Err(error) = task.await {
-                error!(provider = M::NAME, error = %error, "流式资源回执处理任务异常结束");
-            }
-        }));
+        let _feedback_task =
+            spawn_feedback_submission::<M>(&self.state, &self.allocation, Some(feedback));
     }
 
     fn complete_observer(&mut self) {
@@ -1309,6 +1312,11 @@ impl<M: MaintenanceProvider> ManagedUpstreamStream<M> {
     }
 
     fn finish_once(&mut self, reason: StreamEndReason) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        self.release_load(reason.as_str());
         self.complete_observer();
         if self.plugin_upstream_eof
             && self.pending_plugin_work.is_none()
@@ -1316,9 +1324,6 @@ impl<M: MaintenanceProvider> ManagedUpstreamStream<M> {
         {
             self.start_plugin_finish();
         }
-        let Some(lease) = self.lease.take() else {
-            return;
-        };
         let terminal_facts = StreamTerminalFacts {
             request_id: self.request_id,
             attribution: self.usage_attribution,
@@ -1327,7 +1332,6 @@ impl<M: MaintenanceProvider> ManagedUpstreamStream<M> {
             usage: self.usage.take(),
             error: self.stream_error.take(),
         };
-        let pending_feedback_submission = self.pending_feedback_submission.take();
         let pending_plugin_work = self.pending_plugin_work.take();
         let feedback_already_submitted = self.feedback_submitted;
         let state = self.state.clone();
@@ -1337,19 +1341,13 @@ impl<M: MaintenanceProvider> ManagedUpstreamStream<M> {
             // usage、错误与结束原因。事件发布本身是 try_send，不应因为 maintenance 或
             // lease 清理被推迟到后台任务，更不能额外承担后台任务取消带来的丢失窗口。
             emit_stream_terminal_events(&state, terminal_facts);
-            spawn_stream_resource_cleanup::<M>(
-                state,
-                lease,
-                pending_feedback_submission,
-                None,
-                reason,
-            );
             return;
         };
 
         // 只有下游断开时仍有 item/finish blocking 任务在运行，最终 usage、failure 或
         // feedback 才尚未确定。Drop 不能 await，因此把这一小段事实补全移交后台；事实
-        // 一旦确定就立即投递，后续 maintenance 与 lease release 仍属于独立资源清理层。
+        // 一旦确定就立即投递。负载已经独立释放，此任务只补全日志、用量和维护事实。
+        let allocation = self.allocation.clone();
         tokio::spawn(async move {
             let (terminal_facts, cleanup_feedback) = resolve_pending_plugin_facts::<M>(
                 terminal_facts,
@@ -1358,14 +1356,8 @@ impl<M: MaintenanceProvider> ManagedUpstreamStream<M> {
             )
             .await;
             emit_stream_terminal_events(&state, terminal_facts);
-            finish_stream_resource_cleanup::<M>(
-                state,
-                lease,
-                pending_feedback_submission,
-                cleanup_feedback,
-                reason,
-            )
-            .await;
+            let _feedback_task =
+                spawn_feedback_submission::<M>(&state, &allocation, cleanup_feedback);
         });
     }
 }
@@ -1480,74 +1472,14 @@ async fn resolve_pending_plugin_facts<M: MaintenanceProvider>(
     (facts, cleanup_feedback)
 }
 
-/// 已确定请求终态后的资源清理。已有 feedback 与插件收尾 feedback 都必须先于 release，
-/// 确保故障资源的持久状态和 Redis 隔离完成后再减少 inflight；清理失败只写日志，不反向
-/// 修改已经发生并投递的请求事实。
-fn spawn_stream_resource_cleanup<M: MaintenanceProvider>(
-    state: AppState,
-    lease: UpstreamLease,
-    pending_feedback_submission: Option<PendingFeedbackSubmission>,
-    cleanup_feedback: Option<UpstreamFeedback>,
-    reason: StreamEndReason,
-) {
-    tokio::spawn(finish_stream_resource_cleanup::<M>(
-        state,
-        lease,
-        pending_feedback_submission,
-        cleanup_feedback,
-        reason,
-    ));
-}
-
-async fn finish_stream_resource_cleanup<M: MaintenanceProvider>(
-    state: AppState,
-    lease: UpstreamLease,
-    pending_feedback_submission: Option<PendingFeedbackSubmission>,
-    cleanup_feedback: Option<UpstreamFeedback>,
-    reason: StreamEndReason,
-) {
-    let allocation = lease.allocation().clone();
-    if let Some(submission) = pending_feedback_submission {
-        submission.await;
-    }
-    if let Some(feedback) = cleanup_feedback
-        && let Err(error) = maintenance::apply_upstream_feedback::<M>(
-            &state,
-            allocation.request_id,
-            &allocation.resource,
-            feedback,
-        )
-        .await
-    {
-        error!(request_id = %allocation.request_id, provider = M::NAME, error = %error, "下游断开后的插件 feedback 收尾失败");
-    }
-    if let Err(error) = lease.release().await {
-        error!(
-            request_id = %allocation.request_id,
-            provider = M::NAME,
-            resource_type = allocation.resource_type(),
-            resource_id = %allocation.resource.id,
-            reason = reason.as_str(),
-            error = %error,
-            "流式响应结束后释放上游资源失败"
-        );
-    }
-}
-
 impl<M: MaintenanceProvider> Stream for ManagedUpstreamStream<M> {
     type Item = Result<Bytes, ManagedStreamError>;
 
     fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.finished {
+            return Poll::Ready(None);
+        }
         loop {
-            if let Some(future) = self.pending_feedback_submission.as_mut() {
-                match future.as_mut().poll(context) {
-                    Poll::Ready(()) => {
-                        self.pending_feedback_submission = None;
-                        continue;
-                    }
-                    Poll::Pending => return Poll::Pending,
-                }
-            }
             if let Some(future) = self.pending_plugin_work.as_mut() {
                 match future.as_mut().poll(context) {
                     Poll::Ready(Ok(PendingPluginResult::Items(batch))) => {
@@ -1632,6 +1564,7 @@ impl<M: MaintenanceProvider> Stream for ManagedUpstreamStream<M> {
                             "读取上游 SSE 字节流失败；响应已交给下游，终止当前流且不提交资源回执"
                         );
                     }
+                    self.release_load("upstream_error");
                     self.complete_observer();
                     self.output.clear();
                     self.stream_error = Some(StreamErrorRecord::fluctuation());
@@ -1639,6 +1572,7 @@ impl<M: MaintenanceProvider> Stream for ManagedUpstreamStream<M> {
                     self.stream_idle_sleep = None;
                 }
                 Poll::Ready(None) => {
+                    self.release_load("upstream_eof");
                     self.stream_idle_sleep = None;
                     if self.observer.is_some() {
                         self.complete_observer();
@@ -1696,9 +1630,10 @@ fn ensure_monotonic_usage(previous: Option<TokenUsage>, current: TokenUsage) -> 
 
 impl<M: MaintenanceProvider> Drop for ManagedUpstreamStream<M> {
     fn drop(&mut self) {
-        let Some(allocation) = self.lease.as_ref().map(UpstreamLease::allocation) else {
+        if self.finished {
             return;
-        };
+        }
+        let allocation = &self.allocation;
         warn!(
             request_id = %self.request_id,
             provider = M::NAME,
@@ -1706,12 +1641,10 @@ impl<M: MaintenanceProvider> Drop for ManagedUpstreamStream<M> {
             resource_id = %allocation.resource.id,
             runtime_revision = allocation.resource.revision,
             pending_output_chunks = self.output.len(),
-            feedback_pending = self.pending_feedback_submission.is_some(),
             plugin_pending = self.pending_plugin_work.is_some(),
             "下游在流式响应 EOF 前停止消费，记录 downstream_disconnected 并释放上游资源"
         );
-        // 下游取消不代表资源故障，因此不新增 feedback；已有 provider 错误回执仍移交
-        // 后台等待完成，然后按与其他结束路径相同的顺序释放 inflight lease。
+        // 下游取消先关闭上游并释放负载；已有回执独立运行，插件最终事实随后补全。
         self.finish_once(StreamEndReason::DownstreamDisconnected);
     }
 }

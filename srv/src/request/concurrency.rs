@@ -5,19 +5,10 @@
 //! token，score 是 Redis 服务端时间计算出的过期时间。即使用户当前没有配置上限也会登记
 //! 租约，因此从“不限”调整为有限值后，已经在途的请求仍会被计入。
 
-use std::{
-    collections::HashMap,
-    future::Future,
-    pin::Pin,
-    task::{Context, Poll},
-    time::Duration,
-};
+use std::{collections::HashMap, time::Duration};
 
-use axum::{
-    body::{Body, Bytes, HttpBody},
-    http::Response,
-};
-use hyper::body::{Frame, SizeHint};
+use axum::{body::Body, http::Response};
+use futures_util::{StreamExt, stream};
 use tokio::{
     sync::oneshot,
     task::JoinHandle,
@@ -146,8 +137,8 @@ struct LeaseIdentity {
 
 /// 一个已登记的用户并发槽位。
 ///
-/// 正常响应通过 [`hold_response`] 托管；若 future 被取消或发生 panic，`Drop` 会提交一次
-/// 幂等后台释放，确保租约覆盖完整响应 body 生命周期。
+/// 普通响应就绪后由 gateway 显式释放；流式响应通过 [`hold_streaming_response`] 托管。
+/// 若请求或流被取消、发生 panic，`Drop` 停止续租并提交一次幂等后台释放。
 pub struct UserConcurrencyLease {
     state: AppState,
     identity: Option<LeaseIdentity>,
@@ -266,37 +257,6 @@ impl UserConcurrencyLease {
         }
         result
     }
-
-    fn release_in_background(mut self, completion: &'static str) {
-        self.stop_heartbeat();
-        let Some(identity) = self.identity.take() else {
-            return;
-        };
-        let state = self.state.clone();
-        debug!(
-            request_id = %identity.request_id,
-            lease_id = %identity.lease_id,
-            tenant_id = %identity.tenant_id,
-            user_id = %identity.user_id,
-            provider = identity.provider,
-            completion,
-            "用户并发 lease 已提交后台释放"
-        );
-        tokio::spawn(async move {
-            if let Err(error) = release_identity(&state, &identity).await {
-                error!(
-                    request_id = %identity.request_id,
-                    lease_id = %identity.lease_id,
-                    tenant_id = %identity.tenant_id,
-                    user_id = %identity.user_id,
-                    provider = identity.provider,
-                    completion,
-                    error = %error,
-                    "后台释放用户并发 lease 失败"
-                );
-            }
-        });
-    }
 }
 
 impl Drop for UserConcurrencyLease {
@@ -312,7 +272,7 @@ impl Drop for UserConcurrencyLease {
             tenant_id = %identity.tenant_id,
             user_id = %identity.user_id,
             provider = identity.provider,
-            "用户并发 lease 在显式释放或响应托管前结束，RAII guard 已提交兜底释放"
+            "用户请求或响应流在显式释放前结束，已停止续租并提交后台释放"
         );
         tokio::spawn(async move {
             if let Err(error) = release_identity(&state, &identity).await {
@@ -563,137 +523,34 @@ async fn release_identity(state: &AppState, identity: &LeaseIdentity) -> AppResu
     Ok(())
 }
 
-/// 让并发 lease 覆盖完整的 Axum 响应 body 生命周期。
-///
-/// wrapper 逐个转发底层 `Frame`，包括 trailers。观察到底层 EOF 或 body error 后，会先
-/// 等待 Redis 确认释放，再向 Hyper 返回原始终态，确保正常完成的前一个请求不会与紧随其后
-/// 的请求短暂重叠。客户端提前丢弃 body 时仍通过后台幂等释放收尾。
-pub fn hold_response(response: Response<Body>, lease: UserConcurrencyLease) -> Response<Body> {
-    let identity = lease
-        .identity
-        .as_ref()
-        .expect("交给响应托管的用户并发 lease 必须持有 identity")
-        .clone();
-    response.map(|inner| {
-        Body::new(UserConcurrencyBody {
-            inner,
-            lease: Some(lease),
-            release_future: None,
-            terminal: None,
-            identity,
-        })
+/// 只接管 proxy 明确返回的流式字节响应。普通响应由 gateway 在返回前释放。
+/// 使用现有 Stream 组合器持有 lease，EOF / 错误时先释放再返回终态；不解析 SSE 事件，
+/// 不依赖 Content-Length，也不自行处理 HTTP Frame。流尚未开始、读取中或释放中被
+/// 丢弃时，组合器持有的 lease 都会通过 Drop 停止续租并后台释放。
+pub fn hold_streaming_response(
+    response: Response<Body>,
+    lease: UserConcurrencyLease,
+) -> Response<Body> {
+    response.map(|body| {
+        let stream = stream::try_unfold(
+            (body.into_data_stream(), lease),
+            |(mut stream, lease)| async move {
+                let terminal = match stream.next().await {
+                    Some(Ok(bytes)) => return Ok(Some((bytes, (stream, lease)))),
+                    Some(Err(error)) => Err(error),
+                    None => Ok(None),
+                };
+                // 先销毁源流，让上游连接和插件取消收尾立即发生；用户槽位独立释放。
+                drop(stream);
+                if let Err(error) = lease.release().await {
+                    error!(error = %error,
+                        "流式响应结束时释放用户并发失败，保留原始终态；RAII guard 已提交兜底释放");
+                }
+                terminal
+            },
+        );
+        Body::from_stream(stream)
     })
-}
-
-type ReleaseFuture = Pin<Box<dyn Future<Output = AppResult<()>> + Send + 'static>>;
-
-enum BodyTerminal {
-    Eof,
-    Error(axum::Error),
-}
-
-impl BodyTerminal {
-    const fn as_str(&self) -> &'static str {
-        match self {
-            Self::Eof => "response_body_eof",
-            Self::Error(_) => "response_body_error",
-        }
-    }
-}
-
-struct UserConcurrencyBody {
-    inner: Body,
-    lease: Option<UserConcurrencyLease>,
-    release_future: Option<ReleaseFuture>,
-    terminal: Option<BodyTerminal>,
-    identity: LeaseIdentity,
-}
-
-impl HttpBody for UserConcurrencyBody {
-    type Data = Bytes;
-    type Error = axum::Error;
-
-    fn poll_frame(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        loop {
-            if let Some(release_future) = self.release_future.as_mut() {
-                match release_future.as_mut().poll(cx) {
-                    Poll::Pending => return Poll::Pending,
-                    Poll::Ready(result) => {
-                        self.release_future.take();
-                        let terminal = self
-                            .terminal
-                            .take()
-                            .expect("释放 future 完成时必须保存原始响应终态");
-                        if let Err(error) = result {
-                            error!(
-                                request_id = %self.identity.request_id,
-                                lease_id = %self.identity.lease_id,
-                                tenant_id = %self.identity.tenant_id,
-                                user_id = %self.identity.user_id,
-                                provider = self.identity.provider,
-                                response_terminal = terminal.as_str(),
-                                error = %error,
-                                "响应终态前等待用户并发 lease 释放失败，原始响应终态继续返回"
-                            );
-                        }
-                        return match terminal {
-                            BodyTerminal::Eof => Poll::Ready(None),
-                            BodyTerminal::Error(error) => Poll::Ready(Some(Err(error))),
-                        };
-                    }
-                }
-            }
-
-            match Pin::new(&mut self.inner).poll_frame(cx) {
-                Poll::Ready(None) => {
-                    self.terminal = Some(BodyTerminal::Eof);
-                }
-                Poll::Ready(Some(Err(error))) => {
-                    self.terminal = Some(BodyTerminal::Error(error));
-                }
-                other => return other,
-            }
-
-            let lease = self
-                .lease
-                .take()
-                .expect("首次观察到响应终态时必须仍持有用户并发 lease");
-            self.release_future = Some(Box::pin(lease.release()));
-        }
-    }
-
-    fn is_end_stream(&self) -> bool {
-        // 即使底层已经知道自己为空，也必须让 Hyper 至少 poll 一次本 wrapper，等待 Redis
-        // 释放确认后再观察到真正 EOF。
-        self.lease.is_none()
-            && self.release_future.is_none()
-            && self.terminal.is_none()
-            && self.inner.is_end_stream()
-    }
-
-    fn size_hint(&self) -> SizeHint {
-        self.inner.size_hint()
-    }
-}
-
-impl Drop for UserConcurrencyBody {
-    fn drop(&mut self) {
-        if let Some(lease) = self.lease.take() {
-            lease.release_in_background("response_body_dropped");
-        } else if self.release_future.is_some() {
-            debug!(
-                request_id = %self.identity.request_id,
-                lease_id = %self.identity.lease_id,
-                tenant_id = %self.identity.tenant_id,
-                user_id = %self.identity.user_id,
-                provider = self.identity.provider,
-                "响应 body 在等待用户并发 lease 显式释放期间被丢弃，将由 RAII guard 兜底释放"
-            );
-        }
-    }
 }
 
 fn lease_key(tenant_id: &str, user_id: Uuid, provider: &str) -> String {

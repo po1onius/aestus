@@ -495,28 +495,6 @@ pub(crate) async fn views(
     Ok(views)
 }
 
-pub(crate) async fn clear_runtime_index(state: &AppState, provider: &str) -> AppResult<()> {
-    let mut redis = state.redis();
-    let index_key = runtime_index_key(provider);
-    let indexed_members: Vec<String> = redis::cmd("ZRANGE")
-        .arg(&index_key)
-        .arg(0)
-        .arg(-1)
-        .query_async(&mut redis)
-        .await
-        .map_err(redis_error)?;
-    let mut pipe = redis::pipe();
-    for indexed_member in indexed_members {
-        if let Some((_, member)) = indexed_member.split_once('|') {
-            pipe.cmd("DEL").arg(runtime_key(provider, member)).ignore();
-        }
-    }
-    pipe.cmd("DEL").arg(index_key).ignore();
-    pipe.cmd("DEL").arg(runtime_revision_key(provider)).ignore();
-    let _: () = pipe.query_async(&mut redis).await.map_err(redis_error)?;
-    Ok(())
-}
-
 fn resource_member(kind: UpstreamResourceKind, id: Uuid) -> String {
     format!("{}:{id}", kind.as_str())
 }
