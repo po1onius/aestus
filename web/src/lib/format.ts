@@ -103,6 +103,22 @@ export function formatDateTime(value: string) {
   }).format(date);
 }
 
+/** 按业务时区展示请求开始的时分秒。 */
+export function formatTime(value: string, timeZone: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).format(date);
+}
+
 /** 请求日志的开始时间需要保留秒和毫秒，便于精确定位单次调用。 */
 export function formatDateTimeWithMilliseconds(value: string, timeZone: string) {
   const date = new Date(value);

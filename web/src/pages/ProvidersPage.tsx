@@ -3,7 +3,6 @@ import grokLogo from "@lobehub/icons-static-svg/icons/grok.svg";
 import openAiLogo from "@lobehub/icons-static-svg/icons/openai.svg";
 import { FolderTree, Loader2, Plus, ShieldOff } from "lucide-react";
 import { ListPager } from "../components/ListPager";
-import { Metric } from "../components/Metric";
 import { SlidingTabList } from "../components/SlidingTabList";
 import { accountProviderTabs } from "../config";
 import { ClaudeAccountsTable } from "../features/accounts/ClaudeAccountsTable";
@@ -16,7 +15,6 @@ import {
   buttonSecondary,
   cx,
   emptyStateClass,
-  metricGridClass,
   panelClass,
   spinnerClass,
   tabClass,
@@ -162,16 +160,6 @@ export function ProvidersPage({
       : activeProvider === "claude"
         ? claudeUpstreamApiKeys
         : [];
-  const activeProviderResourceCount = activeAccounts.length + activeUpstreamApiKeys.length;
-  const activeCount =
-    activeAccounts.filter((account) => account.enabled).length +
-    activeUpstreamApiKeys.filter((apiKey) => apiKey.enabled).length;
-  const unhealthyCount =
-    activeAccounts.filter((account) => account.status !== "valid").length +
-    activeUpstreamApiKeys.filter((apiKey) => apiKey.runtime.next_probe_at !== null).length;
-  const runtimeReadyCount =
-    activeAccounts.filter((account) => account.runtime.runtime_ready).length +
-    activeUpstreamApiKeys.filter((apiKey) => apiKey.runtime.runtime_ready).length;
   const activeApiKeyProvider = asUpstreamApiKeyProvider(activeProvider);
   const activeProviderGroups = activeApiKeyProvider
     ? providerGroups.filter((group) => group.provider === activeApiKeyProvider)
@@ -221,13 +209,6 @@ export function ProvidersPage({
             </button>
           ))}
         </SlidingTabList>
-
-        <section className={`${metricGridClass} border-b border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900`} aria-label={`${activeProviderMeta.label} 数据概览`}>
-          <Metric label="当前已加载" value={activeProviderResourceCount.toString()} />
-          <Metric label="启用" value={activeCount.toString()} tone="good" />
-          <Metric label="就绪" value={runtimeReadyCount.toString()} tone="good" />
-          <Metric label="异常" value={unhealthyCount.toString()} tone="warn" />
-        </section>
 
         {activeProviderMeta.ready && activeApiKeyProvider && (
           <div className="flex flex-col gap-3 border-b border-slate-200 px-4 py-3 dark:border-slate-800 sm:flex-row sm:items-center sm:justify-between">

@@ -7,7 +7,7 @@ import { StatusBadge } from "../components/StatusBadge";
 import { RequestLogDetailDialog } from "../features/request-logs/RequestLogDetailDialog";
 import { PolicyLogsPanel } from "../features/request-logs/PolicyLogsPanel";
 import { requestLogEffort, requestLogFastMode, statusTone } from "../features/request-logs/utils";
-import { firstTokenDurationMs, formatDuration } from "../lib/format";
+import { firstTokenDurationMs, formatDuration, formatTime } from "../lib/format";
 import {
   cellMainClass,
   cx,
@@ -222,7 +222,7 @@ function RequestLogTable({
             <table
               className={cx(
                 tableClass,
-                showTenant || showUsernameColumn ? "min-w-[88rem]" : "min-w-[76rem]",
+                showTenant || showUsernameColumn ? "min-w-[94rem]" : "min-w-[82rem]",
                 "[&_th]:sticky [&_th]:top-0 [&_th]:z-10",
               )}
             >
@@ -234,7 +234,7 @@ function RequestLogTable({
                 <col className="w-[10rem]" />
                 <col className="w-[8rem]" />
                 <col className="w-[8rem]" />
-                <col className="w-[14rem]" />
+                <col className="w-[20rem]" />
                 <col className="w-[6rem]" />
               </colgroup>
               <thead>
@@ -246,7 +246,7 @@ function RequestLogTable({
                   <th>额外参数</th>
                   <th>强度</th>
                   <th>状态</th>
-                  <th>首/总</th>
+                  <th>首/总/始</th>
                   <th>Token</th>
                 </tr>
               </thead>
@@ -307,7 +307,7 @@ function RequestLogTable({
                       <StatusBadge status={statusTone(log)} />
                     </td>
                     <td>
-                      <RequestTimeCell log={log} />
+                      <RequestTimeCell log={log} timezone={timezone} />
                     </td>
                     <td>
                       <div className={cellMainClass}>{log.total_tokens}</div>
@@ -333,7 +333,7 @@ function RequestLogTable({
   );
 }
 
-function RequestTimeCell({ log }: { log: RequestLogRecord }) {
+function RequestTimeCell({ log, timezone }: { log: RequestLogRecord; timezone: string }) {
   const firstTokenMs = firstTokenDurationMs(log);
   const tone = firstTokenDurationTone(firstTokenMs);
   const firstTokenClassName = cx(
@@ -352,6 +352,8 @@ function RequestTimeCell({ log }: { log: RequestLogRecord }) {
       <span className={firstTokenClassName}>{formatDuration(firstTokenMs)}</span>
       <span className="text-slate-400 dark:text-slate-500"> / </span>
       <span>{formatDuration(log.duration_ms)}</span>
+      <span className="text-slate-400 dark:text-slate-500"> / </span>
+      <span>{formatTime(log.request_started_at, timezone)}</span>
     </div>
   );
 }
