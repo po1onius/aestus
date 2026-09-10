@@ -13,7 +13,7 @@ use super::model::{
     schema::{plugin_suites, plugins},
 };
 use crate::{
-    err::{AppError, AppResult},
+    err::{AppError, AppResult, ConsoleError},
     gateway_key::schema::api_keys,
 };
 
@@ -58,6 +58,7 @@ pub async fn list_plugins(
 
 /// 所有套件写入均先按 UUID 顺序锁定引用插件。删除插件持有同一行锁后才扫描套件，
 /// 因此不会漏掉并发创建的组合；套件创建后没有修改组合的入口。
+/// 组合唯一性由数据库约束裁决，包含公共归属和空插槽，不受名称、备注或启停影响。
 pub async fn create_suite(
     conn: &mut AsyncPgConnection,
     input: NewPluginSuite,
@@ -83,9 +84,17 @@ pub async fn create_suite(
                 }
             }
         }
-        Ok(diesel::insert_into(plugin_suites::table).values(input)
+        Ok(diesel::insert_into(plugin_suites::table).values(&input)
             .returning(PluginSuiteSummary::as_returning()).get_result(&mut *conn)
-            .await.map_err(map_write_error)?)
+            .await.map_err(|source| {
+                let error = map_write_error(source);
+                warn!(actor_id = %input.created_by, tenant_id = ?input.tenant_id, provider = %input.provider,
+                    request_plugin_id = ?input.request_plugin_id,
+                    buffered_response_plugin_id = ?input.buffered_response_plugin_id,
+                    stream_response_plugin_id = ?input.stream_response_plugin_id,
+                    error_code = error.code(), error = %error, "插件套件写入失败");
+                error
+            })?)
     }).await?;
     info!(tenant_id = ?suite.tenant_id, plugin_suite_id = %suite.id, provider = %suite.provider,
         request_plugin_id = ?suite.request_plugin_id, buffered_response_plugin_id = ?suite.buffered_response_plugin_id,
@@ -453,12 +462,26 @@ fn resource_unavailable() -> AppError {
 }
 
 fn map_write_error(source: diesel::result::Error) -> AppError {
-    if matches!(
-        source,
-        diesel::result::Error::DatabaseError(diesel::result::DatabaseErrorKind::UniqueViolation, _)
-    ) {
-        return AppError::BadRequest {
-            message: "当前归属、Provider 下套件名称或同一插槽下插件名称已存在".to_owned(),
+    if let diesel::result::Error::DatabaseError(
+        diesel::result::DatabaseErrorKind::UniqueViolation,
+        information,
+    ) = &source
+    {
+        match information.constraint_name() {
+            Some("uq_plugin_suites_combination") => {
+                return AppError::Console(ConsoleError::PluginSuiteCombinationExists);
+            }
+            Some("idx_plugin_suites_public_name" | "idx_plugin_suites_tenant_name") => {
+                return AppError::BadRequest {
+                    message: "当前归属、Provider 下套件名称已存在".to_owned(),
+                };
+            }
+            Some("idx_plugins_public_name" | "idx_plugins_tenant_name") => {
+                return AppError::BadRequest {
+                    message: "当前归属、Provider 的同一插槽下插件名称已存在".to_owned(),
+                };
+            }
+            _ => {}
         };
     }
     source.into()

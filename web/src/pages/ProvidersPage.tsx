@@ -34,6 +34,8 @@ import type {
 } from "../types";
 
 interface ProvidersPageProps {
+  resourceCreationDisabled: boolean;
+  groupCreationDisabled: boolean;
   access: ProviderAccess;
   accounts: GptAccount[];
   claudeAccounts: ClaudeAccount[];
@@ -104,6 +106,8 @@ const providerLogos: Record<AccountProviderKey, string> = {
  * 的凭证类型语义。官方 API Key 的展示和操作继续保持 provider 中立。
  */
 export function ProvidersPage({
+  resourceCreationDisabled,
+  groupCreationDisabled,
   access,
   accounts,
   claudeAccounts,
@@ -196,15 +200,6 @@ export function ProvidersPage({
                   <img className="size-5 shrink-0 opacity-80" src={providerLogos[provider.key]} alt="" aria-hidden="true" />
                   <span>{provider.label}</span>
                 </span>
-                <strong className="inline-flex min-w-7 items-center justify-center rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-                  {providerResourceCount(
-                    provider.key,
-                    accounts,
-                    claudeAccounts,
-                    gptUpstreamApiKeys,
-                    claudeUpstreamApiKeys,
-                  )}
-                </strong>
               </span>
             </button>
           ))}
@@ -257,7 +252,7 @@ export function ProvidersPage({
               <button
                 type="button"
                 className={buttonPrimary}
-                disabled={providerGroupsVisible && Boolean(providerGroupSavingId)}
+                disabled={providerGroupsVisible ? groupCreationDisabled || Boolean(providerGroupSavingId) : resourceCreationDisabled}
                 onClick={
                   providerGroupsVisible
                     ? onOpenProviderGroupCreate
@@ -403,21 +398,4 @@ function asUpstreamApiKeyProvider(
   provider: AccountProviderKey,
 ): UpstreamApiKeyProvider | null {
   return provider === "gpt" || provider === "claude" ? provider : null;
-}
-
-function providerResourceCount(
-  provider: AccountProviderKey,
-  accounts: GptAccount[],
-  claudeAccounts: ClaudeAccount[],
-  gptUpstreamApiKeys: ProviderUpstreamApiKey[],
-  claudeUpstreamApiKeys: ProviderUpstreamApiKey[],
-) {
-  switch (provider) {
-    case "gpt":
-      return accounts.length + gptUpstreamApiKeys.length;
-    case "claude":
-      return claudeAccounts.length + claudeUpstreamApiKeys.length;
-    default:
-      return 0;
-  }
 }

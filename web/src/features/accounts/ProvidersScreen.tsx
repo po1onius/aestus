@@ -22,9 +22,13 @@ import { AccountPageOffsets, asUpstreamApiKeyProvider, defaultUpstreamApiKeyBase
 import { useDashboard, type PageProps } from "../dashboard/context";
 import { useConfirmation } from "../dashboard/useConfirmation";
 import { useProviderGroups } from "./useProviderGroups";
+import { useTenantResourceUsage } from "../tenants/useTenantResourceUsage";
 
 export function ProvidersScreen({ refreshRevision, onLoadingChange }: PageProps) {
   const { authToken, currentUser, providerAccess } = useDashboard();
+  const { usage: resourceUsage, loading: resourceUsageLoading, reload: reloadResourceUsage } = useTenantResourceUsage(authToken, refreshRevision, providerAccess.isOwner);
+  const resourceLimitReached = resourceUsage !== null && resourceUsage.max_resources !== null && resourceUsage.resource_count >= resourceUsage.max_resources;
+  const groupLimitReached = resourceUsage !== null && resourceUsage.max_provider_groups !== null && resourceUsage.provider_group_count >= resourceUsage.max_provider_groups;
   const { providerGroups, providerGroupsLoading, loadProviderGroups } = useProviderGroups(authToken);
   const { requestJson, isActiveAuthToken, beginRequest } = useRequestScope(authToken);
   const { confirmationRequest, setConfirmationRequest, confirmationSubmitting, closeConfirmationDialog, confirmRequestedAction } = useConfirmation();
@@ -345,6 +349,7 @@ export function ProvidersScreen({ refreshRevision, onLoadingChange }: PageProps)
       }
       return false;
     } finally {
+      void reloadResourceUsage();
       setProviderGroupSavingId(null);
     }
   }
@@ -433,6 +438,7 @@ export function ProvidersScreen({ refreshRevision, onLoadingChange }: PageProps)
         }
       }
     } finally {
+      void reloadResourceUsage();
       if (isActiveAuthToken(token)) setProviderGroupSavingId(null);
     }
   }
@@ -496,6 +502,7 @@ export function ProvidersScreen({ refreshRevision, onLoadingChange }: PageProps)
     } catch (error) {
       showErrorToast("授权链接生成失败", error);
     } finally {
+      void reloadResourceUsage();
       setOauthLoading(false);
     }
   }
@@ -537,6 +544,7 @@ export function ProvidersScreen({ refreshRevision, onLoadingChange }: PageProps)
         ]);
       }
     } finally {
+      void reloadResourceUsage();
       setSaving(false);
     }
   }
@@ -570,6 +578,7 @@ export function ProvidersScreen({ refreshRevision, onLoadingChange }: PageProps)
         await Promise.all([loadAccounts({ gpt: 0 }), loadProviderGroups()]);
       }
     } finally {
+      void reloadResourceUsage();
       setSaving(false);
     }
   }
@@ -626,6 +635,7 @@ export function ProvidersScreen({ refreshRevision, onLoadingChange }: PageProps)
         ]);
       }
     } finally {
+      void reloadResourceUsage();
       setSaving(false);
     }
   }
@@ -1022,6 +1032,7 @@ export function ProvidersScreen({ refreshRevision, onLoadingChange }: PageProps)
         await loadAccounts();
       }
     } finally {
+      void reloadResourceUsage();
       setAccountDeletingId(null);
     }
   }
@@ -1052,6 +1063,7 @@ export function ProvidersScreen({ refreshRevision, onLoadingChange }: PageProps)
         await loadAccounts();
       }
     } finally {
+      void reloadResourceUsage();
       setAccountDeletingId(null);
     }
   }
@@ -1089,6 +1101,7 @@ export function ProvidersScreen({ refreshRevision, onLoadingChange }: PageProps)
         await loadAccounts();
       }
     } finally {
+      void reloadResourceUsage();
       setUpstreamApiKeyDeletingId(null);
     }
   }
@@ -1119,7 +1132,16 @@ export function ProvidersScreen({ refreshRevision, onLoadingChange }: PageProps)
   useEffect(() => { void loadAccounts(); }, [refreshRevision, activeAccountProvider, activeCredentialTab, providerGroupsVisible, providerAccess]);
   useEffect(() => { if (currentUser.role === "tenant_owner") void loadProviderGroups(); }, [refreshRevision]);
   useEffect(() => { onLoadingChange(providerGroupsVisible ? providerGroupsLoading : loading); return () => onLoadingChange(false); }, [providerGroupsVisible, providerGroupsLoading, loading, onLoadingChange]);
-  return <><ProvidersPage
+  return <>
+    {providerAccess.isOwner && <div className="mb-4 space-y-1 text-sm text-slate-500" role="status">
+      {resourceUsageLoading ? "正在加载资源与分组总量…" : !resourceUsage ? "资源与分组总量加载失败，请刷新页面。" : <>
+        <p>{`上游资源总数：${resourceUsage.resource_count} / ${resourceUsage.max_resources ?? "不限制"}。跨所有 Provider 合计账号和官方 API Key；停用、失效和未分组资源也计数，删除才释放名额。${resourceLimitReached ? "已达到上限，无法新增资源。" : ""}`}</p>
+        <p>{`分组总数：${resourceUsage.provider_group_count} / ${resourceUsage.max_provider_groups ?? "不限制"}。跨所有 Provider 合计；停用和空分组也计数，删除才释放名额。${groupLimitReached ? "已达到上限，无法新增分组。" : ""}`}</p>
+      </>}
+    </div>}
+    <ProvidersPage
+    resourceCreationDisabled={resourceUsageLoading || !resourceUsage || resourceLimitReached}
+    groupCreationDisabled={resourceUsageLoading || !resourceUsage || groupLimitReached}
     access={providerAccess}
     accounts={accounts}
     claudeAccounts={claudeAccounts}

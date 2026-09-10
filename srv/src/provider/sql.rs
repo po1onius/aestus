@@ -54,7 +54,7 @@ pub mod account {
 
     /// 创建账号并允许 provider facade 自己转换数据库写入错误。
     ///
-    /// 通用 SQL 层只负责校验共享字段和执行 insert，不应知道某个 provider 在 `specific`
+    /// 通用 SQL 层负责共享字段校验、租户容量准入和 insert，不应知道某个 provider 在 `specific`
     /// JSON 上建立了什么唯一索引。需要展示 provider 专属业务提示时，由对应 facade 传入
     /// 错误转换函数；默认的 [`create`] 仍统一折叠为 `DbQuery`。
     pub(crate) async fn create_with_db_error_mapper<F>(
@@ -63,7 +63,7 @@ pub mod account {
         map_db_error: F,
     ) -> AppResult<ProviderAccount>
     where
-        F: FnOnce(diesel::result::Error) -> AppError,
+        F: FnOnce(diesel::result::Error) -> AppError + Send,
     {
         use provider_accounts::dsl;
 
@@ -85,14 +85,29 @@ pub mod account {
             });
         }
 
-        let account = diesel::insert_into(dsl::provider_accounts)
-            .values(&new_account)
-            .returning(ProviderAccount::as_returning())
-            .get_result::<ProviderAccount>(conn)
-            .await
-            .map_err(map_db_error)?;
+        // 所有 Provider 共用租户行锁，统计与插入在同一事务内完成。
+        let account = conn
+            .transaction::<ProviderAccount, AppError, _>(async |conn| {
+                let tenant =
+                    crate::tenant::require_enabled_for_update(conn, &new_account.tenant_id).await?;
+                crate::tenant::require_resource_capacity(
+                    conn,
+                    &tenant,
+                    &new_account.provider,
+                    "account",
+                )
+                .await?;
+                diesel::insert_into(dsl::provider_accounts)
+                    .values(&new_account)
+                    .returning(ProviderAccount::as_returning())
+                    .get_result::<ProviderAccount>(conn)
+                    .await
+                    .map_err(map_db_error)
+            })
+            .await?;
 
         info!(
+            tenant_id = %account.tenant_id,
             provider = %account.provider,
             provider_account_id = %account.id,
             client_id = %account.client_id,
@@ -652,14 +667,29 @@ pub mod api_key {
             });
         }
 
-        let api_key = diesel::insert_into(dsl::provider_api_keys)
-            .values(&new_api_key)
-            .returning(ProviderApiKey::as_returning())
-            .get_result::<ProviderApiKey>(conn)
-            .await
-            .map_err(db_error)?;
+        // 所有 Provider 共用租户行锁，统计与插入在同一事务内完成。
+        let api_key = conn
+            .transaction::<ProviderApiKey, AppError, _>(async |conn| {
+                let tenant =
+                    crate::tenant::require_enabled_for_update(conn, &new_api_key.tenant_id).await?;
+                crate::tenant::require_resource_capacity(
+                    conn,
+                    &tenant,
+                    &new_api_key.provider,
+                    "api_key",
+                )
+                .await?;
+                diesel::insert_into(dsl::provider_api_keys)
+                    .values(&new_api_key)
+                    .returning(ProviderApiKey::as_returning())
+                    .get_result::<ProviderApiKey>(conn)
+                    .await
+                    .map_err(db_error)
+            })
+            .await?;
 
         info!(
+            tenant_id = %api_key.tenant_id,
             provider = %api_key.provider,
             provider_api_key_id = %api_key.id,
             "provider 官方 API Key 已新增；Key 与 Base URL 导入后不可修改"

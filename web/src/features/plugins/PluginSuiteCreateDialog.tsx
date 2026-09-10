@@ -61,6 +61,7 @@ export function PluginSuiteCreateDialog({ plugins, saving, onCreate, onClose, is
             </select>
           </label>
         ))}
+        <p className="text-xs text-slate-500">当前归属、同一 Provider 下，相同插件组合只能创建一个套件，停用套件也计入。</p>
         <label className={fieldStack}>
           <span className={fieldLabel}>备注</span>
           <textarea className={textareaClass} disabled={saving} maxLength={1024} value={input.description} onChange={(e) => setInput({ ...input, description: e.target.value })} />

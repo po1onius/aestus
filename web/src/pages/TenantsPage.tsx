@@ -162,9 +162,9 @@ export function TenantsPage({ token, refreshSignal }: TenantsPageProps) {
           <div className="p-10 text-center text-sm text-slate-500">还没有租户</div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1050px] text-left text-sm">
+            <table className="w-full min-w-[1350px] text-left text-sm">
               <thead className="border-b border-slate-200 bg-slate-50 text-slate-500 dark:border-slate-800 dark:bg-slate-950/50">
-                <tr><th className="px-4 py-3 font-medium">租户</th><th className="px-4 py-3 font-medium">租户码</th><th className="px-4 py-3 font-medium">状态</th><th className="px-4 py-3 font-medium">用户数 / 上限</th><th className="px-4 py-3 font-medium">每用户 Key 上限</th><th className="px-4 py-3 font-medium">Owner 上传 WASM</th><th className="w-20 px-4 py-3 text-right font-medium">操作</th></tr>
+                <tr><th className="px-4 py-3 font-medium">租户</th><th className="px-4 py-3 font-medium">租户码</th><th className="px-4 py-3 font-medium">状态</th><th className="px-4 py-3 font-medium">用户数 / 上限</th><th className="px-4 py-3 font-medium">上游资源数 / 上限</th><th className="px-4 py-3 font-medium">分组数 / 上限</th><th className="px-4 py-3 font-medium">每用户 Key 上限</th><th className="px-4 py-3 font-medium">Owner 上传 WASM</th><th className="w-20 px-4 py-3 text-right font-medium">操作</th></tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                 {tenants.map((tenant) => {
@@ -175,6 +175,8 @@ export function TenantsPage({ token, refreshSignal }: TenantsPageProps) {
                       <td className="px-4 py-3 font-mono">{tenant.code ?? <span className="font-sans text-slate-400">已撤销</span>}</td>
                       <td className="px-4 py-3"><span className={tenant.enabled ? "text-emerald-600" : "text-slate-400"}>{tenant.enabled ? "启用" : "停用"}</span></td>
                       <td className="px-4 py-3">{tenant.user_count} / {tenant.max_users ?? "不限制"}</td>
+                      <td className="px-4 py-3">{tenant.resource_count} / {tenant.max_resources ?? "不限制"}</td>
+                      <td className="px-4 py-3">{tenant.provider_group_count} / {tenant.max_provider_groups ?? "不限制"}</td>
                       <td className="px-4 py-3">{tenant.max_gateway_keys_per_user ?? "不限制"}</td>
                       <td className="px-4 py-3">{tenant.owner_can_upload_wasm ? "允许" : "禁止"}</td>
                       <td className="px-4 py-3">

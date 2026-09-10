@@ -24,6 +24,8 @@ const MAX_GENERATED_CODE_NAME_BYTES: usize =
 struct NewTenant {
     id: String,
     max_users: Option<i32>,
+    max_resources: Option<i32>,
+    max_provider_groups: Option<i32>,
     max_gateway_keys_per_user: Option<i32>,
     owner_can_upload_wasm: bool,
     created_by: Uuid,
@@ -85,6 +87,8 @@ pub async fn create(
                 .values(NewTenant {
                     id,
                     max_users: limits.max_users,
+                    max_resources: limits.max_resources,
+                    max_provider_groups: limits.max_provider_groups,
                     max_gateway_keys_per_user: limits.max_gateway_keys_per_user,
                     owner_can_upload_wasm: limits.owner_can_upload_wasm,
                     created_by: actor_id,
@@ -112,6 +116,8 @@ pub async fn create(
             Ok((
                 TenantSummary {
                     user_count: i64::from(owner.is_some()),
+                    resource_count: 0,
+                    provider_group_count: 0,
                     tenant,
                     code: Some(code),
                 },
@@ -168,10 +174,21 @@ pub async fn list(conn: &mut AsyncPgConnection) -> AppResult<Vec<TenantSummary>>
         .await?
         .into_iter()
         .collect();
+    let resource_counts = count_resources_by_tenant(conn).await?;
+    use crate::provider::group::schema::provider_groups;
+    let group_counts: HashMap<String, i64> = provider_groups::table
+        .group_by(provider_groups::tenant_id)
+        .select((provider_groups::tenant_id, diesel::dsl::count_star()))
+        .load::<(String, i64)>(conn)
+        .await?
+        .into_iter()
+        .collect();
     Ok(rows
         .into_iter()
         .map(|(tenant, code)| TenantSummary {
             user_count: counts.get(&Some(tenant.id.clone())).copied().unwrap_or(0),
+            resource_count: resource_counts.get(&tenant.id).copied().unwrap_or(0),
+            provider_group_count: group_counts.get(&tenant.id).copied().unwrap_or(0),
             tenant,
             code,
         })
@@ -322,6 +339,8 @@ pub async fn regenerate_code(
                 .map_err(map_create_error)?;
             Ok(TenantSummary {
                 user_count: count_users(conn, &tenant.id).await?,
+                resource_count: count_resources(conn, &tenant.id).await?,
+                provider_group_count: count_provider_groups(conn, &tenant.id).await?,
                 tenant,
                 code: Some(code),
             })
@@ -452,6 +471,8 @@ pub async fn set_limits(
             let tenant = diesel::update(schema::tenants::table.filter(schema::tenants::id.eq(id)))
                 .set((
                     schema::tenants::max_users.eq(limits.max_users),
+                    schema::tenants::max_resources.eq(limits.max_resources),
+                    schema::tenants::max_provider_groups.eq(limits.max_provider_groups),
                     schema::tenants::max_gateway_keys_per_user.eq(limits.max_gateway_keys_per_user),
                     schema::tenants::owner_can_upload_wasm.eq(limits.owner_can_upload_wasm),
                     schema::tenants::updated_at.eq(Utc::now()),
@@ -464,4 +485,97 @@ pub async fn set_limits(
         .await?;
     info!(platform_admin_id = %actor_id, tenant_id = %id, ?previous, ?limits, "平台管理员已更新租户限制");
     Ok(tenant)
+}
+
+/// 两类上游资源在同一数据库快照中合计，不按 Provider、分组或运行状态过滤。
+pub async fn count_resources(conn: &mut AsyncPgConnection, tenant_id: &str) -> AppResult<i64> {
+    #[derive(QueryableByName)]
+    struct Count {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        resource_count: i64,
+    }
+    let row = diesel::sql_query(
+        "SELECT (SELECT count(*) FROM provider_accounts WHERE tenant_id = $1) +
+                (SELECT count(*) FROM provider_api_keys WHERE tenant_id = $1) AS resource_count",
+    )
+    .bind::<diesel::sql_types::Text, _>(tenant_id)
+    .get_result::<Count>(conn)
+    .await?;
+    Ok(row.resource_count)
+}
+
+/// 租户列表一次批量聚合所有上游资源，不逐个租户查询。
+async fn count_resources_by_tenant(
+    conn: &mut AsyncPgConnection,
+) -> AppResult<HashMap<String, i64>> {
+    #[derive(QueryableByName)]
+    struct Count {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        tenant_id: String,
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        resource_count: i64,
+    }
+    let rows = diesel::sql_query(
+        "SELECT tenant_id, sum(resource_count)::bigint AS resource_count FROM (
+            SELECT tenant_id, count(*) AS resource_count FROM provider_accounts GROUP BY tenant_id
+            UNION ALL
+            SELECT tenant_id, count(*) AS resource_count FROM provider_api_keys GROUP BY tenant_id
+         ) counts GROUP BY tenant_id",
+    )
+    .load::<Count>(conn)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.tenant_id, row.resource_count))
+        .collect())
+}
+
+/// 最终准入必须在创建资源的事务中持有租户行锁；OAuth 预检查仅用于提前拒绝。
+pub async fn require_resource_capacity(
+    conn: &mut AsyncPgConnection,
+    tenant: &Tenant,
+    provider: &str,
+    resource_type: &str,
+) -> AppResult<()> {
+    if let Some(limit) = tenant.max_resources {
+        let current = count_resources(conn, &tenant.id).await?;
+        if current >= i64::from(limit) {
+            warn!(tenant_id = %tenant.id, current, limit, provider, resource_type, "租户上游资源总数达到上限，拒绝新增");
+            return Err(AppError::Console(
+                ConsoleError::TenantResourceLimitExceeded { current, limit },
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 跨所有 Provider 统计租户分组；停用和空分组仍占名额。
+pub async fn count_provider_groups(
+    conn: &mut AsyncPgConnection,
+    tenant_id: &str,
+) -> AppResult<i64> {
+    use crate::provider::group::schema::provider_groups;
+    Ok(provider_groups::table
+        .filter(provider_groups::tenant_id.eq(tenant_id))
+        .count()
+        .get_result(conn)
+        .await?)
+}
+
+/// 必须在创建分组的事务中先锁定租户，校验后持锁直到全部写入提交。
+pub async fn require_provider_group_capacity(
+    conn: &mut AsyncPgConnection,
+    tenant: &Tenant,
+    provider: &str,
+) -> AppResult<()> {
+    if let Some(limit) = tenant.max_provider_groups {
+        let current = count_provider_groups(conn, &tenant.id).await?;
+        if current >= i64::from(limit) {
+            warn!(tenant_id = %tenant.id, provider, current, limit, "租户分组总数达到上限，拒绝创建");
+            return Err(AppError::Console(
+                ConsoleError::TenantProviderGroupLimitExceeded { current, limit },
+            ));
+        }
+    }
+    Ok(())
 }

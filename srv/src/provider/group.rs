@@ -534,6 +534,9 @@ pub async fn create(
         >(async |conn| {
             use schema::{provider_group_models, provider_groups};
 
+            // 跨 Provider 创建与平台调整上限共用租户锁；超限时尚未写入分组或调整资源归属。
+            let tenant = crate::tenant::require_enabled_for_update(conn, &tenant_id).await?;
+            crate::tenant::require_provider_group_capacity(conn, &tenant, &provider).await?;
             let result = diesel::insert_into(provider_groups::table)
                 .values(&NewProviderGroup {
                     tenant_id: tenant_id.clone(),
@@ -622,7 +625,7 @@ pub async fn create(
             Ok((group, accounts, api_keys))
         })
         .await?;
-    info!(provider, provider_group_id = %group.id, provider_group_name = %group.name, model_count = models.len(), allowed_models = ?models, account_count = accounts.len(), upstream_api_key_count = api_keys.len(), empty_group = accounts.is_empty() && api_keys.is_empty(), "Provider 分组、模型映射及可选初始资源归属创建成功");
+    info!(tenant_id = %tenant_id, provider, provider_group_id = %group.id, provider_group_name = %group.name, model_count = models.len(), allowed_models = ?models, account_count = accounts.len(), upstream_api_key_count = api_keys.len(), empty_group = accounts.is_empty() && api_keys.is_empty(), "Provider 分组、模型映射及可选初始资源归属创建成功");
     Ok(CreatedProviderGroup {
         group: ProviderGroupWithModels {
             group,

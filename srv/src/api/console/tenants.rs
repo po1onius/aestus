@@ -16,7 +16,7 @@ use crate::{
         error::ConsoleResult,
         pagination::{ListPage, ListPageQuery},
     },
-    err::{AppError, AppResult},
+    err::{AppError, AppResult, ConsoleError},
     provider::{
         claude::model::ClaudeAccountSpecific,
         credential::{ProviderAccount, ProviderApiKey},
@@ -102,6 +102,7 @@ type PrivateJson<T> = (HeaderMap, Json<T>);
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_tenants).post(create_tenant))
+        .route("/current/resource-usage", get(current_resource_usage))
         .route("/{id}/status", put(update_tenant_status))
         .route("/{id}/limits", put(update_tenant_limits))
         .route(
@@ -346,4 +347,33 @@ async fn update_tenant_limits(
     Ok(private_json(
         tenant::set_limits(&mut conn, &tenant_id, payload, admin.id).await?,
     ))
+}
+
+#[derive(Debug, Serialize)]
+struct TenantResourceUsage {
+    resource_count: i64,
+    max_resources: Option<i32>,
+    provider_group_count: i64,
+    max_provider_groups: Option<i32>,
+}
+
+/// 只允许 owner 查看本租户总量，不接受客户端指定租户或 Provider。
+async fn current_resource_usage(
+    State(state): State<AppState>,
+    auth::AdminUser(owner): auth::AdminUser,
+) -> ConsoleResult<PrivateJson<TenantResourceUsage>> {
+    let tenant_id = owner
+        .tenant_id
+        .as_deref()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
+    let mut conn = state.db_conn().await?;
+    let tenant = tenant::require_enabled(&mut conn, tenant_id).await?;
+    let resource_count = tenant::count_resources(&mut conn, tenant_id).await?;
+    let provider_group_count = tenant::count_provider_groups(&mut conn, tenant_id).await?;
+    Ok(private_json(TenantResourceUsage {
+        resource_count,
+        max_resources: tenant.max_resources,
+        provider_group_count,
+        max_provider_groups: tenant.max_provider_groups,
+    }))
 }

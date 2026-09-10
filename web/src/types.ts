@@ -92,6 +92,8 @@ export interface DashboardRoute {
 
 export interface TenantLimits {
   max_users: number | null;
+  max_resources: number | null;
+  max_provider_groups: number | null;
   max_gateway_keys_per_user: number | null;
   owner_can_upload_wasm: boolean;
 }
@@ -102,12 +104,21 @@ export interface DashboardTenant extends TenantLimits {
 
 export interface TenantSummary extends DashboardTenant {
   user_count: number;
+  resource_count: number;
+  provider_group_count: number;
   enabled: boolean;
   created_by: string;
   created_at: string;
   updated_at: string;
   disabled_at: string | null;
   code: string | null;
+}
+
+export interface TenantResourceUsage {
+  resource_count: number;
+  provider_group_count: number;
+  max_resources: number | null;
+  max_provider_groups: number | null;
 }
 
 export type TenantResourceKind = "account" | "official_api_key";

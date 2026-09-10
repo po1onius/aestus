@@ -107,12 +107,16 @@ Redis runtime，随后启动 maintenance 并开始接受请求。同步保留已
 - **每用户网关 Key 上限**：由租户统一配置，owner 和每位普通用户分别计数，跨 Provider、
   分组合计。停用 Key、分组或套件绑定失效的 Key 仍占名额，删除 Key 后释放；上游官方
   API Key 不计入此限制。
+- **上游资源总数上限**：同一租户的 OAuth 账号与上游官方 API Key 跨所有 Provider 合计，
+  每条记录占一个名额；停用、失效和未分组资源仍计数，删除才释放。网关 Key 不计入。
+- **分组总数上限**：同一租户的 Provider 分组跨所有 Provider 合计，停用和空分组仍计数，
+  删除才释放名额。与上游资源上限独立；达到上限后仍可编辑、启停和删除现有分组。
 - **允许 owner 上传 WASM**：只控制新增插件上传。关闭后已有插件、套件仍可使用和管理，
   owner 仍可使用已有公共及私有插件创建套件。平台管理员上传公共插件不受影响。
 
-两项数量默认不限制，支持 `null`（不限制）或 `0..=2147483647` 整数，0 表示禁止新增；
-新租户默认禁止 owner 上传 WASM。允许把上限调到当前数量以下，现有用户和 Key 保留，
-只有新增时检查上限。用户创建、Key 创建和插件落库在事务中先锁定租户，使用最新限制；
+四项数量默认不限制，支持 `null`（不限制）或 `0..=2147483647` 整数，0 表示禁止新增；
+新租户默认禁止 owner 上传 WASM。允许把上限调到当前数量以下，现有用户、Key、上游资源和分组保留，
+只有新增时检查上限。用户创建、Key 创建、上游资源创建、分组创建和插件落库在事务中先锁定租户，使用最新限制；
 平台更新限制持有同一个租户行锁，保证多实例并发操作不会突破上限。WASM 上传在读取文件
 和编译前预检查权限，编译后落库时再次检查，编译期间不持有租户行锁。
 
@@ -122,19 +126,38 @@ Redis runtime，随后启动 maintenance 并开始接受请求。同步保留已
 ```json
 {
   "max_users": 100,
+  "max_resources": 50,
+  "max_provider_groups": 10,
   "max_gateway_keys_per_user": 5,
   "owner_can_upload_wasm": false
 }
 ```
 
-租户列表返回这三项字段及 `user_count`，用户数按租户批量聚合。登录、注册和 `/auth/me`
-响应的 `tenant` 也包含限制字段。用户、网关 Key 和插件页面在进入及刷新时读取最新配置；
-实际写入始终以后端事务校验为准。用户数或 Key 数超限返回 HTTP 409，错误码分别为
-`tenant_user_limit_exceeded`、`tenant_gateway_key_limit_exceeded`；禁止 WASM 上传返回
+租户列表返回这五项字段及 `user_count`、`resource_count`、`provider_group_count`，
+用户数、上游资源总数和分组总数均按租户批量聚合。登录、注册和 `/auth/me` 响应的 `tenant` 也包含限制字段。用户、网关 Key 和插件页面在进入及刷新时读取最新配置；
+实际写入始终以后端事务校验为准。用户数、Key 数、上游资源总数或分组总数超限返回 HTTP 409，错误码分别为
+`tenant_user_limit_exceeded`、`tenant_gateway_key_limit_exceeded`、`tenant_resource_limit_exceeded`、
+`tenant_provider_group_limit_exceeded`；上游资源和分组超限响应的 `error.details` 包含 `current` 和 `limit`。禁止 WASM 上传返回
 HTTP 403 和 `tenant_wasm_upload_forbidden`。限制修改记录操作者及修改前后值，拒绝新增
 记录租户、数量及上限，日志不记录 Key 明文或 WASM 内容。
 
-三项字段直接定义在初始化 migration `00000000000000_init` 的 `tenants` 表中，不使用
+资源页仅为 owner 查询 `GET /api/console/tenants/current/resource-usage`，返回本租户的
+`resource_count`、`max_resources`、`provider_group_count` 和 `max_provider_groups`，
+不接受指定租户、Provider 或凭证类型。进入页面、刷新、资源或分组新增及删除完成后重新
+读取；数量来自 PostgreSQL 资源表和分组表，不依赖当前分页或 Redis 状态。两项上限分别
+控制新增资源和新增分组入口，现有资源与分组仍可管理。Provider 页签移除了
+原先累加已加载分页的数字，避免误当作完整资源总量。
+
+OAuth 授权、消费回调 state 和 RT 导入的上游请求前预检查容量，不预占名额；最终落库在
+公共创建事务中再次检查，两个资源表的写入与平台修改限制共用租户行锁。上游请求期间不
+持有行锁；预检查后容量被其他请求用尽时，最终创建仍会被拒绝。资源创建提交后才同步
+Redis runtime；即使后续同步失败，已持久化的记录仍占名额。
+
+分组创建在事务内先锁定租户，检查跨 Provider 分组总量，再插入分组、模型白名单并调整
+所选资源归属，持锁直到事务结束。与平台修改限制使用同一个租户行锁，多实例并发创建
+不能突破上限；超限或后续写入失败时，整个创建事务回滚，不占分组名额。
+
+五项字段直接定义在初始化 migration `00000000000000_init` 的 `tenants` 表中，不使用
 外键。本次没有新增历史数据 migration，也不会自动修改现有数据库；已执行旧版初始化的
 开发数据库需手动使用空数据库重新初始化。需要保留历史生产数据时，必须先确认迁移方案
 再升级，不能只重复运行已有 migration。前后端需同步发布。
@@ -227,6 +250,14 @@ WASM 和备注。公共套件只能引用公共插件；租户私有套件可以
 引用其他租户的私有插件。套件至少选择一个插件，同一插件可被多个套件复用。套件创建后
 组合固定，不提供版本管理。网关 API Key 可选择同 Provider 的启用套件，也可以不绑定插件。
 公共资源不会绕过租户启停、用户权限、分组授权或模型白名单校验。
+
+同一归属、同一 Provider 下，套件名称和三个插槽的插件 ID 组合分别唯一。空插槽也参与
+组合比较，名称、备注和启停状态不影响组合去重；停用套件不能换名重复创建。平台公共
+套件与各租户独立去重，不同租户之间、公共与租户之间允许相同组合。去重按插件 ID，
+不比较 WASM 内容。初始化 migration 使用 `NULLS NOT DISTINCT` 唯一索引，在并发创建时
+也能拒绝重复组合。组合冲突返回 HTTP 409、`plugin_suite_combination_exists`，提示使用
+已有套件；前端保留表单输入。名称冲突仍返回 HTTP 400，并分别提示插件或套件名称重复。
+拒绝日志记录操作者、归属、Provider、三个插件 ID 和错误码，不记录 WASM 内容。
 
 插件继续只挂载 GPT `/v1/responses` 和 Claude `/v1/messages`，在 OAuth Account attempt
 执行；Official API Key attempt 和其他端点仍使用原生流程。空插槽沿用原生处理。

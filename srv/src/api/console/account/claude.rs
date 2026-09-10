@@ -126,6 +126,7 @@ async fn create_oauth_authorization(
         .tenant_id
         .clone()
         .ok_or(AppError::Console(ConsoleError::Forbidden))?;
+    super::precheck_resource_capacity(&state, &tenant_id, PROVIDER).await?;
     let authorization = auth::create_authorization(&state)?;
     // OAuth 握手只在 Redis 保存 PKCE 临时参数；账号分组由 callback 创建请求单独决定。
     provider_oauth::create(
@@ -162,15 +163,17 @@ async fn complete_oauth_callback(
     let authorization =
         auth::parse_authorization_result(&authorization_result, oauth_state.as_deref())?;
 
+    let tenant_id = owner
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
+    super::precheck_resource_capacity(&state, &tenant_id, PROVIDER).await?;
+
     let session = provider_oauth::take(&state, PROVIDER, &authorization.state)
         .await?
         .ok_or_else(|| AppError::BadRequest {
             message: "Claude OAuth state 无效或已过期，请重新生成授权链接".to_owned(),
         })?;
-    let tenant_id = owner
-        .tenant_id
-        .clone()
-        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     if session.tenant_id != tenant_id {
         warn!(owner_user_id = %owner.id, owner_tenant_id = %tenant_id, oauth_tenant_id = %session.tenant_id, "Claude OAuth 会话租户与当前 owner 不一致，拒绝消费");
         return Err(AppError::Console(ConsoleError::Forbidden).into());

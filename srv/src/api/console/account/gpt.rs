@@ -144,6 +144,7 @@ async fn create_oauth_authorization(
         .tenant_id
         .clone()
         .ok_or(AppError::Console(ConsoleError::Forbidden))?;
+    super::precheck_resource_capacity(&state, &tenant_id, gpt_model::PROVIDER).await?;
     let authorization = auth::create_authorization(&state).await?;
     // OAuth 握手与账号最终归属解耦：Redis 只保存 PKCE 临时参数，不记录 Provider 分组。
     provider_oauth::create(
@@ -176,15 +177,17 @@ async fn complete_oauth_callback(
         normalize_required_limited(payload.callback_url, "callback_url", MAX_CALLBACK_URL_BYTES)?;
     let callback = auth::parse_callback_url(&callback_url)?;
 
+    let tenant_id = owner
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
+    super::precheck_resource_capacity(&state, &tenant_id, gpt_model::PROVIDER).await?;
+
     let session = provider_oauth::take(&state, gpt_model::PROVIDER, &callback.state)
         .await?
         .ok_or_else(|| AppError::BadRequest {
             message: "OAuth state 无效或已过期，请重新生成授权 URL".to_owned(),
         })?;
-    let tenant_id = owner
-        .tenant_id
-        .clone()
-        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     if session.tenant_id != tenant_id {
         warn!(owner_user_id = %owner.id, owner_tenant_id = %tenant_id, oauth_tenant_id = %session.tenant_id, "GPT OAuth 会话租户与当前 owner 不一致，拒绝消费");
         return Err(AppError::Console(ConsoleError::Forbidden).into());
@@ -234,6 +237,11 @@ async fn create_gpt_account(
         "chatgpt_account_id",
         MAX_ACCOUNT_ID_BYTES,
     )?;
+    let tenant_id = owner
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
+    super::precheck_resource_capacity(&state, &tenant_id, gpt_model::PROVIDER).await?;
     let refresh_grant = match auth::refresh_token(&state, &refresh_token, &client_id).await {
         Ok(refresh_grant) => refresh_grant,
         Err(error) => {
@@ -250,10 +258,6 @@ async fn create_gpt_account(
     };
     let auth_token =
         auth_token_from_refresh_import(refresh_token, chatgpt_account_id, refresh_grant)?;
-    let tenant_id = owner
-        .tenant_id
-        .clone()
-        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     let account =
         persist_imported_auth_token(&state, tenant_id, client_id, auth_token, payload.override_)
             .await?;

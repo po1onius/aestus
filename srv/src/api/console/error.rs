@@ -63,7 +63,10 @@ impl ConsoleApiError {
                     StatusCode::FORBIDDEN
                 }
                 ConsoleError::TenantUserLimitExceeded { .. }
-                | ConsoleError::TenantGatewayKeyLimitExceeded { .. } => StatusCode::CONFLICT,
+                | ConsoleError::TenantGatewayKeyLimitExceeded { .. }
+                | ConsoleError::TenantResourceLimitExceeded { .. }
+                | ConsoleError::TenantProviderGroupLimitExceeded { .. }
+                | ConsoleError::PluginSuiteCombinationExists => StatusCode::CONFLICT,
             },
             AppError::BadRequest { .. } | AppError::PluginRequestRejected { .. } => {
                 StatusCode::BAD_REQUEST
@@ -126,6 +129,10 @@ impl ConsoleApiError {
     /// 只返回不包含凭证、连接串或上游响应体的稳定上下文。
     fn safe_details(&self) -> Option<Value> {
         match &self.0 {
+            AppError::Console(
+                ConsoleError::TenantResourceLimitExceeded { current, limit }
+                | ConsoleError::TenantProviderGroupLimitExceeded { current, limit },
+            ) => Some(json!({ "current": current, "limit": limit })),
             AppError::ProviderStateSyncFailed {
                 provider,
                 resource_type,

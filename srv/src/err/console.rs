@@ -21,6 +21,19 @@ pub enum ConsoleError {
     )]
     TenantGatewayKeyLimitExceeded { current: i64, limit: i32 },
 
+    #[error(
+        "租户上游资源总数已达到上限：当前 {current}，上限 {limit}（跨 Provider 合计账号和官方 API Key，包含停用、失效和未分组资源）"
+    )]
+    TenantResourceLimitExceeded { current: i64, limit: i32 },
+
+    #[error(
+        "租户分组总数已达到上限：当前 {current}，上限 {limit}（跨 Provider 合计，包含停用和空分组）"
+    )]
+    TenantProviderGroupLimitExceeded { current: i64, limit: i32 },
+
+    #[error("相同插件组合的套件已存在，请使用已有套件")]
+    PluginSuiteCombinationExists,
+
     #[error("平台未允许本租户 owner 上传 WASM 插件")]
     TenantWasmUploadForbidden,
 }
@@ -33,6 +46,9 @@ impl ConsoleError {
             Self::Forbidden => "forbidden",
             Self::TenantUserLimitExceeded { .. } => "tenant_user_limit_exceeded",
             Self::TenantGatewayKeyLimitExceeded { .. } => "tenant_gateway_key_limit_exceeded",
+            Self::TenantResourceLimitExceeded { .. } => "tenant_resource_limit_exceeded",
+            Self::TenantProviderGroupLimitExceeded { .. } => "tenant_provider_group_limit_exceeded",
+            Self::PluginSuiteCombinationExists => "plugin_suite_combination_exists",
             Self::TenantWasmUploadForbidden => "tenant_wasm_upload_forbidden",
         }
     }

@@ -6,6 +6,8 @@ CREATE TABLE tenants (
     id TEXT PRIMARY KEY,
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
     max_users INTEGER CHECK (max_users IS NULL OR max_users >= 0),
+    max_resources INTEGER CHECK (max_resources IS NULL OR max_resources >= 0),
+    max_provider_groups INTEGER CHECK (max_provider_groups IS NULL OR max_provider_groups >= 0),
     max_gateway_keys_per_user INTEGER CHECK (max_gateway_keys_per_user IS NULL OR max_gateway_keys_per_user >= 0),
     owner_can_upload_wasm BOOLEAN NOT NULL DEFAULT FALSE,
     created_by UUID NOT NULL,
@@ -175,6 +177,10 @@ CREATE TABLE plugin_suites (
 );
 CREATE UNIQUE INDEX idx_plugin_suites_public_name ON plugin_suites (provider, name) WHERE tenant_id IS NULL;
 CREATE UNIQUE INDEX idx_plugin_suites_tenant_name ON plugin_suites (tenant_id, provider, name) WHERE tenant_id IS NOT NULL;
+-- 公共归属与空插槽的 NULL 也参与组合去重；停用套件仍占用组合。
+CREATE UNIQUE INDEX uq_plugin_suites_combination ON plugin_suites
+    (tenant_id, provider, request_plugin_id, buffered_response_plugin_id, stream_response_plugin_id)
+    NULLS NOT DISTINCT;
 CREATE INDEX idx_plugin_suites_tenant_provider_enabled ON plugin_suites (tenant_id, provider, enabled);
 CREATE INDEX idx_plugin_suites_request_plugin ON plugin_suites (request_plugin_id);
 CREATE INDEX idx_plugin_suites_buffered_plugin ON plugin_suites (buffered_response_plugin_id);

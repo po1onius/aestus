@@ -36,7 +36,7 @@ export function TenantLimitsDialog({ tenant, token, onSaved, onClose }: {
     }
   }
   return <Modal titleId="tenantLimitsTitle" title={`设置限制 · ${tenant.id}`}
-    description={`当前用户数：${tenant.user_count}。调低上限后保留现有资源，新增时执行限制。`}
+    description={`当前用户数：${tenant.user_count}，上游资源总数：${tenant.resource_count}，分组总数：${tenant.provider_group_count}。调低上限后保留现有资源，新增时执行限制。`}
     className="max-w-lg" closeDisabled={saving} onClose={onClose}>
     <form className="grid gap-4" onSubmit={submit}>
       <TenantLimitsFields value={draft} onChange={setDraft} disabled={saving} />

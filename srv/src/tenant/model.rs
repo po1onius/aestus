@@ -10,6 +10,8 @@ pub mod schema {
             id -> Text,
             enabled -> Bool,
             max_users -> Nullable<Int4>,
+            max_resources -> Nullable<Int4>,
+            max_provider_groups -> Nullable<Int4>,
             max_gateway_keys_per_user -> Nullable<Int4>,
             owner_can_upload_wasm -> Bool,
             created_by -> Uuid,
@@ -38,6 +40,8 @@ pub struct Tenant {
     pub id: String,
     pub enabled: bool,
     pub max_users: Option<i32>,
+    pub max_resources: Option<i32>,
+    pub max_provider_groups: Option<i32>,
     pub max_gateway_keys_per_user: Option<i32>,
     pub owner_can_upload_wasm: bool,
     pub created_by: Uuid,
@@ -52,6 +56,8 @@ pub struct TenantSummary {
     pub tenant: Tenant,
     pub code: Option<String>,
     pub user_count: i64,
+    pub resource_count: i64,
+    pub provider_group_count: i64,
 }
 
 /// 数量为 NULL 表示不限制，0 表示禁止新增；更新接口按整组替换。
@@ -59,6 +65,8 @@ pub struct TenantSummary {
 #[serde(deny_unknown_fields)]
 pub struct TenantLimits {
     pub max_users: Option<i32>,
+    pub max_resources: Option<i32>,
+    pub max_provider_groups: Option<i32>,
     pub max_gateway_keys_per_user: Option<i32>,
     pub owner_can_upload_wasm: bool,
 }
@@ -66,7 +74,11 @@ pub struct TenantLimits {
 impl TenantLimits {
     pub fn validate(&self) -> crate::err::AppResult<()> {
         if self.max_users.is_some_and(|value| value < 0)
-            || self.max_gateway_keys_per_user.is_some_and(|value| value < 0)
+            || self.max_resources.is_some_and(|value| value < 0)
+            || self.max_provider_groups.is_some_and(|value| value < 0)
+            || self
+                .max_gateway_keys_per_user
+                .is_some_and(|value| value < 0)
         {
             return Err(crate::err::AppError::BadRequest {
                 message: "数量上限必须为 0..=2147483647 的整数，或 null（不限制）".to_owned(),
@@ -80,6 +92,8 @@ impl Tenant {
     pub fn limits(&self) -> TenantLimits {
         TenantLimits {
             max_users: self.max_users,
+            max_resources: self.max_resources,
+            max_provider_groups: self.max_provider_groups,
             max_gateway_keys_per_user: self.max_gateway_keys_per_user,
             owner_can_upload_wasm: self.owner_can_upload_wasm,
         }
