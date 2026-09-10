@@ -23,7 +23,7 @@ const chartNumberFormatter = new Intl.NumberFormat("zh-CN", {
   maximumFractionDigits: 1,
 });
 
-/** 三张模型图共用同一套颜色，确保同一统计结果中的模型视觉语义保持一致。 */
+/** 模型占比和排行共用同一套颜色。 */
 const MODEL_COLORS = [
   "#5b5bd6",
   "#3977d4",
@@ -70,8 +70,8 @@ export function UsagePage({
   const [usagePeriod, setUsagePeriod] = useState<UsagePeriod>("year");
   const modelPoints = useMemo(() => compactModelPoints(usage?.models ?? []), [usage]);
   const apiKeyPoints = useMemo(() => compactApiKeyPoints(usage?.api_keys ?? []), [usage]);
-  const userPoints = useMemo(() => usage?.users ?? [], [usage]);
-  // 平台管理员排行展示真实的前八名租户，不把剩余租户汇总成一个会干扰名次的“其他租户”。
+  // 租户和用户排行展示真实的前八名，不把剩余条目汇总成会干扰名次的“其他”。
+  const userRankPoints = useMemo(() => (usage?.users ?? []).slice(0, 8), [usage]);
   const tenantRankPoints = useMemo(() => (usage?.tenants ?? []).slice(0, 8), [usage]);
   const usageScope = usage?.scope ?? "current_user";
   const allUsers = usageScope === "all_users";
@@ -95,18 +95,6 @@ export function UsagePage({
     () => buildConsumerShareOption(apiKeyPoints, "API Key Token", darkMode),
     [apiKeyPoints, darkMode],
   );
-  const userShareOption = useMemo(
-    () =>
-      buildConsumerShareOption(
-        userPoints.map((point) => ({
-          name: point.username,
-          total_tokens: point.total_tokens,
-        })),
-        "用户 Token",
-        darkMode,
-      ),
-    [darkMode, userPoints],
-  );
   const rankOption = useMemo(
     () =>
       allUsers
@@ -118,15 +106,24 @@ export function UsagePage({
             CONSUMER_COLORS,
             darkMode,
           )
-        : buildRankOption(
-            modelPoints.map((point) => ({
-              name: modelLabel(point),
-              total_tokens: point.total_tokens,
-            })),
-            MODEL_COLORS,
-            darkMode,
-          ),
-    [allUsers, darkMode, modelPoints, tenantRankPoints],
+        : tenantUsers
+          ? buildRankOption(
+              userRankPoints.map((point) => ({
+                name: point.username,
+                total_tokens: point.total_tokens,
+              })),
+              CONSUMER_COLORS,
+              darkMode,
+            )
+          : buildRankOption(
+              modelPoints.map((point) => ({
+                name: modelLabel(point),
+                total_tokens: point.total_tokens,
+              })),
+              MODEL_COLORS,
+              darkMode,
+            ),
+    [allUsers, tenantUsers, darkMode, modelPoints, tenantRankPoints, userRankPoints],
   );
   return (
     <section className="grid gap-4">
@@ -188,13 +185,13 @@ export function UsagePage({
             />
           </article>
           <article className={`${panelClass} grid gap-3 p-4`}>
-            <ChartHeading title={tenantUsers ? "全历史租户用户消耗占比" : "全历史消耗占比"} />
+            <ChartHeading title={tenantUsers ? "全历史模型消耗占比" : "全历史消耗占比"} />
             {tenantUsers ? (
               <section className="min-w-0">
-                {userPoints.length > 0 ? (
+                {modelPoints.length > 0 ? (
                   <EChart
-                    option={userShareOption}
-                    ariaLabel="租户用户 Token 消耗占比环形图"
+                    option={modelShareOption}
+                    ariaLabel="模型 Token 消耗占比环形图"
                     className="h-72 min-h-64 w-full"
                   />
                 ) : (
@@ -233,11 +230,11 @@ export function UsagePage({
             )}
           </article>
           <article className={`${panelClass} grid gap-3 p-4`}>
-            <ChartHeading title={allUsers ? "全历史租户消耗排行" : "全历史模型消耗排行"} />
-            {(allUsers ? tenantRankPoints.length : modelPoints.length) > 0 ? (
+            <ChartHeading title={allUsers ? "全历史租户消耗排行" : tenantUsers ? "全历史租户用户消耗排行" : "全历史模型消耗排行"} />
+            {(allUsers ? tenantRankPoints.length : tenantUsers ? userRankPoints.length : modelPoints.length) > 0 ? (
               <EChart
                 option={rankOption}
-                ariaLabel={allUsers ? "租户 Token 消耗排行柱状图" : "模型 Token 消耗排行柱状图"}
+                ariaLabel={allUsers ? "租户 Token 消耗排行柱状图" : tenantUsers ? "租户用户 Token 消耗排行柱状图" : "模型 Token 消耗排行柱状图"}
               />
             ) : (
               <ChartEmptyState />
@@ -725,8 +722,8 @@ function buildRankOption(
   darkMode: boolean,
 ): EChartOption {
   const colors = chartThemeColors(darkMode);
-  // 排行图只有一个 bar series，为每个条目显式分色。管理员传入用户数据，普通用户传入
-  // 模型数据，两种角色复用完全一致的数值轴与 Tooltip 行为。
+  // 排行图只有一个 bar series，为每个条目显式分色。平台管理员、租户 owner 和普通用户
+  // 分别传入租户、用户和模型数据，共用数值轴与 Tooltip 行为。
   const ordered = points
     .map((point, index) => ({ point, color: palette[index % palette.length] }))
     .reverse();
