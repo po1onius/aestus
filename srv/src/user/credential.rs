@@ -6,7 +6,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
-    err::{AppError, AppResult},
+    err::{AppError, AppResult, ConsoleError},
     state::AppState,
 };
 
@@ -88,7 +88,7 @@ pub fn decode_jwt(state: &AppState, token: &str) -> AppResult<JwtClaims> {
     .map(|data| data.claims)
     .map_err(|source| {
         warn!(error = %source, "Dashboard JWT 解析失败");
-        AppError::InvalidDashboardToken
+        AppError::Console(ConsoleError::InvalidDashboardToken)
     })
 }
 

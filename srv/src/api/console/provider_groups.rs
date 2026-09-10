@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    api::console::auth,
-    err::{AdminResult, AppError, AppResult},
+    api::console::{auth, error::ConsoleResult},
+    err::{AppError, ConsoleError},
     provider::{
         claude::maintenance::ClaudeMaintenance,
         gpt::{maintenance::GptMaintenance, model as gpt_model},
@@ -78,7 +78,7 @@ async fn list_unassigned_resources(
     State(state): State<AppState>,
     auth::AdminUser(owner): auth::AdminUser,
     Query(query): Query<GroupListQuery>,
-) -> AdminResult<Json<Vec<UnassignedProviderResource>>> {
+) -> ConsoleResult<Json<Vec<UnassignedProviderResource>>> {
     let provider = query
         .provider
         .as_deref()
@@ -88,7 +88,10 @@ async fn list_unassigned_resources(
             message: "provider 不能为空".to_owned(),
         })?;
     let mut conn = state.db_conn().await?;
-    let tenant_id = owner.tenant_id.clone().ok_or(AppError::Forbidden)?;
+    let tenant_id = owner
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     Ok(Json(
         group::list_unassigned_resources(&mut conn, tenant_id, provider).await?,
     ))
@@ -99,8 +102,11 @@ async fn list_unassigned_resources(
 async fn list_group_options(
     State(state): State<AppState>,
     auth::CurrentUser(current_user): auth::CurrentUser,
-) -> AppResult<Json<Vec<ProviderGroupWithModels>>> {
-    let tenant_id = current_user.tenant_id.clone().ok_or(AppError::Forbidden)?;
+) -> ConsoleResult<Json<Vec<ProviderGroupWithModels>>> {
+    let tenant_id = current_user
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     let mut conn = state.db_conn().await?;
     let mut groups = group::list_enabled(&mut conn, tenant_id).await?;
     if let Some(group_ids) = group_access::granted_group_ids(&mut conn, &current_user).await? {
@@ -115,7 +121,7 @@ async fn list_group_options(
 async fn list_current_group_access(
     State(state): State<AppState>,
     auth::CurrentUser(current_user): auth::CurrentUser,
-) -> AppResult<Json<Vec<UserGroupGrant>>> {
+) -> ConsoleResult<Json<Vec<UserGroupGrant>>> {
     let mut conn = state.db_conn().await?;
     let grants = group_access::list_for_current_user(&mut conn, &current_user).await?;
     Ok(Json(grants))
@@ -125,14 +131,17 @@ async fn list_groups(
     State(state): State<AppState>,
     auth::AdminUser(owner): auth::AdminUser,
     Query(query): Query<GroupListQuery>,
-) -> AdminResult<Json<Vec<ProviderGroupSummary>>> {
+) -> ConsoleResult<Json<Vec<ProviderGroupSummary>>> {
     let provider = query
         .provider
         .as_deref()
         .map(str::trim)
         .filter(|provider| !provider.is_empty());
     let mut conn = state.db_conn().await?;
-    let tenant_id = owner.tenant_id.clone().ok_or(AppError::Forbidden)?;
+    let tenant_id = owner
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     Ok(Json(
         group::list_summaries(&mut conn, tenant_id, provider).await?,
     ))
@@ -142,9 +151,12 @@ async fn create_group(
     State(state): State<AppState>,
     auth::AdminUser(owner): auth::AdminUser,
     Json(payload): Json<CreateGroupRequest>,
-) -> AdminResult<Json<ProviderGroupWithModels>> {
+) -> ConsoleResult<Json<ProviderGroupWithModels>> {
     let mut conn = state.db_conn().await?;
-    let tenant_id = owner.tenant_id.clone().ok_or(AppError::Forbidden)?;
+    let tenant_id = owner
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     let created = group::create(
         &mut conn,
         tenant_id,
@@ -180,9 +192,12 @@ async fn rename_group(
     auth::AdminUser(owner): auth::AdminUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<RenameGroupRequest>,
-) -> AdminResult<Json<ProviderGroupWithModels>> {
+) -> ConsoleResult<Json<ProviderGroupWithModels>> {
     let mut conn = state.db_conn().await?;
-    let tenant_id = owner.tenant_id.clone().ok_or(AppError::Forbidden)?;
+    let tenant_id = owner
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     let group = group::rename(&mut conn, tenant_id, id, payload.name).await?;
     Ok(Json(group::with_models(&mut conn, group).await?))
 }
@@ -192,9 +207,12 @@ async fn update_group_enabled(
     auth::AdminUser(owner): auth::AdminUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateGroupEnabledRequest>,
-) -> AdminResult<Json<ProviderGroupWithModels>> {
+) -> ConsoleResult<Json<ProviderGroupWithModels>> {
     let mut conn = state.db_conn().await?;
-    let tenant_id = owner.tenant_id.clone().ok_or(AppError::Forbidden)?;
+    let tenant_id = owner
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     let group = group::update_enabled(&mut conn, tenant_id, id, payload.enabled).await?;
     Ok(Json(group::with_models(&mut conn, group).await?))
 }
@@ -204,9 +222,12 @@ async fn update_group_models(
     auth::AdminUser(owner): auth::AdminUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateGroupModelsRequest>,
-) -> AdminResult<Json<ProviderGroupWithModels>> {
+) -> ConsoleResult<Json<ProviderGroupWithModels>> {
     let mut conn = state.db_conn().await?;
-    let tenant_id = owner.tenant_id.clone().ok_or(AppError::Forbidden)?;
+    let tenant_id = owner
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     Ok(Json(
         group::update_models(&mut conn, tenant_id, id, payload.models).await?,
     ))
@@ -216,9 +237,12 @@ async fn delete_group(
     State(state): State<AppState>,
     auth::AdminUser(owner): auth::AdminUser,
     Path(id): Path<Uuid>,
-) -> AdminResult<Json<DeleteGroupResponse>> {
+) -> ConsoleResult<Json<DeleteGroupResponse>> {
     let mut conn = state.db_conn().await?;
-    let tenant_id = owner.tenant_id.clone().ok_or(AppError::Forbidden)?;
+    let tenant_id = owner
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     let deleted = group::delete(&mut conn, tenant_id, id).await?;
     drop(conn);
 

@@ -14,8 +14,8 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
-    api::console::auth,
-    err::{AppError, AppResult},
+    api::console::{auth, error::ConsoleResult},
+    err::{AppError, AppResult, ConsoleError},
     state::AppState,
     tenant,
     user::User,
@@ -56,7 +56,7 @@ async fn list_request_logs(
     State(state): State<AppState>,
     auth::CurrentUser(current_user): auth::CurrentUser,
     Query(query): Query<ListRequestLogsQuery>,
-) -> AppResult<Json<ListRequestLogsResponse>> {
+) -> ConsoleResult<Json<ListRequestLogsResponse>> {
     let ListRequestLogsQuery {
         limit,
         date,
@@ -116,7 +116,7 @@ async fn resolve_tenant_scope(
                 requested_tenant_id,
                 "非平台管理员尝试指定请求日志租户筛选"
             );
-            return Err(AppError::Forbidden);
+            return Err(AppError::Console(ConsoleError::Forbidden));
         }
         return Ok(current_user.tenant_id.clone());
     }

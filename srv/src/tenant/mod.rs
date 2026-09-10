@@ -1,5 +1,5 @@
 mod model;
 mod repository;
 
-pub use model::{Tenant, TenantSummary};
+pub use model::{Tenant, TenantLimits, TenantSummary};
 pub use repository::*;

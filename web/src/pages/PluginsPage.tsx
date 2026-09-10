@@ -15,6 +15,8 @@ import type { DashboardUser, PluginSummary, PluginSuiteSummary, UpstreamApiKeyPr
 
 interface Props {
   user: DashboardUser;
+  canUploadWasm: boolean;
+  uploadRestriction: string;
   plugins: PluginSummary[];
   suites: PluginSuiteSummary[];
   loading: boolean;
@@ -52,17 +54,18 @@ export function PluginsPage(props: Props) {
       {props.user.role !== "platform_admin" && (
         <p className={cellNoteClass}>可以使用平台公共资源，管理本租户资源；私有套件可组合公共插件与本租户插件。</p>
       )}
+      {!props.canUploadWasm && <p className={cellNoteClass} role="status">{props.uploadRestriction}</p>}
       <div className={`${panelClass} overflow-hidden`}>
         <div className={panelHeaderClass}>
           <h2 className={panelTitleClass}>{tab === "plugins" ? "WASM 插件" : "套件"}</h2>
-          <button className={buttonPrimary} disabled={props.savingId !== null} onClick={tab === "plugins" ? props.onAddPlugin : props.onAddSuite}>
+          <button className={buttonPrimary} disabled={props.savingId !== null || (tab === "plugins" && !props.canUploadWasm)} onClick={tab === "plugins" ? props.onAddPlugin : props.onAddSuite}>
             <Plus size={16} />{tab === "plugins" ? "上传插件" : "创建套件"}
           </button>
         </div>
         {props.loading ? (
           <div className={emptyStateClass}><Loader2 className={spinnerClass} size={24} /><span>正在加载</span></div>
         ) : empty ? (
-          <div className={emptyStateClass}><PlugZap size={24} /><span>{tab === "plugins" ? "该 Provider 还没有插件，请先按插槽上传" : "该 Provider 还没有套件，请从已有插件中创建组合"}</span></div>
+          <div className={emptyStateClass}><PlugZap size={24} /><span>{tab === "plugins" ? (props.canUploadWasm ? "该 Provider 还没有插件，请先按插槽上传" : "该 Provider 暂无可用插件") : "该 Provider 还没有套件，请从已有插件中创建组合"}</span></div>
         ) : (
           <div className={tableScrollClass}>
             {tab === "plugins" ? (

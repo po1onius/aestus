@@ -16,8 +16,8 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
-    api::console::{auth, pagination::ListPageQuery},
-    err::{AppError, AppResult},
+    api::console::{auth, error::ConsoleResult, pagination::ListPageQuery},
+    err::{AppError, AppResult, ConsoleError},
     gateway_key::{self, GatewayApiKeyWithModels},
     plugin::{self, model::PluginSuiteSummary},
     provider::group::{self, ProviderGroup, ProviderGroupWithModels},
@@ -93,7 +93,7 @@ async fn create_api_key(
     State(state): State<AppState>,
     auth::CurrentUser(current_user): auth::CurrentUser,
     Json(payload): Json<CreateApiKeyRequest>,
-) -> AppResult<impl IntoResponse> {
+) -> ConsoleResult<impl IntoResponse> {
     let name = normalize_name(payload.name)?;
     let mut conn = state.db_conn().await?;
 
@@ -125,7 +125,7 @@ async fn list_api_keys(
     State(state): State<AppState>,
     auth::CurrentUser(current_user): auth::CurrentUser,
     Query(query): Query<ListPageQuery>,
-) -> AppResult<impl IntoResponse> {
+) -> ConsoleResult<impl IntoResponse> {
     let page = query.normalize()?;
     let mut conn = state.db_conn().await?;
 
@@ -142,7 +142,10 @@ async fn list_api_keys(
                 .iter()
                 .map(|item| item.api_key.group_id)
                 .collect::<Vec<_>>();
-            let tenant_id = current_user.tenant_id.clone().ok_or(AppError::Forbidden)?;
+            let tenant_id = current_user
+                .tenant_id
+                .clone()
+                .ok_or(AppError::Console(ConsoleError::Forbidden))?;
             let groups = group::find_by_ids(conn, tenant_id.clone(), &group_ids).await?;
             let group_models = group::load_models_by_group_ids(conn, &group_ids).await?;
             let plugin_suite_ids = api_keys
@@ -201,7 +204,7 @@ async fn delete_api_key(
     State(state): State<AppState>,
     auth::CurrentUser(current_user): auth::CurrentUser,
     Path(id): Path<Uuid>,
-) -> AppResult<impl IntoResponse> {
+) -> ConsoleResult<impl IntoResponse> {
     let mut conn = state.db_conn().await?;
     let deleted = gateway_key::delete_for_user(&mut conn, current_user.id, id).await?;
     info!(
@@ -218,7 +221,7 @@ async fn update_api_key_enabled(
     auth::CurrentUser(current_user): auth::CurrentUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateApiKeyEnabledRequest>,
-) -> AppResult<impl IntoResponse> {
+) -> ConsoleResult<impl IntoResponse> {
     let mut conn = state.db_conn().await?;
     require_api_key_group_grant(&mut conn, &current_user, id).await?;
 
@@ -243,7 +246,7 @@ async fn update_api_key_models(
     auth::CurrentUser(current_user): auth::CurrentUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateApiKeyModelsRequest>,
-) -> AppResult<impl IntoResponse> {
+) -> ConsoleResult<impl IntoResponse> {
     let mut conn = state.db_conn().await?;
     require_api_key_group_grant(&mut conn, &current_user, id).await?;
     let api_key =
@@ -267,7 +270,7 @@ async fn update_api_key_plugin_suite(
     auth::CurrentUser(current_user): auth::CurrentUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateApiKeyPluginSuiteRequest>,
-) -> AppResult<impl IntoResponse> {
+) -> ConsoleResult<impl IntoResponse> {
     let mut conn = state.db_conn().await?;
     require_api_key_group_grant(&mut conn, &current_user, id).await?;
     let api_key = gateway_key::update_plugin_for_user(

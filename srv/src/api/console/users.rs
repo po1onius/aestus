@@ -10,9 +10,10 @@ use uuid::Uuid;
 use crate::{
     api::console::{
         auth,
+        error::ConsoleResult,
         pagination::{ListPage, ListPageQuery},
     },
-    err::{AdminResult, AppError},
+    err::{AppError, ConsoleError},
     provider::{claude, gpt},
     request::concurrency,
     state::AppState,
@@ -109,8 +110,11 @@ async fn list_user_group_grants(
     State(state): State<AppState>,
     auth::AdminUser(owner): auth::AdminUser,
     Path(id): Path<Uuid>,
-) -> AdminResult<Json<Vec<UserGroupGrant>>> {
-    let tenant_id = owner.tenant_id.clone().ok_or(AppError::Forbidden)?;
+) -> ConsoleResult<Json<Vec<UserGroupGrant>>> {
+    let tenant_id = owner
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     let mut conn = state.db_conn().await?;
     let grants = group_access::list_for_managed_user(&mut conn, tenant_id.clone(), id).await?;
     info!(
@@ -128,8 +132,11 @@ async fn replace_user_group_grants(
     auth::AdminUser(owner): auth::AdminUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<ReplaceUserGroupGrantsRequest>,
-) -> AdminResult<Json<Vec<UserGroupGrant>>> {
-    let tenant_id = owner.tenant_id.clone().ok_or(AppError::Forbidden)?;
+) -> ConsoleResult<Json<Vec<UserGroupGrant>>> {
+    let tenant_id = owner
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     let inputs = payload
         .grants
         .into_iter()
@@ -148,9 +155,12 @@ async fn create_user(
     State(state): State<AppState>,
     auth::AdminUser(current_admin): auth::AdminUser,
     Json(payload): Json<CreateUserRequest>,
-) -> AdminResult<Json<PublicUser>> {
+) -> ConsoleResult<Json<PublicUser>> {
     let mut conn = state.db_conn().await?;
-    let tenant_id = current_admin.tenant_id.clone().ok_or(AppError::Forbidden)?;
+    let tenant_id = current_admin
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     let user = user::create_owner_managed_user(
         &mut conn,
         tenant_id.clone(),
@@ -178,10 +188,13 @@ async fn list_users(
     State(state): State<AppState>,
     auth::AdminUser(owner): auth::AdminUser,
     Query(query): Query<ListPageQuery>,
-) -> AdminResult<Json<ListPage<UserListItemResponse>>> {
+) -> ConsoleResult<Json<ListPage<UserListItemResponse>>> {
     let page = query.normalize()?;
     let mut conn = state.db_conn().await?;
-    let tenant_id = owner.tenant_id.clone().ok_or(AppError::Forbidden)?;
+    let tenant_id = owner
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     let users = user::list_by_tenant(
         &mut conn,
         tenant_id.clone(),
@@ -239,9 +252,12 @@ async fn update_user_quota(
     auth::AdminUser(owner): auth::AdminUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateUserQuotaRequest>,
-) -> AdminResult<Json<PublicUser>> {
+) -> ConsoleResult<Json<PublicUser>> {
     let mut conn = state.db_conn().await?;
-    let tenant_id = owner.tenant_id.clone().ok_or(AppError::Forbidden)?;
+    let tenant_id = owner
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     let user = user::update_quota_for_tenant(&mut conn, tenant_id, id, payload.quota).await?;
 
     Ok(Json(user.into()))
@@ -252,9 +268,12 @@ async fn update_user_max_concurrency(
     auth::AdminUser(owner): auth::AdminUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateUserMaxConcurrencyRequest>,
-) -> AdminResult<Json<PublicUser>> {
+) -> ConsoleResult<Json<PublicUser>> {
     let mut conn = state.db_conn().await?;
-    let tenant_id = owner.tenant_id.clone().ok_or(AppError::Forbidden)?;
+    let tenant_id = owner
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     let requested_max_concurrency = payload.max_concurrency.0;
     let (user, previous_max_concurrency) = User::update_max_concurrency_for_tenant(
         &mut conn,
@@ -283,9 +302,12 @@ async fn update_user_status(
     auth::AdminUser(current_user): auth::AdminUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateUserStatusRequest>,
-) -> AdminResult<Json<PublicUser>> {
+) -> ConsoleResult<Json<PublicUser>> {
     let mut conn = state.db_conn().await?;
-    let tenant_id = current_user.tenant_id.clone().ok_or(AppError::Forbidden)?;
+    let tenant_id = current_user
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     let user = user::update_status(&mut conn, tenant_id, id, payload.enabled).await?;
 
     Ok(Json(user.into()))

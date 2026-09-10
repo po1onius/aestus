@@ -21,12 +21,20 @@ pub async fn create_plugin(
     conn: &mut AsyncPgConnection,
     input: NewPlugin,
 ) -> AppResult<PluginSummary> {
-    let plugin = diesel::insert_into(plugins::table)
-        .values(input)
-        .returning(PluginSummary::as_returning())
-        .get_result::<PluginSummary>(conn)
-        .await
-        .map_err(map_write_error)?;
+    let plugin = conn
+        .transaction::<PluginSummary, AppError, _>(async |conn| {
+            if let Some(tenant_id) = input.tenant_id.as_deref() {
+                let tenant = crate::tenant::require_enabled_for_update(conn, tenant_id).await?;
+                tenant.require_wasm_upload(input.created_by)?;
+            }
+            diesel::insert_into(plugins::table)
+                .values(input)
+                .returning(PluginSummary::as_returning())
+                .get_result::<PluginSummary>(conn)
+                .await
+                .map_err(map_write_error)
+        })
+        .await?;
     info!(tenant_id = ?plugin.tenant_id, plugin_id = %plugin.id, provider = %plugin.provider,
         slot = %plugin.slot, wasm_size = plugin.wasm_size, wasm_sha256 = %plugin.wasm_sha256, "WASM 插件已上传");
     Ok(plugin)

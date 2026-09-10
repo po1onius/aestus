@@ -13,9 +13,10 @@ use uuid::Uuid;
 use crate::{
     api::console::{
         auth,
+        error::ConsoleResult,
         pagination::{ListPage, ListPageQuery},
     },
-    err::{AdminResult, AppError, AppResult},
+    err::{AppError, AppResult},
     provider::{
         claude::model::ClaudeAccountSpecific,
         credential::{ProviderAccount, ProviderApiKey},
@@ -24,7 +25,7 @@ use crate::{
         scheduler, sql,
     },
     state::AppState,
-    tenant::{self, Tenant, TenantSummary},
+    tenant::{self, Tenant, TenantLimits, TenantSummary},
 };
 
 #[derive(Debug, Deserialize)]
@@ -33,6 +34,8 @@ struct CreateTenantRequest {
     id: String,
     /// 缺失、null 或空字符串时只创建租户；非空时同时创建租户 owner。
     password: Option<String>,
+    #[serde(default)]
+    limits: TenantLimits,
 }
 
 #[derive(Debug, Deserialize)]
@@ -100,6 +103,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_tenants).post(create_tenant))
         .route("/{id}/status", put(update_tenant_status))
+        .route("/{id}/limits", put(update_tenant_limits))
         .route(
             "/{id}/code",
             post(regenerate_tenant_code).delete(revoke_tenant_code),
@@ -111,17 +115,24 @@ async fn create_tenant(
     State(state): State<AppState>,
     auth::PlatformAdminUser(admin): auth::PlatformAdminUser,
     Json(payload): Json<CreateTenantRequest>,
-) -> AdminResult<PrivateJson<TenantSummary>> {
+) -> ConsoleResult<PrivateJson<TenantSummary>> {
     let mut conn = state.db_conn().await?;
     Ok(private_json(
-        tenant::create(&mut conn, payload.id, payload.password, admin.id).await?,
+        tenant::create(
+            &mut conn,
+            payload.id,
+            payload.password,
+            payload.limits,
+            admin.id,
+        )
+        .await?,
     ))
 }
 
 async fn list_tenants(
     State(state): State<AppState>,
     _admin: auth::PlatformAdminUser,
-) -> AdminResult<PrivateJson<Vec<TenantSummary>>> {
+) -> ConsoleResult<PrivateJson<Vec<TenantSummary>>> {
     let mut conn = state.db_conn().await?;
     Ok(private_json(tenant::list(&mut conn).await?))
 }
@@ -131,13 +142,14 @@ async fn list_tenant_resources(
     auth::PlatformAdminUser(admin): auth::PlatformAdminUser,
     Path(tenant_id): Path<String>,
     Query(query): Query<ListTenantResourcesQuery>,
-) -> AdminResult<PrivateJson<ListPage<TenantResourceResponse>>> {
+) -> ConsoleResult<PrivateJson<ListPage<TenantResourceResponse>>> {
     let page = ListPageQuery::new(query.limit, query.offset).normalize()?;
     let mut conn = state.db_conn().await?;
     if tenant::find_by_id(&mut conn, &tenant_id).await?.is_none() {
         return Err(AppError::BadRequest {
             message: format!("租户不存在: {tenant_id}"),
-        });
+        }
+        .into());
     }
 
     let items = match query.kind {
@@ -290,7 +302,7 @@ async fn update_tenant_status(
     auth::PlatformAdminUser(admin): auth::PlatformAdminUser,
     Path(id): Path<String>,
     Json(payload): Json<UpdateTenantStatusRequest>,
-) -> AdminResult<Json<Tenant>> {
+) -> ConsoleResult<Json<Tenant>> {
     let mut conn = state.db_conn().await?;
     Ok(Json(
         tenant::set_enabled(&mut conn, &id, payload.enabled, admin.id).await?,
@@ -301,7 +313,7 @@ async fn regenerate_tenant_code(
     State(state): State<AppState>,
     auth::PlatformAdminUser(admin): auth::PlatformAdminUser,
     Path(id): Path<String>,
-) -> AdminResult<PrivateJson<TenantSummary>> {
+) -> ConsoleResult<PrivateJson<TenantSummary>> {
     let mut conn = state.db_conn().await?;
     Ok(private_json(
         tenant::regenerate_code(&mut conn, &id, admin.id).await?,
@@ -312,7 +324,7 @@ async fn revoke_tenant_code(
     State(state): State<AppState>,
     auth::PlatformAdminUser(admin): auth::PlatformAdminUser,
     Path(id): Path<String>,
-) -> AdminResult<Json<RevokeTenantCodeResponse>> {
+) -> ConsoleResult<Json<RevokeTenantCodeResponse>> {
     let mut conn = state.db_conn().await?;
     tenant::revoke_code(&mut conn, &id, admin.id).await?;
     Ok(Json(RevokeTenantCodeResponse { tenant_id: id }))
@@ -322,4 +334,16 @@ fn private_json<T>(value: T) -> PrivateJson<T> {
     let mut headers = HeaderMap::new();
     headers.insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
     (headers, Json(value))
+}
+
+async fn update_tenant_limits(
+    State(state): State<AppState>,
+    auth::PlatformAdminUser(admin): auth::PlatformAdminUser,
+    Path(tenant_id): Path<String>,
+    Json(payload): Json<TenantLimits>,
+) -> ConsoleResult<PrivateJson<Tenant>> {
+    let mut conn = state.db_conn().await?;
+    Ok(private_json(
+        tenant::set_limits(&mut conn, &tenant_id, payload, admin.id).await?,
+    ))
 }

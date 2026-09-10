@@ -5,6 +5,9 @@ CREATE TABLE tenants (
     -- 运维查询保持直观；名称创建后不可修改。
     id TEXT PRIMARY KEY,
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    max_users INTEGER CHECK (max_users IS NULL OR max_users >= 0),
+    max_gateway_keys_per_user INTEGER CHECK (max_gateway_keys_per_user IS NULL OR max_gateway_keys_per_user >= 0),
+    owner_can_upload_wasm BOOLEAN NOT NULL DEFAULT FALSE,
     created_by UUID NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),

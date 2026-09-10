@@ -15,7 +15,7 @@ use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::{
-    api::console::auth,
+    api::console::{auth, error::ConsoleResult},
     err::{AppError, AppResult},
     state::AppState,
     user::{self, User},
@@ -208,7 +208,7 @@ pub(super) fn router() -> Router<AppState> {
 async fn get_usage(
     State(state): State<AppState>,
     auth::CurrentUser(current_user): auth::CurrentUser,
-) -> AppResult<Json<UsageOverviewResponse>> {
+) -> ConsoleResult<Json<UsageOverviewResponse>> {
     let query = normalize_usage_range(state.config().service_timezone)?;
     let scope = UsageScope::from_user(&current_user);
 

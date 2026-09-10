@@ -1,5 +1,6 @@
 mod auth;
 mod endpoint;
+mod error;
 mod pipeline;
 
 use axum::{
@@ -7,7 +8,6 @@ use axum::{
     body::Body,
     extract::{OriginalUri, Request, State},
     http::Response,
-    response::IntoResponse,
     routing::post,
 };
 use tracing::{info, instrument};
@@ -52,7 +52,7 @@ async fn handle_provider_request(
 ) -> Response<Body> {
     let endpoint = match EndpointDescriptor::identify(request.method(), &uri) {
         Ok(endpoint) => endpoint,
-        Err(error) => return error.into_response(),
+        Err(error) => return error::unidentified_endpoint_response(error),
     };
     // 该 ID 是模型请求在网关内部的唯一关联标识。一次请求即使发生多次上游重试，
     // lifecycle、scheduler、maintenance 与请求日志也始终复用同一个 ID。

@@ -46,21 +46,32 @@ pub async fn create_user(
     }
     validate_user_quota(quota)?;
 
-    let user = diesel::insert_into(dsl::users)
-        .values(&NewUser {
-            tenant_id,
-            username,
-            email,
-            password_hash,
-            role,
-            quota,
-            email_verified,
-            enabled: true,
+    // 所有租户用户入口（含注册和初始化 owner）在此统一准入。
+    // 已有外层事务时 diesel 使用 savepoint，租户锁仍持有到最外层事务提交。
+    let user = conn
+        .transaction::<User, AppError, _>(async |conn| {
+            if let Some(tenant_id) = tenant_id.as_deref() {
+                let tenant = crate::tenant::require_enabled_for_update(conn, tenant_id).await?;
+                crate::tenant::require_user_capacity(conn, &tenant).await?;
+            }
+            let user = diesel::insert_into(dsl::users)
+                .values(&NewUser {
+                    tenant_id,
+                    username,
+                    email,
+                    password_hash,
+                    role,
+                    quota,
+                    email_verified,
+                    enabled: true,
+                })
+                .returning(User::as_returning())
+                .get_result::<User>(&mut *conn)
+                .await
+                .map_err(map_user_insert_error)?;
+            Ok(user)
         })
-        .returning(User::as_returning())
-        .get_result::<User>(conn)
-        .await
-        .map_err(map_user_insert_error)?;
+        .await?;
 
     info!(user_id = %user.id, username = %user.username, email = %user.email, role = %user.role, "用户已创建");
     Ok(user)

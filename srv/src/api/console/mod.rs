@@ -1,6 +1,7 @@
 mod account;
 pub(super) mod audit;
 pub(crate) mod auth;
+pub(crate) mod error;
 mod gateway_api_keys;
 mod pagination;
 mod plugins;

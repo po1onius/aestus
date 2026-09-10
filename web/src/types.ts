@@ -90,11 +90,18 @@ export interface DashboardRoute {
   tenantOnly?: boolean;
 }
 
-export interface DashboardTenant {
+export interface TenantLimits {
+  max_users: number | null;
+  max_gateway_keys_per_user: number | null;
+  owner_can_upload_wasm: boolean;
+}
+
+export interface DashboardTenant extends TenantLimits {
   id: string;
 }
 
 export interface TenantSummary extends DashboardTenant {
+  user_count: number;
   enabled: boolean;
   created_by: string;
   created_at: string;

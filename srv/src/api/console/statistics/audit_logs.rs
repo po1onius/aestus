@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    api::console::auth,
-    err::{AppError, AppResult},
+    api::console::{auth, error::ConsoleResult},
+    err::{AppError, ConsoleError},
     logs::{
         audit::{AuditLogCursor, AuditLogQuery, AuditLogRecord, AuditLogScope, query_audit_logs},
         calendar::{current_service_date, local_day_range_utc},
@@ -44,11 +44,14 @@ async fn list_audit_logs(
     State(state): State<AppState>,
     auth::CurrentUser(user): auth::CurrentUser,
     Query(params): Query<ListAuditLogsQuery>,
-) -> AppResult<Json<ListAuditLogsResponse>> {
+) -> ConsoleResult<Json<ListAuditLogsResponse>> {
     let scope = if user.is_platform_admin() {
         AuditLogScope::Platform
     } else {
-        let tenant_id = user.tenant_id.clone().ok_or(AppError::Forbidden)?;
+        let tenant_id = user
+            .tenant_id
+            .clone()
+            .ok_or(AppError::Console(ConsoleError::Forbidden))?;
         if user.is_tenant_owner() {
             AuditLogScope::Tenant(tenant_id)
         } else {
@@ -62,7 +65,8 @@ async fn list_audit_logs(
     if !(1..=500).contains(&limit) {
         return Err(AppError::BadRequest {
             message: "limit 必须在 1 到 500 之间".to_owned(),
-        });
+        }
+        .into());
     }
     let timezone = state.config().service_timezone;
     let today = current_service_date(timezone);
@@ -70,7 +74,8 @@ async fn list_audit_logs(
     if date > today {
         return Err(AppError::BadRequest {
             message: "不能查询未来日期的审计日志".to_owned(),
-        });
+        }
+        .into());
     }
     let (start_at, end_at) = local_day_range_utc(timezone, date)?;
     let cursor = match (params.before_occurred_at, params.before_id) {
@@ -82,12 +87,14 @@ async fn list_audit_logs(
         (Some(_), Some(_)) => {
             return Err(AppError::BadRequest {
                 message: "审计日志游标必须位于查询日期内".to_owned(),
-            });
+            }
+            .into());
         }
         _ => {
             return Err(AppError::BadRequest {
                 message: "before_occurred_at 和 before_id 必须同时提供".to_owned(),
-            });
+            }
+            .into());
         }
     };
     let mut conn = state.db_conn().await?;

@@ -1,3 +1,4 @@
+use super::error::{CLIENT_CLOSED_REQUEST, project_error};
 use axum::{
     body::Body,
     extract::Request,
@@ -6,9 +7,9 @@ use axum::{
 use tracing::{error, info};
 
 use crate::{
-    err::{AppError, AppResult, CLIENT_CLOSED_REQUEST},
+    err::{AppError, AppResult},
     provider::{
-        protocol::{ProviderProtocol, ProviderVisibleError, ReplayableRequest},
+        protocol::{ProviderProtocol, ReplayableRequest},
         proxy,
     },
     request::{
@@ -276,14 +277,14 @@ async fn finish_pipeline<P: ProviderProtocol>(
         Err(error) => {
             // 先把完整内部错误写入 tracing，再通过公共投影决定调用方可见信息。具体
             // provider 只能拿到脱敏结果，无法在 wire encoder 中误用 `error.to_string()`。
-            let visible_error = ProviderVisibleError::from_app_error(&error);
+            let visible_error = project_error(&error);
             error!(
                 request_id = %request_id,
                 provider = endpoint.provider,
                 operation = endpoint.operation.as_str(),
                 route = endpoint.route,
                 error_code = error.code(),
-                http_status = error.status_code().as_u16(),
+                http_status = visible_error.status.as_u16(),
                 error_message = %error,
                 provider_error_code = visible_error.code,
                 provider_error_message = %visible_error.message,

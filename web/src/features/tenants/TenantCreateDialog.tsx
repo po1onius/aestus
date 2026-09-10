@@ -1,5 +1,7 @@
 import { Building2, Loader2 } from "lucide-react";
-import type { FormEvent } from "react";
+import { useState, type FormEvent } from "react";
+import type { TenantLimits } from "../../types";
+import { TenantLimitsFields, parseTenantLimits, tenantLimitsDraft } from "./TenantLimitsFields";
 import { Modal } from "../../components/Modal";
 import {
   buttonPrimary,
@@ -10,24 +12,35 @@ import {
   spinnerClass,
 } from "../../lib/ui";
 
+export interface CreateTenantInput {
+  id: string;
+  password: string | null;
+  limits: TenantLimits;
+}
+
 interface TenantCreateDialogProps {
-  name: string;
-  password: string;
   saving: boolean;
-  onNameChange: (value: string) => void;
-  onPasswordChange: (value: string) => void;
-  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onCreate: (input: CreateTenantInput) => Promise<void>;
   onClose: () => void;
 }
 
 export function TenantCreateDialog(props: TenantCreateDialogProps) {
-  const normalizedName = props.name.trim();
+  const [name, setName] = useState("");
+  const [password, setPassword] = useState("");
+  const [limitsDraft, setLimitsDraft] = useState(() => tenantLimitsDraft());
+  const limits = parseTenantLimits(limitsDraft);
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!limits || props.saving || (password && limits.max_users === 0)) return;
+    await props.onCreate({ id: name.trim(), password: password || null, limits });
+  }
+  const normalizedName = name.trim();
   const nameBytes = new TextEncoder().encode(normalizedName).length;
   const nameTooLong = nameBytes > 121;
-  const passwordBytes = new TextEncoder().encode(props.password).length;
-  const ownerRequested = props.password.length > 0;
+  const passwordBytes = new TextEncoder().encode(password).length;
+  const ownerRequested = password.length > 0;
   const passwordInvalid =
-    ownerRequested && (Array.from(props.password).length < 8 || passwordBytes > 72);
+    ownerRequested && (Array.from(password).length < 8 || passwordBytes > 72);
   const normalizedOwnerName = normalizedName.toLowerCase();
   const ownerNameCharacters = Array.from(normalizedOwnerName);
   const ownerNameInvalid =
@@ -46,20 +59,20 @@ export function TenantCreateDialog(props: TenantCreateDialogProps) {
       closeDisabled={props.saving}
       onClose={props.onClose}
     >
-      <form className="grid gap-4" onSubmit={props.onSubmit}>
+      <form className="grid gap-4" onSubmit={submit}>
         <label className={fieldStack}>
           <span className={fieldLabel}>
             租户名称<span className={requiredMark}>*</span>
           </span>
           <input
             className={inputClass}
-            value={props.name}
+            value={name}
             disabled={props.saving}
             maxLength={128}
             required
             autoFocus
             autoComplete="off"
-            onChange={(event) => props.onNameChange(event.target.value)}
+            onChange={(event) => setName(event.target.value)}
             placeholder="例如 AcmeCorp；创建 owner 时至少 5 个字符"
           />
         </label>
@@ -69,18 +82,23 @@ export function TenantCreateDialog(props: TenantCreateDialogProps) {
           <input
             className={inputClass}
             type="password"
-            value={props.password}
+            value={password}
             disabled={props.saving}
             autoComplete="new-password"
-            onChange={(event) => props.onPasswordChange(event.target.value)}
+            onChange={(event) => setPassword(event.target.value)}
             placeholder="至少 8 个字符；留空则暂不创建 owner"
           />
         </label>
+
+        <TenantLimitsFields value={limitsDraft} onChange={setLimitsDraft} disabled={props.saving} />
+        {ownerRequested && limits?.max_users === 0 && <p className="text-sm text-amber-600">同时创建 owner 时，用户数上限至少为 1。</p>}
 
         <button
           className={`${buttonPrimary} mt-1 w-full`}
           disabled={
             props.saving ||
+            !limits ||
+            (ownerRequested && limits.max_users === 0) ||
             normalizedName.length === 0 ||
             nameTooLong ||
             passwordInvalid ||

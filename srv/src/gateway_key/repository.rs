@@ -6,7 +6,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
-    err::{AppError, AppResult},
+    err::{AppError, AppResult, ConsoleError},
     provider::group,
     user::{User, group_access},
 };
@@ -36,12 +36,28 @@ pub async fn create(
 ) -> AppResult<GatewayApiKeyWithModels> {
     use self::api_keys::dsl;
 
-    let tenant_id = user.tenant_id.clone().ok_or(AppError::Forbidden)?;
+    let tenant_id = user
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     let user_id = user.id;
     let allowed_models = group::normalize_models(allowed_models)?;
 
     let result = conn
         .transaction::<GatewayApiKeyWithModels, AppError, _>(async |conn| {
+            let tenant = crate::tenant::require_enabled_for_update(conn, &tenant_id).await?;
+            if let Some(limit) = tenant.max_gateway_keys_per_user {
+                let current = dsl::api_keys
+                    .filter(dsl::tenant_id.eq(&tenant_id))
+                    .filter(dsl::user_id.eq(user_id))
+                    .count()
+                    .get_result::<i64>(&mut *conn)
+                    .await?;
+                if current >= i64::from(limit) {
+                    warn!(%tenant_id, %user_id, current, limit, "用户网关 Key 数达到租户设置的上限，拒绝创建");
+                    return Err(AppError::Console(ConsoleError::TenantGatewayKeyLimitExceeded { current, limit }));
+                }
+            }
             let provider_group =
                 group::require_enabled_for_write(&mut *conn, tenant_id.clone(), group_id).await?;
             group_access::require_group_grant(&mut *conn, user, group_id).await?;

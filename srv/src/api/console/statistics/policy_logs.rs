@@ -11,8 +11,8 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::{
-    api::console::auth,
-    err::{AppError, AppResult},
+    api::console::{auth, error::ConsoleResult},
+    err::{AppError, ConsoleError},
     logs::policy::{PolicyLogCursor, PolicyLogQuery, PolicyLogRecord, query_policy_log_page},
     state::AppState,
 };
@@ -44,14 +44,18 @@ async fn list_policy_logs(
     State(state): State<AppState>,
     auth::AdminUser(owner): auth::AdminUser,
     Query(params): Query<ListPolicyLogsQuery>,
-) -> AppResult<Json<ListPolicyLogsResponse>> {
+) -> ConsoleResult<Json<ListPolicyLogsResponse>> {
     // 租户范围只取鉴权结果，接口不接受客户端指定租户。
-    let tenant_id = owner.tenant_id.as_deref().ok_or(AppError::Forbidden)?;
+    let tenant_id = owner
+        .tenant_id
+        .as_deref()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     let limit = params.limit.unwrap_or(100);
     if !(1..=500).contains(&limit) {
         return Err(AppError::BadRequest {
             message: "limit 必须在 1 到 500 之间".to_owned(),
-        });
+        }
+        .into());
     }
     let timezone = state.config().service_timezone;
     let today = current_service_date(timezone);
@@ -59,7 +63,8 @@ async fn list_policy_logs(
     if date > today {
         return Err(AppError::BadRequest {
             message: "不能查询未来日期的 Policy 日志".to_owned(),
-        });
+        }
+        .into());
     }
     let (start_at, end_at) = local_day_range_utc(timezone, date)?;
     let cursor = match (params.before_occurred_at, params.before_id) {
@@ -68,12 +73,14 @@ async fn list_policy_logs(
         (Some(_), Some(_)) => {
             return Err(AppError::BadRequest {
                 message: "Policy 日志游标必须位于查询日期内".to_owned(),
-            });
+            }
+            .into());
         }
         _ => {
             return Err(AppError::BadRequest {
                 message: "before_occurred_at 和 before_id 必须同时提供".to_owned(),
-            });
+            }
+            .into());
         }
     };
 

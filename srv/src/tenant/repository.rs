@@ -1,12 +1,14 @@
+use std::collections::HashMap;
+
 use chrono::Utc;
 use diesel::prelude::*;
 use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use super::model::{Tenant, TenantSummary, schema};
+use super::model::{Tenant, TenantLimits, TenantSummary, schema};
 use crate::{
-    err::{AppError, AppResult},
+    err::{AppError, AppResult, ConsoleError},
     user,
 };
 
@@ -21,6 +23,9 @@ const MAX_GENERATED_CODE_NAME_BYTES: usize =
 #[diesel(table_name = schema::tenants)]
 struct NewTenant {
     id: String,
+    max_users: Option<i32>,
+    max_gateway_keys_per_user: Option<i32>,
+    owner_can_upload_wasm: bool,
     created_by: Uuid,
 }
 
@@ -64,8 +69,10 @@ pub async fn create(
     conn: &mut AsyncPgConnection,
     name: String,
     password: Option<String>,
+    limits: TenantLimits,
     actor_id: Uuid,
 ) -> AppResult<TenantSummary> {
+    limits.validate()?;
     let id = normalize_name(name)?;
     let code = generate_code(&id)?;
     let prepared_owner = match password.filter(|password| !password.is_empty()) {
@@ -77,6 +84,9 @@ pub async fn create(
             let tenant = diesel::insert_into(schema::tenants::table)
                 .values(NewTenant {
                     id,
+                    max_users: limits.max_users,
+                    max_gateway_keys_per_user: limits.max_gateway_keys_per_user,
+                    owner_can_upload_wasm: limits.owner_can_upload_wasm,
                     created_by: actor_id,
                 })
                 .returning(Tenant::as_returning())
@@ -101,6 +111,7 @@ pub async fn create(
             };
             Ok((
                 TenantSummary {
+                    user_count: i64::from(owner.is_some()),
                     tenant,
                     code: Some(code),
                 },
@@ -111,6 +122,7 @@ pub async fn create(
     info!(
         platform_admin_id = %actor_id,
         tenant_id = %summary.tenant.id,
+        limits = ?summary.tenant.limits(),
         owner_created = owner.is_some(),
         owner_id = ?owner.as_ref().map(|owner| owner.id),
         owner_username = ?owner.as_ref().map(|owner| owner.username.as_str()),
@@ -143,12 +155,26 @@ pub async fn list(conn: &mut AsyncPgConnection) -> AppResult<Vec<TenantSummary>>
             schema::tenants::id.desc(),
         ))
         .select((Tenant::as_select(), schema::tenant_codes::code.nullable()))
-        .load::<(Tenant, Option<String>)>(conn)
+        .load::<(Tenant, Option<String>)>(&mut *conn)
         .await
         .map_err(db_error)?;
+    // 按租户批量聚合，避免租户列表逐行查询用户数。
+    use crate::user::schema::users;
+    let counts: HashMap<Option<String>, i64> = users::table
+        .filter(users::tenant_id.is_not_null())
+        .group_by(users::tenant_id)
+        .select((users::tenant_id, diesel::dsl::count_star()))
+        .load::<(Option<String>, i64)>(conn)
+        .await?
+        .into_iter()
+        .collect();
     Ok(rows
         .into_iter()
-        .map(|(tenant, code)| TenantSummary { tenant, code })
+        .map(|(tenant, code)| TenantSummary {
+            user_count: counts.get(&Some(tenant.id.clone())).copied().unwrap_or(0),
+            tenant,
+            code,
+        })
         .collect())
 }
 
@@ -228,7 +254,7 @@ pub async fn require_enabled(conn: &mut AsyncPgConnection, id: &str) -> AppResul
         .first::<Tenant>(conn)
         .await
         .map_err(|source| match source {
-            diesel::result::Error::NotFound => AppError::Forbidden,
+            diesel::result::Error::NotFound => AppError::Console(ConsoleError::Forbidden),
             source => db_error(source),
         })
 }
@@ -295,6 +321,7 @@ pub async fn regenerate_code(
                 .await
                 .map_err(map_create_error)?;
             Ok(TenantSummary {
+                user_count: count_users(conn, &tenant.id).await?,
                 tenant,
                 code: Some(code),
             })
@@ -359,4 +386,82 @@ fn db_error(source: diesel::result::Error) -> AppError {
     AppError::DbQuery {
         message: source.to_string(),
     }
+}
+
+/// 必须在写事务内调用。所有限额准入先锁租户，再锁用户/分组/套件，
+/// 与平台修改限制使用相同行锁；统计和插入之间不释放锁。
+pub async fn require_enabled_for_update(
+    conn: &mut AsyncPgConnection,
+    id: &str,
+) -> AppResult<Tenant> {
+    let tenant = find_for_update(conn, id).await?;
+    if !tenant.enabled {
+        return Err(AppError::Console(ConsoleError::Forbidden));
+    }
+    Ok(tenant)
+}
+
+async fn find_for_update(conn: &mut AsyncPgConnection, id: &str) -> AppResult<Tenant> {
+    schema::tenants::table
+        .filter(schema::tenants::id.eq(id))
+        .for_update()
+        .select(Tenant::as_select())
+        .first(conn)
+        .await
+        .map_err(|source| match source {
+            diesel::result::Error::NotFound => AppError::BadRequest {
+                message: format!("租户不存在: {id}"),
+            },
+            source => db_error(source),
+        })
+}
+
+pub async fn count_users(conn: &mut AsyncPgConnection, tenant_id: &str) -> AppResult<i64> {
+    use crate::user::schema::users;
+    Ok(users::table
+        .filter(users::tenant_id.eq(tenant_id))
+        .count()
+        .get_result(conn)
+        .await?)
+}
+
+pub async fn require_user_capacity(conn: &mut AsyncPgConnection, tenant: &Tenant) -> AppResult<()> {
+    if let Some(limit) = tenant.max_users {
+        let current = count_users(conn, &tenant.id).await?;
+        if current >= i64::from(limit) {
+            warn!(tenant_id = %tenant.id, current, limit, "租户用户数达到上限，拒绝创建");
+            return Err(AppError::Console(ConsoleError::TenantUserLimitExceeded {
+                current,
+                limit,
+            }));
+        }
+    }
+    Ok(())
+}
+
+pub async fn set_limits(
+    conn: &mut AsyncPgConnection,
+    id: &str,
+    limits: TenantLimits,
+    actor_id: Uuid,
+) -> AppResult<Tenant> {
+    limits.validate()?;
+    let (previous, tenant) = conn
+        .transaction::<_, AppError, _>(async |conn| {
+            let previous = find_for_update(conn, id).await?.limits();
+            let tenant = diesel::update(schema::tenants::table.filter(schema::tenants::id.eq(id)))
+                .set((
+                    schema::tenants::max_users.eq(limits.max_users),
+                    schema::tenants::max_gateway_keys_per_user.eq(limits.max_gateway_keys_per_user),
+                    schema::tenants::owner_can_upload_wasm.eq(limits.owner_can_upload_wasm),
+                    schema::tenants::updated_at.eq(Utc::now()),
+                ))
+                .returning(Tenant::as_returning())
+                .get_result::<Tenant>(conn)
+                .await?;
+            Ok((previous, tenant))
+        })
+        .await?;
+    info!(platform_admin_id = %actor_id, tenant_id = %id, ?previous, ?limits, "平台管理员已更新租户限制");
+    Ok(tenant)
 }

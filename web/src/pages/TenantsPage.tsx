@@ -1,7 +1,7 @@
 import { RowActions } from "../components/RowActions";
 import { AnimatePresence } from "motion/react";
-import { type FormEvent, useEffect, useState } from "react";
-import { Boxes, Loader2, Plus, Power, RefreshCw, Trash2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Boxes, Loader2, Plus, Power, RefreshCw, Settings2, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { useRequestScope } from "../api/useRequestScope";
 import { tenantsPath } from "../config";
@@ -9,7 +9,8 @@ import {
   TenantCodeDialog,
   type TenantCodeAction,
 } from "../features/tenants/TenantCodeDialog";
-import { TenantCreateDialog } from "../features/tenants/TenantCreateDialog";
+import { TenantCreateDialog, type CreateTenantInput } from "../features/tenants/TenantCreateDialog";
+import { TenantLimitsDialog } from "../features/tenants/TenantLimitsDialog";
 import { TenantResourcesDialog } from "../features/tenants/TenantResourcesDialog";
 import { showErrorToast } from "../lib/errors";
 import {
@@ -33,13 +34,12 @@ interface TenantCodeDialogState {
 export function TenantsPage({ token, refreshSignal }: TenantsPageProps) {
   const { requestJson, beginRequest } = useRequestScope(token);
   const [tenants, setTenants] = useState<TenantSummary[]>([]);
-  const [name, setName] = useState("");
-  const [password, setPassword] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   const [codeDialog, setCodeDialog] = useState<TenantCodeDialogState | null>(null);
+  const [limitsTenant, setLimitsTenant] = useState<TenantSummary | null>(null);
   const [resourcesTenant, setResourcesTenant] = useState<TenantSummary | null>(null);
 
   useEffect(() => {
@@ -59,18 +59,15 @@ export function TenantsPage({ token, refreshSignal }: TenantsPageProps) {
     }
   }
 
-  async function createTenant(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function createTenant(input: CreateTenantInput) {
     setSaving(true);
     try {
       await requestJson<TenantSummary>(tenantsPath, {
         method: "POST",
-        body: JSON.stringify({ id: name.trim(), password: password || null }),
+        body: JSON.stringify(input),
       }, token);
-      setName("");
-      setPassword("");
       setCreateOpen(false);
-      toast.success(password ? "租户和 owner 已创建" : "租户已创建");
+      toast.success(input.password ? "租户和 owner 已创建" : "租户已创建");
       await loadTenants();
     } catch (error) {
       showErrorToast("租户创建失败", error);
@@ -80,15 +77,11 @@ export function TenantsPage({ token, refreshSignal }: TenantsPageProps) {
   }
 
   function openCreateDialog() {
-    setName("");
-    setPassword("");
     setCreateOpen(true);
   }
 
   function closeCreateDialog() {
     if (saving) return;
-    setName("");
-    setPassword("");
     setCreateOpen(false);
   }
 
@@ -169,9 +162,9 @@ export function TenantsPage({ token, refreshSignal }: TenantsPageProps) {
           <div className="p-10 text-center text-sm text-slate-500">还没有租户</div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[720px] text-left text-sm">
+            <table className="w-full min-w-[1050px] text-left text-sm">
               <thead className="border-b border-slate-200 bg-slate-50 text-slate-500 dark:border-slate-800 dark:bg-slate-950/50">
-                <tr><th className="px-4 py-3 font-medium">租户</th><th className="px-4 py-3 font-medium">租户码</th><th className="px-4 py-3 font-medium">状态</th><th className="w-20 px-4 py-3 text-right font-medium">操作</th></tr>
+                <tr><th className="px-4 py-3 font-medium">租户</th><th className="px-4 py-3 font-medium">租户码</th><th className="px-4 py-3 font-medium">状态</th><th className="px-4 py-3 font-medium">用户数 / 上限</th><th className="px-4 py-3 font-medium">每用户 Key 上限</th><th className="px-4 py-3 font-medium">Owner 上传 WASM</th><th className="w-20 px-4 py-3 text-right font-medium">操作</th></tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                 {tenants.map((tenant) => {
@@ -181,11 +174,18 @@ export function TenantsPage({ token, refreshSignal }: TenantsPageProps) {
                       <td className="px-4 py-3 font-medium">{tenant.id}</td>
                       <td className="px-4 py-3 font-mono">{tenant.code ?? <span className="font-sans text-slate-400">已撤销</span>}</td>
                       <td className="px-4 py-3"><span className={tenant.enabled ? "text-emerald-600" : "text-slate-400"}>{tenant.enabled ? "启用" : "停用"}</span></td>
+                      <td className="px-4 py-3">{tenant.user_count} / {tenant.max_users ?? "不限制"}</td>
+                      <td className="px-4 py-3">{tenant.max_gateway_keys_per_user ?? "不限制"}</td>
+                      <td className="px-4 py-3">{tenant.owner_can_upload_wasm ? "允许" : "禁止"}</td>
                       <td className="px-4 py-3">
                         <RowActions
                           resourceLabel={tenant.id}
                           busy={updating}
                           actions={[
+                            {
+                              id: "limits", label: "设置限制", icon: Settings2,
+                              opensDialog: true, onSelect: () => setLimitsTenant(tenant),
+                            },
                             {
                               id: "view-resources", label: "查看资源", icon: Boxes,
                               onSelect: () => setResourcesTenant(tenant),
@@ -216,14 +216,13 @@ export function TenantsPage({ token, refreshSignal }: TenantsPageProps) {
         )}
       </section>
       <AnimatePresence>
+        {limitsTenant && <TenantLimitsDialog key={limitsTenant.id} tenant={limitsTenant} token={token}
+          onClose={() => setLimitsTenant(null)}
+          onSaved={() => { setLimitsTenant(null); void loadTenants(); }} />}
         {createOpen && (
           <TenantCreateDialog
-            name={name}
-            password={password}
             saving={saving}
-            onNameChange={setName}
-            onPasswordChange={setPassword}
-            onSubmit={createTenant}
+            onCreate={createTenant}
             onClose={closeCreateDialog}
           />
         )}

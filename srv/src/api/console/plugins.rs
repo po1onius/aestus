@@ -1,7 +1,7 @@
 //! 独立 WASM 插件上传及固定套件组合。上传按 Provider/插槽校验 Component ABI。
 use crate::{
-    api::console::auth,
-    err::{AdminResult, AppError, AppResult},
+    api::console::{auth, error::ConsoleResult},
+    err::{AppError, AppResult, ConsoleError},
     plugin::{
         self,
         model::{NewPlugin, NewPluginSuite, PluginSlot, PluginSuiteSummary, PluginSummary},
@@ -48,7 +48,7 @@ pub fn suites_router() -> Router<AppState> {
 async fn list_plugins(
     State(state): State<AppState>,
     auth::CurrentUser(owner): auth::CurrentUser,
-) -> AdminResult<Json<Vec<PluginSummary>>> {
+) -> ConsoleResult<Json<Vec<PluginSummary>>> {
     let scope = management_scope(&owner)?;
     let mut conn = state.db_conn().await?;
     Ok(Json(plugin::sql::list_plugins(&mut conn, scope).await?))
@@ -57,7 +57,7 @@ async fn list_plugins(
 async fn list_suites(
     State(state): State<AppState>,
     auth::CurrentUser(owner): auth::CurrentUser,
-) -> AdminResult<Json<Vec<PluginSuiteSummary>>> {
+) -> ConsoleResult<Json<Vec<PluginSuiteSummary>>> {
     let scope = management_scope(&owner)?;
     let mut conn = state.db_conn().await?;
     Ok(Json(plugin::sql::list(&mut conn, scope).await?))
@@ -66,12 +66,15 @@ async fn list_suites(
 async fn list_suite_options(
     State(state): State<AppState>,
     auth::CurrentUser(user): auth::CurrentUser,
-) -> AppResult<Json<Vec<PluginSuiteSummary>>> {
+) -> ConsoleResult<Json<Vec<PluginSuiteSummary>>> {
     let mut conn = state.db_conn().await?;
     Ok(Json(
         plugin::sql::list_enabled_options(
             &mut conn,
-            Some(user.tenant_id.ok_or(AppError::Forbidden)?),
+            Some(
+                user.tenant_id
+                    .ok_or(AppError::Console(ConsoleError::Forbidden))?,
+            ),
         )
         .await?,
     ))
@@ -81,8 +84,15 @@ async fn upload_plugin(
     State(state): State<AppState>,
     auth::CurrentUser(owner): auth::CurrentUser,
     mut multipart: Multipart,
-) -> AdminResult<Json<PluginSummary>> {
+) -> ConsoleResult<Json<PluginSummary>> {
     let tenant_id = management_scope(&owner)?;
+    // 读取上传字段和编译之前尽早拒绝；SQL 写事务会再次检查，编译期间不持有行锁。
+    if let Some(tenant_id) = tenant_id.as_deref() {
+        let mut conn = state.db_conn().await?;
+        crate::tenant::require_enabled(&mut conn, tenant_id)
+            .await?
+            .require_wasm_upload(owner.id)?;
+    }
     let mut name = String::new();
     let mut description = String::new();
     let mut provider = String::new();
@@ -182,7 +192,7 @@ async fn create_suite(
     State(state): State<AppState>,
     auth::CurrentUser(owner): auth::CurrentUser,
     Json(payload): Json<CreateSuiteRequest>,
-) -> AdminResult<Json<PluginSuiteSummary>> {
+) -> ConsoleResult<Json<PluginSuiteSummary>> {
     let mut conn = state.db_conn().await?;
     let suite = plugin::sql::create_suite(
         &mut conn,
@@ -211,7 +221,7 @@ async fn delete_plugin(
     State(state): State<AppState>,
     auth::CurrentUser(owner): auth::CurrentUser,
     Path(id): Path<Uuid>,
-) -> AdminResult<Json<plugin::sql::DeletePluginResponse>> {
+) -> ConsoleResult<Json<plugin::sql::DeletePluginResponse>> {
     let mut conn = state.db_conn().await?;
     let deleted = plugin::sql::delete_plugin(&mut conn, management_scope(&owner)?, id).await?;
     info!(admin_user_id = %owner.id, plugin_id = %id, "插件管理者 删除插件成功");
@@ -222,7 +232,7 @@ async fn delete_suite(
     State(state): State<AppState>,
     auth::CurrentUser(owner): auth::CurrentUser,
     Path(id): Path<Uuid>,
-) -> AdminResult<Json<plugin::sql::DeletePluginResponse>> {
+) -> ConsoleResult<Json<plugin::sql::DeletePluginResponse>> {
     let mut conn = state.db_conn().await?;
     let deleted = plugin::sql::delete_suite(&mut conn, management_scope(&owner)?, id).await?;
     info!(admin_user_id = %owner.id, plugin_suite_id = %id, "插件管理者 删除套件成功");
@@ -240,7 +250,7 @@ async fn update_suite_enabled(
     auth::CurrentUser(owner): auth::CurrentUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateEnabledRequest>,
-) -> AdminResult<Json<Vec<PluginSuiteSummary>>> {
+) -> ConsoleResult<Json<Vec<PluginSuiteSummary>>> {
     let tenant_id = management_scope(&owner)?;
     let mut conn = state.db_conn().await?;
     plugin::sql::set_enabled(&mut conn, tenant_id.clone(), id, payload.enabled).await?;
@@ -254,10 +264,14 @@ fn management_scope(user: &crate::user::User) -> AppResult<Option<String>> {
     if user.is_platform_admin() {
         Ok(None)
     } else if user.is_tenant_owner() {
-        Ok(Some(user.tenant_id.clone().ok_or(AppError::Forbidden)?))
+        Ok(Some(
+            user.tenant_id
+                .clone()
+                .ok_or(AppError::Console(ConsoleError::Forbidden))?,
+        ))
     } else {
         warn!(user_id = %user.id, role = %user.role, "非插件管理者访问插件写入或管理列表");
-        Err(AppError::Forbidden)
+        Err(AppError::Console(ConsoleError::Forbidden))
     }
 }
 
@@ -265,7 +279,7 @@ async fn plugin_deletion_impact(
     State(state): State<AppState>,
     auth::CurrentUser(user): auth::CurrentUser,
     Path(id): Path<Uuid>,
-) -> AdminResult<Json<plugin::sql::DeletionImpact>> {
+) -> ConsoleResult<Json<plugin::sql::DeletionImpact>> {
     let scope = management_scope(&user)?;
     let mut conn = state.db_conn().await?;
     Ok(Json(
@@ -277,7 +291,7 @@ async fn suite_deletion_impact(
     State(state): State<AppState>,
     auth::CurrentUser(user): auth::CurrentUser,
     Path(id): Path<Uuid>,
-) -> AdminResult<Json<plugin::sql::DeletionImpact>> {
+) -> ConsoleResult<Json<plugin::sql::DeletionImpact>> {
     let scope = management_scope(&user)?;
     let mut conn = state.db_conn().await?;
     Ok(Json(

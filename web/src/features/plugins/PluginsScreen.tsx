@@ -1,3 +1,4 @@
+import { useTenantLimits } from "../tenants/useTenantLimits";
 import { AnimatePresence } from "motion/react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
@@ -17,6 +18,9 @@ import { validPluginText } from "../plugins/validation";
 
 export function PluginsScreen({ refreshRevision, onLoadingChange }: PageProps) {
   const { authToken, currentUser } = useDashboard();
+  const tenantPolicy = useTenantLimits(authToken, refreshRevision, currentUser.role === "platform_admin");
+  const canUploadWasm = currentUser.role === "platform_admin"
+    || (currentUser.role === "tenant_owner" && tenantPolicy.limits?.owner_can_upload_wasm === true);
   const { requestJson, requestFormData, isActiveAuthToken, beginRequest } = useRequestScope(authToken);
   const { confirmationRequest, setConfirmationRequest, confirmationSubmitting, closeConfirmationDialog, confirmRequestedAction } = useConfirmation();
   const [plugins, setPlugins] = useState<PluginSummary[]>([]);
@@ -74,7 +78,7 @@ export function PluginsScreen({ refreshRevision, onLoadingChange }: PageProps) {
 
   async function createPlugin(input: CreatePluginInput): Promise<boolean> {
     const token = authToken;
-    if (!token) return false;
+    if (!token || !canUploadWasm) return false;
     if (!validPluginText(input.name, input.description)) return false;
     if (input.file.size === 0 || input.file.size > 8 * 1024 * 1024) {
       toast.error("插件上传失败", { description: "WASM 文件大小必须在 1 B 到 8 MiB 之间。" });
@@ -199,11 +203,14 @@ export function PluginsScreen({ refreshRevision, onLoadingChange }: PageProps) {
   useEffect(() => { onLoadingChange(pluginsLoading); return () => onLoadingChange(false); }, [pluginsLoading, onLoadingChange]);
   return <><PluginsPage
     user={currentUser}
+    canUploadWasm={canUploadWasm}
+    uploadRestriction={tenantPolicy.loading ? "正在读取上传权限…" : !tenantPolicy.limits
+      ? "上传权限加载失败，请刷新页面。" : "平台未允许本租户 owner 上传 WASM；已有插件和套件仍可使用、管理。"}
     plugins={plugins}
     suites={pluginSuites}
     loading={pluginsLoading}
     savingId={pluginSavingId}
-    onAddPlugin={() => setPluginCreateOpen(true)}
+    onAddPlugin={() => { if (canUploadWasm) setPluginCreateOpen(true); }}
     onAddSuite={() => setPluginSuiteCreateOpen(true)}
     onToggleEnabled={togglePluginEnabled}
     onDeletePlugin={requestDeletePlugin}

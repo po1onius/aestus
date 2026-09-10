@@ -7,7 +7,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
-    err::{AppError, AppResult},
+    err::{AppError, AppResult, ConsoleError},
     provider::group::{ProviderGroup, schema::provider_groups},
 };
 
@@ -154,7 +154,10 @@ pub async fn list_for_current_user(
     if user.is_tenant_owner() {
         return Ok(Vec::new());
     }
-    let tenant_id = user.tenant_id.clone().ok_or(AppError::Forbidden)?;
+    let tenant_id = user
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     list_for_user(conn, tenant_id, user.id).await
 }
 
@@ -332,7 +335,10 @@ pub async fn require_group_grant(
     if user.is_tenant_owner() {
         return Ok(());
     }
-    let tenant_id = user.tenant_id.clone().ok_or(AppError::Forbidden)?;
+    let tenant_id = user
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     use schema::tenant_user_group_grants as grants;
     let granted = grants::table
         .filter(grants::tenant_id.eq(tenant_id.clone()))
@@ -348,7 +354,7 @@ pub async fn require_group_grant(
         return Ok(());
     }
     warn!(user_id = %user.id, tenant_id = %tenant_id, provider_group_id = %group_id, "普通用户未获得 Provider 分组授权");
-    Err(AppError::Forbidden)
+    Err(AppError::Console(ConsoleError::Forbidden))
 }
 
 pub async fn require_permission(
@@ -360,9 +366,12 @@ pub async fn require_permission(
     if user.is_tenant_owner() {
         return Ok(());
     }
-    let tenant_id = user.tenant_id.clone().ok_or(AppError::Forbidden)?;
+    let tenant_id = user
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     let Some(group_id) = group_id else {
-        return Err(AppError::Forbidden);
+        return Err(AppError::Console(ConsoleError::Forbidden));
     };
     require_group_grant(conn, user, group_id).await?;
     let mut required = permission.prerequisites().to_vec();
@@ -394,7 +403,7 @@ pub async fn require_permission(
         required_permission = permission.as_str(),
         "普通用户缺少组内资源权限"
     );
-    Err(AppError::Forbidden)
+    Err(AppError::Console(ConsoleError::Forbidden))
 }
 
 pub async fn group_ids_with_permission(
@@ -405,7 +414,10 @@ pub async fn group_ids_with_permission(
     if user.is_tenant_owner() {
         return Ok(None);
     }
-    let tenant_id = user.tenant_id.clone().ok_or(AppError::Forbidden)?;
+    let tenant_id = user
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     use schema::{
         tenant_user_group_grants as grants, tenant_user_group_permissions as permissions,
     };
@@ -434,7 +446,10 @@ pub async fn granted_group_ids(
     if user.is_tenant_owner() {
         return Ok(None);
     }
-    let tenant_id = user.tenant_id.clone().ok_or(AppError::Forbidden)?;
+    let tenant_id = user
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     use schema::tenant_user_group_grants as grants;
     let group_ids = grants::table
         .filter(grants::tenant_id.eq(tenant_id.clone()))

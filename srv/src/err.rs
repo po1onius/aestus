@@ -1,24 +1,10 @@
-use axum::{
-    http::StatusCode,
-    response::{IntoResponse, Response},
-};
-use serde::Serialize;
-use serde_json::{Value, json};
 use thiserror::Error;
-use tracing::error;
 use uuid::Uuid;
 
-pub type AppResult<T> = Result<T, AppError>;
-pub type AdminResult<T> = Result<T, AppError>;
+mod console;
+pub use console::ConsoleError;
 
-/// 非标准 499 状态码沿用网关领域的通用约定，表示调用方在服务返回响应前关闭了连接。
-///
-/// 客户端通常已经无法收到这个响应；保留明确状态只是为了让 Axum handler 完整收尾，
-/// 同时避免把调用方主动中断误报成网关内部的 500 错误。
-pub(crate) const CLIENT_CLOSED_REQUEST: StatusCode = match StatusCode::from_u16(499) {
-    Ok(status) => status,
-    Err(_) => panic!("499 必须是有效的 HTTP 状态码"),
-};
+pub type AppResult<T> = Result<T, AppError>;
 
 #[derive(Debug, Error)]
 pub enum AppError {
@@ -89,14 +75,8 @@ pub enum AppError {
     #[error("API Key 所属 Provider 分组已归档")]
     GatewayKeyGroupUnavailable,
 
-    #[error("缺少 Dashboard 登录凭证")]
-    MissingDashboardToken,
-
-    #[error("Dashboard 登录凭证无效")]
-    InvalidDashboardToken,
-
-    #[error("当前用户无权访问该资源")]
-    Forbidden,
+    #[error(transparent)]
+    Console(#[from] ConsoleError),
 
     #[error("请求参数无效: {message}")]
     BadRequest { message: String },
@@ -150,59 +130,10 @@ pub enum AppError {
     },
 }
 
-#[derive(Debug, Serialize)]
-struct ErrorResponse<'a> {
-    error: ErrorBody<'a>,
-}
-
-#[derive(Debug, Serialize)]
-struct ErrorBody<'a> {
-    code: &'a str,
-    message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    details: Option<Value>,
-}
-
 impl AppError {
-    pub fn status_code(&self) -> StatusCode {
-        match self {
-            AppError::ReadConfig { .. }
-            | AppError::InvalidConfig { .. }
-            | AppError::MissingConfig { .. } => StatusCode::INTERNAL_SERVER_ERROR,
-            AppError::Startup { .. } => StatusCode::INTERNAL_SERVER_ERROR,
-            AppError::DbPoolBuild { .. }
-            | AppError::DbPoolGet { .. }
-            | AppError::DbQuery { .. }
-            | AppError::RedisClient { .. }
-            | AppError::Redis { .. } => StatusCode::INTERNAL_SERVER_ERROR,
-            AppError::MissingApiKey | AppError::InvalidApiKey | AppError::DisabledApiKey => {
-                StatusCode::UNAUTHORIZED
-            }
-            AppError::UserQuotaExceeded | AppError::UserConcurrencyExceeded { .. } => {
-                StatusCode::TOO_MANY_REQUESTS
-            }
-            AppError::ModelNotAllowed { .. }
-            | AppError::GatewayKeyProviderMismatch { .. }
-            | AppError::GatewayKeyGroupUnavailable => StatusCode::FORBIDDEN,
-            AppError::MissingDashboardToken | AppError::InvalidDashboardToken => {
-                StatusCode::UNAUTHORIZED
-            }
-            AppError::Forbidden => StatusCode::FORBIDDEN,
-            AppError::BadRequest { .. } | AppError::PluginRequestRejected { .. } => {
-                StatusCode::BAD_REQUEST
-            }
-            AppError::PayloadTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
-            AppError::RequestBodyInterrupted { .. } => CLIENT_CLOSED_REQUEST,
-            AppError::BodyCache { .. } => StatusCode::INTERNAL_SERVER_ERROR,
-            AppError::ResourceError { .. } => StatusCode::SERVICE_UNAVAILABLE,
-            AppError::ProviderUpstream { .. } | AppError::Plugin { .. } => StatusCode::BAD_GATEWAY,
-            AppError::Email { .. } => StatusCode::BAD_GATEWAY,
-            AppError::ProviderStateSyncFailed { .. } => StatusCode::INTERNAL_SERVER_ERROR,
-        }
-    }
-
     pub fn code(&self) -> &'static str {
         match self {
+            AppError::Console(error) => error.code(),
             AppError::ReadConfig { .. } => "read_config_failed",
             AppError::InvalidConfig { .. } => "invalid_config",
             AppError::MissingConfig { .. } => "missing_config",
@@ -220,9 +151,6 @@ impl AppError {
             AppError::ModelNotAllowed { .. } => "model_not_allowed",
             AppError::GatewayKeyProviderMismatch { .. } => "gateway_key_provider_mismatch",
             AppError::GatewayKeyGroupUnavailable => "gateway_key_group_unavailable",
-            AppError::MissingDashboardToken => "missing_dashboard_token",
-            AppError::InvalidDashboardToken => "invalid_dashboard_token",
-            AppError::Forbidden => "forbidden",
             AppError::BadRequest { .. } => "bad_request",
             AppError::PluginRequestRejected { .. } => "plugin_request_rejected",
             AppError::PayloadTooLarge { .. } => "payload_too_large",
@@ -234,96 +162,6 @@ impl AppError {
             AppError::Email { .. } => "email_failed",
             AppError::ProviderStateSyncFailed { .. } => "provider_state_sync_failed",
         }
-    }
-
-    fn response_body_bytes(&self) -> Vec<u8> {
-        let payload = ErrorResponse {
-            error: ErrorBody {
-                code: self.code(),
-                message: self.public_message(),
-                details: self.safe_details(),
-            },
-        };
-
-        serde_json::to_vec(&payload).unwrap_or_else(|_| {
-            br#"{"error":{"code":"internal_server_error","message":"Internal server error"}}"#
-                .to_vec()
-        })
-    }
-
-    fn public_message(&self) -> String {
-        match self {
-            AppError::ReadConfig { .. }
-            | AppError::InvalidConfig { .. }
-            | AppError::MissingConfig { .. }
-            | AppError::Startup { .. }
-            | AppError::DbPoolBuild { .. }
-            | AppError::DbPoolGet { .. }
-            | AppError::DbQuery { .. }
-            | AppError::RedisClient { .. }
-            | AppError::Redis { .. }
-            | AppError::Plugin { .. }
-            | AppError::RequestBodyInterrupted { .. }
-            | AppError::BodyCache { .. } => {
-                "服务内部错误，请联系管理员并提供响应中的 x-request-id".to_owned()
-            }
-            AppError::Email { .. } => "邮件服务暂时不可用，请稍后重试".to_owned(),
-            AppError::ResourceError { .. } | AppError::ProviderUpstream { .. } => {
-                "上游服务请求失败，请稍后重试".to_owned()
-            }
-            AppError::ProviderStateSyncFailed { .. } => {
-                "数据库操作已经完成，但 Redis runtime 更新或读取失败；请勿重复提交，管理员应检查日志并重建 runtime"
-                    .to_owned()
-            }
-            _ => self.to_string(),
-        }
-    }
-
-    /// 只返回不包含凭证、连接串或上游响应体的稳定上下文。
-    fn safe_details(&self) -> Option<Value> {
-        match self {
-            AppError::ProviderStateSyncFailed {
-                provider,
-                resource_type,
-                resource_id,
-                ..
-            } => Some(json!({
-                "provider": provider,
-                "resource_type": resource_type,
-                "resource_id": resource_id,
-                "database_committed": true,
-                "replay_safe": false,
-            })),
-            _ => None,
-        }
-    }
-
-    fn into_response_with_logging(self) -> Response {
-        let status = self.status_code();
-        let code = self.code();
-        let diagnostic_message = self.to_string();
-
-        error!(
-            error_code = code,
-            http_status = status.as_u16(),
-            error_message = %diagnostic_message,
-            response_audience = "public",
-            "请求处理失败"
-        );
-
-        let body = self.response_body_bytes();
-        (
-            status,
-            [(axum::http::header::CONTENT_TYPE, "application/json")],
-            body,
-        )
-            .into_response()
-    }
-}
-
-impl IntoResponse for AppError {
-    fn into_response(self) -> Response {
-        self.into_response_with_logging()
     }
 }
 

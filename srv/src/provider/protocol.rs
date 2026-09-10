@@ -44,8 +44,8 @@ pub struct RequestInspection {
 
 /// provider gateway 可以暴露给模型调用方的协议无关错误类别。
 ///
-/// 这里刻意不复用 Dashboard 的 `AppError::IntoResponse`：Dashboard 与模型协议面对的是
-/// 不同调用方，也有不同的 wire shape。通用 gateway 只在这一层决定哪些信息可以公开，
+/// 这里刻意不复用 控制台的 `ConsoleApiError`：Dashboard 与模型协议面对的是
+/// 不同调用方，也有不同的 wire shape。通用 gateway 在 API 边界决定哪些信息可以公开，
 /// GPT、Claude adapter 随后只能负责协议编码，不能再读取包含内部诊断的 `AppError`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderVisibleErrorKind {
@@ -65,104 +65,6 @@ pub struct ProviderVisibleError {
     /// SDK 和调用方精确定位可修正的协议字段，因此这里不能再限制为静态字符串。
     pub code: String,
     pub message: String,
-}
-
-impl ProviderVisibleError {
-    /// 将内部 `AppError` 投影为 provider 可见错误。
-    ///
-    /// 鉴权、授权、额度和请求格式错误需要保留可操作信息，否则调用方无法修正请求；数据库、
-    /// Redis、缓存和普通上游技术故障折叠为稳定的 `gateway_error`，资源不可用或可重试失败
-    /// 耗尽则使用 `resource_error`。两者都不泄露内部诊断，并保留合理的 500/502/503 status
-    /// 便于 SDK 判断是否应该重试；原始技术错误只写 tracing。
-    pub fn from_app_error(error: &AppError) -> Self {
-        let (kind, code) = match error {
-            AppError::MissingApiKey | AppError::InvalidApiKey | AppError::DisabledApiKey => {
-                (ProviderVisibleErrorKind::Authentication, "invalid_api_key")
-            }
-            AppError::ModelNotAllowed { .. } => {
-                (ProviderVisibleErrorKind::Permission, "model_not_allowed")
-            }
-            AppError::GatewayKeyProviderMismatch { .. } => (
-                ProviderVisibleErrorKind::Permission,
-                "gateway_key_provider_mismatch",
-            ),
-            AppError::GatewayKeyGroupUnavailable => (
-                ProviderVisibleErrorKind::Permission,
-                "gateway_key_group_unavailable",
-            ),
-            AppError::UserQuotaExceeded => {
-                (ProviderVisibleErrorKind::RateLimit, "user_quota_exceeded")
-            }
-            AppError::UserConcurrencyExceeded { .. } => (
-                ProviderVisibleErrorKind::RateLimit,
-                "user_concurrency_exceeded",
-            ),
-            AppError::BadRequest { .. } => (
-                ProviderVisibleErrorKind::InvalidRequest,
-                "invalid_request_error",
-            ),
-            AppError::PluginRequestRejected { code, .. } => {
-                (ProviderVisibleErrorKind::InvalidRequest, code.as_str())
-            }
-            AppError::PayloadTooLarge { .. } => (
-                ProviderVisibleErrorKind::InvalidRequest,
-                "request_too_large",
-            ),
-            // gateway 会在 provider 编码前截获此错误，并以空 499 收尾。这里仍提供一个
-            // 安全的防御性投影，避免未来新增调用路径时又退化为含糊的 gateway_error。
-            AppError::RequestBodyInterrupted { .. } => (
-                ProviderVisibleErrorKind::InvalidRequest,
-                "request_body_interrupted",
-            ),
-            AppError::ReadConfig { .. }
-            | AppError::InvalidConfig { .. }
-            | AppError::MissingConfig { .. }
-            | AppError::Startup { .. }
-            | AppError::DbPoolBuild { .. }
-            | AppError::DbPoolGet { .. }
-            | AppError::DbQuery { .. }
-            | AppError::RedisClient { .. }
-            | AppError::Redis { .. }
-            // Dashboard 鉴权错误属于另一套响应边界。它们正常情况下不可能进入 provider
-            // gateway；若未来错误接线，也按内部故障处理，绝不伪装成模型 API Key 错误。
-            | AppError::MissingDashboardToken
-            | AppError::InvalidDashboardToken
-            | AppError::Forbidden
-            | AppError::BodyCache { .. }
-            | AppError::Plugin { .. }
-            | AppError::ProviderUpstream { .. }
-            | AppError::Email { .. }
-            | AppError::ProviderStateSyncFailed { .. } => {
-                (ProviderVisibleErrorKind::Gateway, "gateway_error")
-            }
-            // 调用方请求本身没有错误，但网关资源池已经无法继续完成请求。它仍使用
-            // provider 的网关错误 wire 外壳，只把稳定公共 code 区分为 resource_error。
-            AppError::ResourceError { .. } => {
-                (ProviderVisibleErrorKind::Gateway, "resource_error")
-            }
-        };
-        let status = if matches!(
-            error,
-            AppError::MissingDashboardToken | AppError::InvalidDashboardToken | AppError::Forbidden
-        ) {
-            StatusCode::INTERNAL_SERVER_ERROR
-        } else {
-            error.status_code()
-        };
-        let message = match error {
-            AppError::RequestBodyInterrupted { .. } => "request body interrupted".to_owned(),
-            AppError::PluginRequestRejected { message, .. } => message.clone(),
-            _ if kind == ProviderVisibleErrorKind::Gateway => "gateway error".to_owned(),
-            _ => error.to_string(),
-        };
-
-        Self {
-            status,
-            kind,
-            code: code.to_owned(),
-            message,
-        }
-    }
 }
 
 /// provider 已完成 wire 编码的最终错误响应。

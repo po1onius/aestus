@@ -1,3 +1,4 @@
+use crate::api::console::error::ConsoleApiError;
 use axum::{
     extract::FromRequestParts,
     http::{HeaderMap, header::AUTHORIZATION, request::Parts},
@@ -6,7 +7,7 @@ use tracing::warn;
 
 use crate::{
     api::console::audit::AuditContext,
-    err::{AppError, AppResult},
+    err::{AppError, AppResult, ConsoleError},
     state::AppState,
     tenant,
     user::{self, User},
@@ -27,35 +28,44 @@ pub(crate) struct AdminUser(pub User);
 pub(crate) struct PlatformAdminUser(pub User);
 
 impl FromRequestParts<AppState> for CurrentUser {
-    type Rejection = AppError;
+    type Rejection = ConsoleApiError;
 
     async fn from_request_parts(
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        require_user(state, parts).await.map(Self)
+        require_user(state, parts)
+            .await
+            .map(Self)
+            .map_err(Into::into)
     }
 }
 
 impl FromRequestParts<AppState> for AdminUser {
-    type Rejection = AppError;
+    type Rejection = ConsoleApiError;
 
     async fn from_request_parts(
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        require_admin(state, parts).await.map(Self)
+        require_admin(state, parts)
+            .await
+            .map(Self)
+            .map_err(Into::into)
     }
 }
 
 impl FromRequestParts<AppState> for PlatformAdminUser {
-    type Rejection = AppError;
+    type Rejection = ConsoleApiError;
 
     async fn from_request_parts(
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        require_platform_admin(state, parts).await.map(Self)
+        require_platform_admin(state, parts)
+            .await
+            .map(Self)
+            .map_err(Into::into)
     }
 }
 
@@ -65,7 +75,7 @@ pub(crate) async fn require_user(state: &AppState, parts: &Parts) -> AppResult<U
     let mut conn = state.db_conn().await?;
     let user = user::find_by_id(&mut conn, claims.sub)
         .await?
-        .ok_or(AppError::InvalidDashboardToken)?;
+        .ok_or(AppError::Console(ConsoleError::InvalidDashboardToken))?;
 
     if let Some(audit) = parts.extensions.get::<AuditContext>() {
         audit.record_user(&user);
@@ -73,7 +83,7 @@ pub(crate) async fn require_user(state: &AppState, parts: &Parts) -> AppResult<U
 
     if !user.enabled {
         warn!(user_id = %user.id, username = %user.username, email = %user.email, "Dashboard JWT 对应用户已禁用");
-        return Err(AppError::Forbidden);
+        return Err(AppError::Console(ConsoleError::Forbidden));
     }
 
     if let Some(tenant_id) = user.tenant_id.as_deref() {
@@ -87,7 +97,7 @@ pub(crate) async fn require_admin(state: &AppState, parts: &Parts) -> AppResult<
     let user = require_user(state, parts).await?;
     if !user.is_tenant_owner() {
         warn!(user_id = %user.id, role = %user.role, tenant_id = ?user.tenant_id, "非租户 owner 用户访问租户管理接口");
-        return Err(AppError::Forbidden);
+        return Err(AppError::Console(ConsoleError::Forbidden));
     }
     Ok(user)
 }
@@ -96,7 +106,7 @@ pub(crate) async fn require_platform_admin(state: &AppState, parts: &Parts) -> A
     let user = require_user(state, parts).await?;
     if !user.is_platform_admin() {
         warn!(user_id = %user.id, role = %user.role, tenant_id = ?user.tenant_id, "非平台管理员访问平台管理接口");
-        return Err(AppError::Forbidden);
+        return Err(AppError::Console(ConsoleError::Forbidden));
     }
     Ok(user)
 }
@@ -104,13 +114,13 @@ pub(crate) async fn require_platform_admin(state: &AppState, parts: &Parts) -> A
 fn extract_bearer_token(headers: &HeaderMap) -> AppResult<&str> {
     let raw_value = headers
         .get(AUTHORIZATION)
-        .ok_or(AppError::MissingDashboardToken)?
+        .ok_or(AppError::Console(ConsoleError::MissingDashboardToken))?
         .to_str()
-        .map_err(|_| AppError::MissingDashboardToken)?;
+        .map_err(|_| AppError::Console(ConsoleError::MissingDashboardToken))?;
 
     raw_value
         .strip_prefix(BEARER_PREFIX)
         .map(str::trim)
         .filter(|token| !token.is_empty())
-        .ok_or(AppError::MissingDashboardToken)
+        .ok_or(AppError::Console(ConsoleError::MissingDashboardToken))
 }

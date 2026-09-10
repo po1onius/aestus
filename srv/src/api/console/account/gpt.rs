@@ -14,10 +14,11 @@ use uuid::Uuid;
 use crate::{
     api::console::{
         auth as dash_auth,
+        error::ConsoleResult,
         pagination::{ListPage, ListPageQuery},
         statistics::gpt_account_usage,
     },
-    err::{AdminResult, AppError, AppResult},
+    err::{AppError, AppResult, ConsoleError},
     provider::{
         credential::{ACCOUNT_STATUS_UNAUTHORIZED, ProviderAccount},
         gpt::{
@@ -138,8 +139,11 @@ pub fn router() -> Router<AppState> {
 async fn create_oauth_authorization(
     State(state): State<AppState>,
     dash_auth::AdminUser(owner): dash_auth::AdminUser,
-) -> AdminResult<Json<CreateOauthAuthorizationResponse>> {
-    let tenant_id = owner.tenant_id.clone().ok_or(AppError::Forbidden)?;
+) -> ConsoleResult<Json<CreateOauthAuthorizationResponse>> {
+    let tenant_id = owner
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     let authorization = auth::create_authorization(&state).await?;
     // OAuth 握手与账号最终归属解耦：Redis 只保存 PKCE 临时参数，不记录 Provider 分组。
     provider_oauth::create(
@@ -165,7 +169,7 @@ async fn complete_oauth_callback(
     State(state): State<AppState>,
     dash_auth::AdminUser(owner): dash_auth::AdminUser,
     Json(payload): Json<CompleteOauthRequest>,
-) -> AdminResult<Json<GptAccountResponse>> {
+) -> ConsoleResult<Json<GptAccountResponse>> {
     // override 属于纯本地输入，必须在消费一次性 OAuth state 和交换 code 之前完成校验。
     payload.override_.validate()?;
     let callback_url =
@@ -177,10 +181,13 @@ async fn complete_oauth_callback(
         .ok_or_else(|| AppError::BadRequest {
             message: "OAuth state 无效或已过期，请重新生成授权 URL".to_owned(),
         })?;
-    let tenant_id = owner.tenant_id.clone().ok_or(AppError::Forbidden)?;
+    let tenant_id = owner
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     if session.tenant_id != tenant_id {
         warn!(owner_user_id = %owner.id, owner_tenant_id = %tenant_id, oauth_tenant_id = %session.tenant_id, "GPT OAuth 会话租户与当前 owner 不一致，拒绝消费");
-        return Err(AppError::Forbidden);
+        return Err(AppError::Console(ConsoleError::Forbidden).into());
     }
 
     let auth_token = auth::exchange_callback_code(
@@ -209,7 +216,7 @@ async fn create_gpt_account(
     State(state): State<AppState>,
     dash_auth::AdminUser(owner): dash_auth::AdminUser,
     Json(payload): Json<CreateGptAccountRequest>,
-) -> AdminResult<Json<GptAccountResponse>> {
+) -> ConsoleResult<Json<GptAccountResponse>> {
     payload.override_.validate()?;
     let refresh_token = normalize_optional_limited(
         payload.refresh_token,
@@ -238,12 +245,15 @@ async fn create_gpt_account(
                 error = %error,
                 "管理端 refresh_token 导入 GPT 账号失败"
             );
-            return Err(map_refresh_token_import_error(error));
+            return Err(map_refresh_token_import_error(error).into());
         }
     };
     let auth_token =
         auth_token_from_refresh_import(refresh_token, chatgpt_account_id, refresh_grant)?;
-    let tenant_id = owner.tenant_id.clone().ok_or(AppError::Forbidden)?;
+    let tenant_id = owner
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     let account =
         persist_imported_auth_token(&state, tenant_id, client_id, auth_token, payload.override_)
             .await?;
@@ -390,9 +400,12 @@ async fn list_gpt_accounts(
     State(state): State<AppState>,
     dash_auth::CurrentUser(current_user): dash_auth::CurrentUser,
     Query(query): Query<ListPageQuery>,
-) -> AppResult<Json<ListPage<GptAccountResponse>>> {
+) -> ConsoleResult<Json<ListPage<GptAccountResponse>>> {
     let page = query.normalize()?;
-    let tenant_id = current_user.tenant_id.clone().ok_or(AppError::Forbidden)?;
+    let tenant_id = current_user
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     let mut conn = state.db_conn().await?;
     let visible_group_ids = group_access::group_ids_with_permission(
         &mut conn,
@@ -442,8 +455,11 @@ async fn update_gpt_account_enabled(
     dash_auth::AdminUser(owner): dash_auth::AdminUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateGptAccountEnabledRequest>,
-) -> AdminResult<Json<GptAccountResponse>> {
-    let tenant_id = owner.tenant_id.clone().ok_or(AppError::Forbidden)?;
+) -> ConsoleResult<Json<GptAccountResponse>> {
+    let tenant_id = owner
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     let snapshot = ProviderResourceService::<GptMaintenance>::new(&state)
         .update_account_enabled(tenant_id, id, payload.enabled)
         .await?;
@@ -456,14 +472,17 @@ async fn update_gpt_account_override(
     dash_auth::CurrentUser(current_user): dash_auth::CurrentUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateRequestOverrideRequest>,
-) -> AppResult<Json<GptAccountResponse>> {
+) -> ConsoleResult<Json<GptAccountResponse>> {
     payload.override_.validate()?;
-    let tenant_id = current_user.tenant_id.clone().ok_or(AppError::Forbidden)?;
+    let tenant_id = current_user
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     let service = ProviderResourceService::<GptMaintenance>::new(&state);
     let account = service
         .find_account(tenant_id.clone(), id)
         .await?
-        .ok_or(AppError::Forbidden)?;
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     let mut conn = state.db_conn().await?;
     group_access::require_permission(
         &mut conn,
@@ -482,7 +501,9 @@ async fn update_gpt_account_override(
             .update_account_override_in_group(
                 tenant_id,
                 id,
-                account.group_id.ok_or(AppError::Forbidden)?,
+                account
+                    .group_id
+                    .ok_or(AppError::Console(ConsoleError::Forbidden))?,
                 payload.override_,
             )
             .await?
@@ -501,8 +522,11 @@ async fn update_gpt_account_group(
     dash_auth::AdminUser(owner): dash_auth::AdminUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<ProviderGroupRequest>,
-) -> AdminResult<Json<GptAccountResponse>> {
-    let tenant_id = owner.tenant_id.clone().ok_or(AppError::Forbidden)?;
+) -> ConsoleResult<Json<GptAccountResponse>> {
+    let tenant_id = owner
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     let snapshot = ProviderResourceService::<GptMaintenance>::new(&state)
         .update_account_group(tenant_id, id, payload.group_id)
         .await?;
@@ -518,7 +542,7 @@ async fn refresh_gpt_account_quota(
     State(state): State<AppState>,
     dash_auth::CurrentUser(current_user): dash_auth::CurrentUser,
     Path(id): Path<Uuid>,
-) -> AppResult<Json<quota::GptAccountQuotaResponse>> {
+) -> ConsoleResult<Json<quota::GptAccountQuotaResponse>> {
     let account = find_quota_account(&state, &current_user, id).await?;
     let quota = refresh_account_quota(&state, &current_user, &account).await?;
     Ok(Json(quota))
@@ -536,7 +560,7 @@ async fn refresh_gpt_account_quota_with_usage(
     State(state): State<AppState>,
     dash_auth::AdminUser(owner): dash_auth::AdminUser,
     Path(id): Path<Uuid>,
-) -> AppResult<Json<GptAccountQuotaWithUsageResponse>> {
+) -> ConsoleResult<Json<GptAccountQuotaWithUsageResponse>> {
     let account = find_quota_account(&state, &owner, id).await?;
     let quota = refresh_account_quota(&state, &owner, &account).await?;
     let gateway_usage = gpt_account_usage::query_window_usage(&state, &account, &quota).await?;
@@ -558,7 +582,10 @@ async fn find_quota_account(
     id: Uuid,
 ) -> AppResult<ProviderAccount> {
     let service = ProviderResourceService::<GptMaintenance>::new(state);
-    let tenant_id = current_user.tenant_id.clone().ok_or(AppError::Forbidden)?;
+    let tenant_id = current_user
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     let account = service
         .find_account(tenant_id.clone(), id)
         .await?
@@ -653,9 +680,12 @@ async fn list_gpt_account_rate_limit_reset_credits(
     State(state): State<AppState>,
     dash_auth::CurrentUser(current_user): dash_auth::CurrentUser,
     Path(id): Path<Uuid>,
-) -> AppResult<Json<rate_limit_reset::RateLimitResetCreditsResponse>> {
+) -> ConsoleResult<Json<rate_limit_reset::RateLimitResetCreditsResponse>> {
     let service = ProviderResourceService::<GptMaintenance>::new(&state);
-    let tenant_id = current_user.tenant_id.clone().ok_or(AppError::Forbidden)?;
+    let tenant_id = current_user
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     let account = service.find_account(tenant_id, id).await?.ok_or_else(|| {
         warn!(gpt_account_id = %id, "管理端查询 GPT 账号额度重置记录失败，账号不存在");
         AppError::BadRequest {
@@ -689,9 +719,12 @@ async fn consume_gpt_account_rate_limit_reset_credit(
     dash_auth::CurrentUser(current_user): dash_auth::CurrentUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<rate_limit_reset::ConsumeRateLimitResetCreditRequest>,
-) -> AppResult<Json<rate_limit_reset::ConsumeRateLimitResetCreditResponse>> {
+) -> ConsoleResult<Json<rate_limit_reset::ConsumeRateLimitResetCreditResponse>> {
     let service = ProviderResourceService::<GptMaintenance>::new(&state);
-    let tenant_id = current_user.tenant_id.clone().ok_or(AppError::Forbidden)?;
+    let tenant_id = current_user
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     let account = service.find_account(tenant_id, id).await?.ok_or_else(|| {
         warn!(gpt_account_id = %id, "管理端应用 GPT 账号额度重置记录失败，账号不存在");
         AppError::BadRequest {
@@ -734,9 +767,12 @@ async fn delete_gpt_account(
     State(state): State<AppState>,
     dash_auth::AdminUser(owner): dash_auth::AdminUser,
     Path(id): Path<Uuid>,
-) -> AdminResult<Json<DeleteGptAccountResponse>> {
+) -> ConsoleResult<Json<DeleteGptAccountResponse>> {
     let service = ProviderResourceService::<GptMaintenance>::new(&state);
-    let tenant_id = owner.tenant_id.clone().ok_or(AppError::Forbidden)?;
+    let tenant_id = owner
+        .tenant_id
+        .clone()
+        .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     let deleted = service.delete_account(tenant_id, id).await?;
 
     info!(
