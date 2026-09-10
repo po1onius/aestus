@@ -42,28 +42,24 @@ export function TenantLimitsFields({ value, onChange, disabled }: {
       <input className={inputClass} type="number" min={0} max={2147483647} step={1}
         placeholder="不限制" value={value.maxUsers}
         onChange={event => onChange({ ...value, maxUsers: event.target.value })} />
-      <span className="text-xs text-slate-500">包含 owner 和停用用户。留空不限制，0 禁止新增。</span>
     </label>
     <label className={fieldStack}>
       <span className={fieldLabel}>每用户网关 Key 上限</span>
       <input className={inputClass} type="number" min={0} max={2147483647} step={1}
         placeholder="不限制" value={value.maxGatewayKeys}
         onChange={event => onChange({ ...value, maxGatewayKeys: event.target.value })} />
-      <span className="text-xs text-slate-500">owner 和每位用户分别计数，跨 Provider、分组合计；停用和失效 Key 也计数，删除才释放名额。留空不限制，0 禁止新增。</span>
     </label>
     <label className={fieldStack}>
       <span className={fieldLabel}>上游资源总数上限</span>
       <input className={inputClass} type="number" min={0} max={2147483647} step={1}
         placeholder="不限制" value={value.maxResources}
         onChange={event => onChange({ ...value, maxResources: event.target.value })} />
-      <span className="text-xs text-slate-500">跨所有 Provider 合计 OAuth 账号和官方 API Key，不包含网关 Key；停用、失效和未分组资源也计数，删除才释放名额。留空不限制，0 禁止新增。</span>
     </label>
     <label className={fieldStack}>
       <span className={fieldLabel}>分组总数上限</span>
       <input className={inputClass} type="number" min={0} max={2147483647} step={1}
         placeholder="不限制" value={value.maxProviderGroups}
         onChange={event => onChange({ ...value, maxProviderGroups: event.target.value })} />
-      <span className="text-xs text-slate-500">跨所有 Provider 合计；停用和空分组也计数，删除才释放名额。留空不限制，0 禁止新增。</span>
     </label>
     <label className="flex items-center gap-2 text-sm">
       <input type="checkbox" checked={value.ownerCanUploadWasm}

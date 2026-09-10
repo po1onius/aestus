@@ -3,6 +3,7 @@ import { useState, type FormEvent } from "react";
 import type { TenantLimits } from "../../types";
 import { TenantLimitsFields, parseTenantLimits, tenantLimitsDraft } from "./TenantLimitsFields";
 import { Modal } from "../../components/Modal";
+import { PasswordInput } from "../../components/PasswordInput";
 import {
   buttonPrimary,
   fieldLabel,
@@ -77,21 +78,19 @@ export function TenantCreateDialog(props: TenantCreateDialogProps) {
           />
         </label>
 
-        <label className={fieldStack}>
-          <span className={fieldLabel}>Owner 密码</span>
-          <input
-            className={inputClass}
-            type="password"
+        <div className={fieldStack}>
+          <label className={fieldLabel} htmlFor="tenant-owner-password">Owner 密码</label>
+          <PasswordInput
+            id="tenant-owner-password"
             value={password}
             disabled={props.saving}
             autoComplete="new-password"
             onChange={(event) => setPassword(event.target.value)}
             placeholder="至少 8 个字符；留空则暂不创建 owner"
           />
-        </label>
+        </div>
 
         <TenantLimitsFields value={limitsDraft} onChange={setLimitsDraft} disabled={props.saving} />
-        {ownerRequested && limits?.max_users === 0 && <p className="text-sm text-amber-600">同时创建 owner 时，用户数上限至少为 1。</p>}
 
         <button
           className={`${buttonPrimary} mt-1 w-full`}

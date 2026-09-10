@@ -1,6 +1,7 @@
 import { Loader2, UserPlus } from "lucide-react";
 import { useState } from "react";
 import { Modal } from "../../components/Modal";
+import { PasswordInput } from "../../components/PasswordInput";
 import {
   buttonPrimary,
   fieldHelp,
@@ -71,13 +72,12 @@ export function UserCreateDialog(props: UserCreateDialogProps) {
           <span className={fieldHelp}>留空时由服务端自动设置为 {defaultEmail}。</span>
         </label>
 
-        <label className={fieldStack}>
-          <span className={fieldLabel}>
+        <div className={fieldStack}>
+          <label className={fieldLabel} htmlFor="new-user-password">
             密码<span className={requiredMark}>*</span>
-          </span>
-          <input
-            className={inputClass}
-            type="password"
+          </label>
+          <PasswordInput
+            id="new-user-password"
             value={password}
             onChange={(event) => setPassword(event.target.value)}
             placeholder="至少 8 个字符"
@@ -85,7 +85,7 @@ export function UserCreateDialog(props: UserCreateDialogProps) {
             disabled={props.saving}
             required
           />
-        </label>
+        </div>
 
         <button
           className={`${buttonPrimary} mt-1 w-full`}

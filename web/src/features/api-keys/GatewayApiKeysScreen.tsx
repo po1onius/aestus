@@ -1,5 +1,3 @@
-import { useTenantLimits } from "../tenants/useTenantLimits";
-import { TenantLimitNotice } from "../tenants/TenantLimitNotice";
 import { AnimatePresence } from "motion/react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
@@ -19,7 +17,6 @@ import { useConfirmation } from "../dashboard/useConfirmation";
 
 export function GatewayApiKeysScreen({ refreshRevision, onLoadingChange }: PageProps) {
   const { authToken, currentUser } = useDashboard();
-  const tenantPolicy = useTenantLimits(authToken, refreshRevision);
   const { requestJson, isActiveAuthToken, beginRequest } = useRequestScope(authToken);
   const { confirmationRequest, setConfirmationRequest, confirmationSubmitting, closeConfirmationDialog, confirmRequestedAction } = useConfirmation();
   const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
@@ -387,7 +384,7 @@ export function GatewayApiKeysScreen({ refreshRevision, onLoadingChange }: PageP
   }
   useEffect(() => { void loadApiKeys(); void loadProviderGroupOptions(); void loadPluginOptions(); }, [refreshRevision]);
   useEffect(() => { onLoadingChange(apiKeysLoading); return () => onLoadingChange(false); }, [apiKeysLoading, onLoadingChange]);
-  return <><TenantLimitNotice {...tenantPolicy} resource="keys" /><GatewayApiKeysPage
+  return <><GatewayApiKeysPage
     apiKeys={apiKeys}
     loading={apiKeysLoading}
     updatingId={apiKeyUpdatingId}

@@ -2,6 +2,7 @@ import { KeyRound, Loader2, Mail, Save } from "lucide-react";
 import type { FormEvent } from "react";
 import { Toaster } from "sonner";
 import tokenGatewayLogo from "../../assets/token-gateway-logo.svg";
+import { PasswordInput } from "../../components/PasswordInput";
 import { SlidingTabList } from "../../components/SlidingTabList";
 import {
   buttonPrimary,
@@ -113,18 +114,18 @@ export function AuthScreen(props: AuthScreenProps) {
                 required
               />
             </label>
-            <label className={fieldStack}>
-              <span className={fieldLabel}>密码</span>
-              <input
-                className={inputClass}
-                type="password"
+            <div className={fieldStack}>
+              <label className={fieldLabel} htmlFor="login-password">密码</label>
+              <PasswordInput
+                key="login-password"
+                id="login-password"
                 value={props.loginPassword}
                 onChange={(event) => props.onLoginPasswordChange(event.target.value)}
                 autoComplete="current-password"
                 maxLength={72}
                 required
               />
-            </label>
+            </div>
             <button className={`${buttonPrimary} mt-1 w-full`} disabled={props.submitting}>
               {props.submitting ? <Loader2 className={spinnerClass} size={18} /> : <KeyRound size={18} />}
               登录
@@ -154,7 +155,6 @@ export function AuthScreen(props: AuthScreenProps) {
                 maxLength={128}
                 required
               />
-              <p className={fieldHelp}>5 到 32 个字符，可使用字母、数字、下划线或连字符，注册后不可修改。</p>
             </label>
             <label className={fieldStack}>
               <span className={fieldLabel}>邮箱</span>
@@ -168,11 +168,11 @@ export function AuthScreen(props: AuthScreenProps) {
                 required
               />
             </label>
-            <label className={fieldStack}>
-              <span className={fieldLabel}>密码</span>
-              <input
-                className={inputClass}
-                type="password"
+            <div className={fieldStack}>
+              <label className={fieldLabel} htmlFor="register-password">密码</label>
+              <PasswordInput
+                key="register-password"
+                id="register-password"
                 value={props.registerPassword}
                 onChange={(event) => props.onRegisterPasswordChange(event.target.value)}
                 autoComplete="new-password"
@@ -180,8 +180,7 @@ export function AuthScreen(props: AuthScreenProps) {
                 maxLength={72}
                 required
               />
-              <p className={fieldHelp}>至少 8 个字符，UTF-8 编码后最多 72 字节。</p>
-            </label>
+            </div>
             <label className={fieldStack}>
               <span className={fieldLabel}>邮箱验证码</span>
               <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">

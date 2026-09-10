@@ -1133,12 +1133,6 @@ export function ProvidersScreen({ refreshRevision, onLoadingChange }: PageProps)
   useEffect(() => { if (currentUser.role === "tenant_owner") void loadProviderGroups(); }, [refreshRevision]);
   useEffect(() => { onLoadingChange(providerGroupsVisible ? providerGroupsLoading : loading); return () => onLoadingChange(false); }, [providerGroupsVisible, providerGroupsLoading, loading, onLoadingChange]);
   return <>
-    {providerAccess.isOwner && <div className="mb-4 space-y-1 text-sm text-slate-500" role="status">
-      {resourceUsageLoading ? "正在加载资源与分组总量…" : !resourceUsage ? "资源与分组总量加载失败，请刷新页面。" : <>
-        <p>{`上游资源总数：${resourceUsage.resource_count} / ${resourceUsage.max_resources ?? "不限制"}。跨所有 Provider 合计账号和官方 API Key；停用、失效和未分组资源也计数，删除才释放名额。${resourceLimitReached ? "已达到上限，无法新增资源。" : ""}`}</p>
-        <p>{`分组总数：${resourceUsage.provider_group_count} / ${resourceUsage.max_provider_groups ?? "不限制"}。跨所有 Provider 合计；停用和空分组也计数，删除才释放名额。${groupLimitReached ? "已达到上限，无法新增分组。" : ""}`}</p>
-      </>}
-    </div>}
     <ProvidersPage
     resourceCreationDisabled={resourceUsageLoading || !resourceUsage || resourceLimitReached}
     groupCreationDisabled={resourceUsageLoading || !resourceUsage || groupLimitReached}

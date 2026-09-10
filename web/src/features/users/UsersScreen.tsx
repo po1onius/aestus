@@ -1,5 +1,3 @@
-import { useTenantLimits } from "../tenants/useTenantLimits";
-import { TenantLimitNotice } from "../tenants/TenantLimitNotice";
 import { AnimatePresence } from "motion/react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
@@ -19,7 +17,6 @@ import { useDashboard, type PageProps } from "../dashboard/context";
 
 export function UsersScreen({ refreshRevision, onLoadingChange }: PageProps) {
   const { authToken, currentUser, setCurrentUser } = useDashboard();
-  const tenantPolicy = useTenantLimits(authToken, refreshRevision);
   const { providerGroups, loadProviderGroups } = useProviderGroups(authToken);
   const { isActiveAuthToken, requestJson, beginRequest } = useRequestScope(authToken);
   const [users, setUsers] = useState<DashboardUserListItem[]>([]);
@@ -238,7 +235,7 @@ export function UsersScreen({ refreshRevision, onLoadingChange }: PageProps) {
   }
   useEffect(() => { void loadUsers(); void loadProviderGroups(); }, [refreshRevision]);
   useEffect(() => { onLoadingChange(usersLoading); return () => onLoadingChange(false); }, [usersLoading, onLoadingChange]);
-  return <><TenantLimitNotice {...tenantPolicy} resource="users" /><UsersPage
+  return <><UsersPage
     users={users}
     loading={usersLoading}
     updatingId={userUpdatingId}

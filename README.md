@@ -134,12 +134,15 @@ Redis runtime，随后启动 maintenance 并开始接受请求。同步保留已
 ```
 
 租户列表返回这五项字段及 `user_count`、`resource_count`、`provider_group_count`，
-用户数、上游资源总数和分组总数均按租户批量聚合。登录、注册和 `/auth/me` 响应的 `tenant` 也包含限制字段。用户、网关 Key 和插件页面在进入及刷新时读取最新配置；
+用户数、上游资源总数和分组总数均按租户批量聚合。登录、注册和 `/auth/me` 响应的 `tenant` 也包含限制字段。插件页面在进入及刷新时读取最新配置；
 实际写入始终以后端事务校验为准。用户数、Key 数、上游资源总数或分组总数超限返回 HTTP 409，错误码分别为
 `tenant_user_limit_exceeded`、`tenant_gateway_key_limit_exceeded`、`tenant_resource_limit_exceeded`、
 `tenant_provider_group_limit_exceeded`；上游资源和分组超限响应的 `error.details` 包含 `current` 和 `limit`。禁止 WASM 上传返回
 HTTP 403 和 `tenant_wasm_upload_forbidden`。限制修改记录操作者及修改前后值，拒绝新增
 记录租户、数量及上限，日志不记录 Key 明文或 WASM 内容。
+
+用户、网关 Key 和资源页面不常驻展示数量上限及计数规则，租户配置弹窗也不展示数量限制说明。
+平台租户列表的数量与上限、限制配置字段及校验逻辑保留，操作失败继续通过 toast 提示。
 
 资源页仅为 owner 查询 `GET /api/console/tenants/current/resource-usage`，返回本租户的
 `resource_count`、`max_resources`、`provider_group_count` 和 `max_provider_groups`，
