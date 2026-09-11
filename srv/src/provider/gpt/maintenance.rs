@@ -52,7 +52,16 @@ impl MaintenanceProvider for GptMaintenance {
             "GPT maintenance 开始执行 provider 私有 refresh token 请求"
         );
 
-        let grant = auth::refresh_token(state, &account.refresh_token, &account.client_id)
+        let proxy = crate::infra::account_proxy::AccountProxy::parse(account.proxy_url.as_deref())
+            .map_err(bad_response)?;
+        let client = state
+            .chatgpt_codex_http_client(account.id, proxy)
+            .await
+            .map_err(|error| MaintenanceFailure {
+                kind: MaintenanceFailureKind::Retryable,
+                message: error.to_string(),
+            })?;
+        let grant = auth::refresh_token(state, &client, &account.refresh_token, &account.client_id)
             .await
             .map_err(|error| MaintenanceFailure {
                 kind: match error.kind() {

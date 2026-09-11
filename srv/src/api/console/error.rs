@@ -41,6 +41,7 @@ impl ConsoleApiError {
             | AppError::InvalidConfig { .. }
             | AppError::MissingConfig { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::Startup { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::HttpClientBuild { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::DbPoolBuild { .. }
             | AppError::DbPoolGet { .. }
             | AppError::DbQuery { .. }
@@ -104,6 +105,7 @@ impl ConsoleApiError {
             | AppError::InvalidConfig { .. }
             | AppError::MissingConfig { .. }
             | AppError::Startup { .. }
+            | AppError::HttpClientBuild { .. }
             | AppError::DbPoolBuild { .. }
             | AppError::DbPoolGet { .. }
             | AppError::DbQuery { .. }

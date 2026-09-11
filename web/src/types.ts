@@ -208,6 +208,7 @@ export interface GptAccountRuntime {
 }
 
 export interface GptAccount {
+  proxy: { url: string; has_auth: boolean } | null;
   id: string;
   account_id: string | null;
   client_id: string;

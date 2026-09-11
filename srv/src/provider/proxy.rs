@@ -231,7 +231,23 @@ where
             }
         };
 
-        let upstream_response = match send_upstream_request::<P>(state, prepared).await {
+        let client = match state
+            .streaming_http_client(prepared.client_profile.clone())
+            .await
+        {
+            Ok(client) => client,
+            Err(error) => {
+                warn!(
+                    request_id = %allocation.request_id,
+                    resource_id = %allocation.resource.id,
+                    error = %error,
+                    "初始化上游 HTTP client 失败，本次请求不发送也不换资源重试"
+                );
+                lease.release().await?;
+                return Err(error);
+            }
+        };
+        let upstream_response = match send_upstream_request::<P>(state, &client, prepared).await {
             Ok(response) => response,
             Err(error) => {
                 let retry_next = attempt_number < max_attempts;
@@ -687,10 +703,11 @@ async fn finalize_upstream_request<P: ProviderProtocol>(
 
 async fn send_upstream_request<P: ProviderProtocol>(
     state: &AppState,
+    client: &reqwest::Client,
     request: PreparedUpstreamRequest,
 ) -> AppResult<ReceivedUpstreamResponse> {
     let PreparedUpstreamRequest {
-        client_profile,
+        client_profile: _,
         method,
         url,
         headers,
@@ -699,8 +716,7 @@ async fn send_upstream_request<P: ProviderProtocol>(
         request_plugin_stream,
     } = request;
     let timeout_seconds = state.config().provider_upstream_timeout_seconds.max(1);
-    let send = state
-        .streaming_http_client(client_profile)
+    let send = client
         .request(method, url)
         .headers(headers)
         .body(body)

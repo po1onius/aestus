@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
+use crate::infra::account_proxy::AccountProxy;
 use clickhouse::Client as ClickHouseClient;
 use reqwest::Client;
+use uuid::Uuid;
 
 use crate::{
     config::AppConfig,
@@ -86,21 +88,31 @@ impl AppState {
         &self.inner.email_client
     }
 
-    /// 获取不携带任何 provider Cookie 状态的通用短请求 client。
-    pub fn http_client(&self) -> &Client {
-        self.inner.http_clients.buffered(HttpClientProfile::Generic)
+    /// 导入 GPT 账号前使用临时 client，通过所选代理交换 token，不携带账号 Cookie。
+    pub async fn gpt_oauth_http_client(&self, proxy: AccountProxy) -> AppResult<Client> {
+        self.inner.http_clients.oauth_client(proxy).await
     }
 
-    /// 获取仅服务于 ChatGPT/Codex 账号域名的短请求 client。
-    pub fn chatgpt_codex_http_client(&self) -> &Client {
+    /// 获取不携带任何 provider Cookie 状态的通用短请求 client。
+    pub fn http_client(&self) -> &Client {
+        self.inner.http_clients.generic()
+    }
+
+    /// 按账号资源 UUID 获取 ChatGPT/Codex 短请求 client，与该账号模型请求共用 jar。
+    pub async fn chatgpt_codex_http_client(
+        &self,
+        account_id: Uuid,
+        proxy: AccountProxy,
+    ) -> AppResult<Client> {
         self.inner
             .http_clients
-            .buffered(HttpClientProfile::ChatGptCodex)
+            .account_buffered(account_id, proxy)
+            .await
     }
 
     /// 按 provider adapter 声明的 profile 选择长连接 client。
-    pub fn streaming_http_client(&self, profile: HttpClientProfile) -> &Client {
-        self.inner.http_clients.streaming(profile)
+    pub async fn streaming_http_client(&self, profile: HttpClientProfile) -> AppResult<Client> {
+        self.inner.http_clients.streaming(profile).await
     }
 
     pub fn plugin_runtime(&self) -> &PluginRuntime {

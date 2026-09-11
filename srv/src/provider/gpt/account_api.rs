@@ -1,6 +1,8 @@
 //! GPT OAuth 账号访问 ChatGPT/Codex 账号级接口时共享的认证与 URL 规则。
 
+use crate::infra::account_proxy::AccountProxy;
 use reqwest::{Method, RequestBuilder, header::HeaderName, header::HeaderValue};
+use uuid::Uuid;
 
 use crate::{
     err::{AppError, AppResult},
@@ -19,6 +21,8 @@ const FEDRAMP_HEADER: &str = "x-openai-fedramp";
 /// 额度查询和人工重置必须使用完全相同的 workspace 路由。集中构造请求可以防止后续新增
 /// 账号级接口时遗漏 `ChatGPT-Account-ID`、FedRAMP 或 Codex 客户端身份头。
 pub(super) struct GptAccountApiAuth<'a> {
+    account_id: Uuid,
+    proxy: AccountProxy,
     access_token: &'a str,
     chatgpt_account_id: String,
     fedramp: bool,
@@ -48,6 +52,8 @@ impl<'a> GptAccountApiAuth<'a> {
             .to_owned();
 
         Ok(Self {
+            account_id: account.id,
+            proxy: AccountProxy::parse(account.proxy_url.as_deref())?,
             access_token,
             chatgpt_account_id,
             fedramp: specific.chatgpt_account_is_fedramp,
@@ -63,9 +69,15 @@ impl<'a> GptAccountApiAuth<'a> {
     }
 
     /// 构造带完整 ChatGPT workspace 路由信息的请求。
-    pub(super) fn request(&self, state: &AppState, method: Method, url: &str) -> RequestBuilder {
+    pub(super) async fn request(
+        &self,
+        state: &AppState,
+        method: Method,
+        url: &str,
+    ) -> AppResult<RequestBuilder> {
         let mut request = state
-            .chatgpt_codex_http_client()
+            .chatgpt_codex_http_client(self.account_id, self.proxy.clone())
+            .await?
             .request(method, url)
             // 账号级接口没有下游请求 UA，使用与模型请求规范化逻辑相同的固定身份。
             .header(
@@ -87,7 +99,7 @@ impl<'a> GptAccountApiAuth<'a> {
                 HeaderValue::from_static("true"),
             );
         }
-        request
+        Ok(request)
     }
 }
 

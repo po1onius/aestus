@@ -184,6 +184,7 @@ pub async fn create_authorization(state: &AppState) -> AppResult<GptOauthAuthori
 /// 使用裸 refresh_token 换取 access token。
 pub async fn refresh_token(
     state: &AppState,
+    http_client: &reqwest::Client,
     refresh_token: &str,
     client_id: &str,
 ) -> Result<RefreshTokenGrant, TokenRefreshError> {
@@ -194,8 +195,7 @@ pub async fn refresh_token(
         "开始使用 refresh_token 刷新 GPT token"
     );
 
-    let response = state
-        .http_client()
+    let response = http_client
         .post(&state.config().gpt_token_endpoint)
         .header(reqwest::header::USER_AGENT, OAUTH_CLI_USER_AGENT)
         // Codex refresh token flow 使用 JSON body；响应字段全部是可选覆盖项。
@@ -303,6 +303,7 @@ pub fn parse_callback_url(callback_url: &str) -> AppResult<CallbackParams> {
 /// OAuth 临时会话，也不负责账号落库。
 pub async fn exchange_callback_code(
     state: &AppState,
+    http_client: &reqwest::Client,
     redirect_uri: &str,
     pkce_verifier: &str,
     code: &str,
@@ -312,8 +313,7 @@ pub async fn exchange_callback_code(
         "开始使用 OAuth callback code 交换 GPT token"
     );
 
-    let request = state
-        .http_client()
+    let request = http_client
         .post(&state.config().gpt_token_endpoint)
         // 交互式 CLI token 交换使用 application/x-www-form-urlencoded。
         // code_verifier 只随这次服务端请求发送，避免暴露到前端页面和日志。

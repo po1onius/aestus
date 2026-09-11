@@ -57,6 +57,7 @@ pub mod account {
         next_token_refresh_at: DateTime<Utc>,
         chatgpt_account_is_fedramp: bool,
         request_override: RequestOverride,
+        proxy_url: Option<String>,
     ) -> AppResult<ProviderAccount> {
         let specific = serialize_specific(&GptAccountSpecific {
             chatgpt_account_id,
@@ -67,6 +68,7 @@ pub mod account {
         let account = provider_sql::account::create(
             conn,
             NewProviderAccount {
+                proxy_url,
                 tenant_id,
                 provider: PROVIDER.to_owned(),
                 refresh_token,

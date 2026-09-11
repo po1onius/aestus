@@ -29,6 +29,7 @@ pub mod schema {
             status -> Text,
             status_reason -> Nullable<Text>,
             client_id -> Text,
+            proxy_url -> Nullable<Text>,
             specific -> Jsonb,
             #[sql_name = "override"]
             override_ -> Jsonb,
@@ -87,6 +88,8 @@ pub struct ProviderAccount {
     pub status: String,
     pub status_reason: Option<String>,
     pub client_id: String,
+    #[serde(skip_serializing)]
+    pub proxy_url: Option<String>,
     pub specific: Value,
     #[serde(rename = "override")]
     pub override_: Value,
@@ -182,6 +185,7 @@ pub struct NewProviderAccount {
     pub status: String,
     pub status_reason: Option<String>,
     pub client_id: String,
+    pub proxy_url: Option<String>,
     pub specific: Value,
     pub override_: Value,
 }

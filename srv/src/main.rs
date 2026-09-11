@@ -55,12 +55,9 @@ async fn run() -> err::AppResult<()> {
         config.request_log_retention_days,
     )
     .await?;
-    // 组合根显式登记 ChatGPT Codex 专用 cookie store。通用 HTTP client 不感知 GPT，
+    // 组合根登记账号 Cookie store 工厂，每个账号客户端组独立创建 jar。
     // provider 只有在访问 ChatGPT/Codex 账号上游时才会选择对应 client profile。
-    let http_clients = HttpClients::build(
-        &config,
-        provider::gpt::codex_http::header::cloudflare_cookie_store(),
-    )?;
+    let http_clients = HttpClients::build(&config, provider::gpt::cookies::account_cookie_store)?;
     // worker 在组合根显式启动；AppState 只取得不可反向控制 worker 的事件发布端口。
     let (request_events, audit_logs, _worker_runtime) = worker::start(
         db_pool.clone(),

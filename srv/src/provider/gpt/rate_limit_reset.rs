@@ -87,6 +87,7 @@ pub async fn fetch_rate_limit_reset_credits(
 
     let request = auth
         .request(state, Method::GET, &url)
+        .await?
         .header(ACCEPT, HeaderValue::from_static("application/json"));
     let payload = execute_json_request::<RateLimitResetCreditsResponse>(
         request,
@@ -140,6 +141,7 @@ pub async fn consume_rate_limit_reset_credit(
 
     let request = auth
         .request(state, Method::POST, &url)
+        .await?
         .header(ACCEPT, HeaderValue::from_static("application/json"))
         .json(&UpstreamConsumeRequest {
             redeem_request_id: &idempotency_key,

@@ -1,5 +1,5 @@
 import { RowActions } from "../../components/RowActions";
-import { Power, RotateCcw, Search, Settings, Trash2 } from "lucide-react";
+import { Network, Power, RotateCcw, Search, Settings, Trash2 } from "lucide-react";
 import { RuntimeBadge } from "../../components/RuntimeBadge";
 import { StatusBadge } from "../../components/StatusBadge";
 import { formatDateTime, formatOptionalDateTime } from "../../lib/format";
@@ -30,6 +30,7 @@ interface GptAccountsTableProps {
   onOpenRateLimitReset: (account: GptAccount) => void;
   onUpdateGroup: (account: GptAccount, groupId: string) => void;
   onUpdateEnabled: (account: GptAccount, enabled: boolean) => void;
+  onOpenProxy: (account: GptAccount) => void;
   onOpenOverride: (account: GptAccount) => void;
   onDelete: (account: GptAccount) => void;
 }
@@ -48,6 +49,7 @@ export function GptAccountsTable({
   onOpenRateLimitReset,
   onUpdateGroup,
   onUpdateEnabled,
+  onOpenProxy,
   onOpenOverride,
   onDelete,
 }: GptAccountsTableProps) {
@@ -86,6 +88,9 @@ export function GptAccountsTable({
                 <td>
                   <div className={entryStackClass}>
                     <strong className={entryTitleClass} title={account.email || "未命名账号"}>{account.email || "未命名账号"}</strong>
+                    <span className={cellNoteClass} title={account.proxy?.url}>
+                      {account.proxy ? `代理：${account.proxy.url}` : "直连"}
+                    </span>
                   </div>
                 </td>
                 <td>
@@ -172,6 +177,11 @@ export function GptAccountsTable({
                         disabled: !canViewOverride, opensDialog: true,
                         description: canViewOverride ? "查看请求覆盖" : "未获得查看账号覆盖权限",
                         onSelect: () => onOpenOverride(account),
+                      },
+                      {
+                        id: "account-proxy", label: "代理设置", icon: Network,
+                        hidden: !access.isOwner, opensDialog: true,
+                        onSelect: () => onOpenProxy(account),
                       },
                       {
                         id: "toggle-enabled", label: enabledToggleLabel(account.enabled), icon: Power,

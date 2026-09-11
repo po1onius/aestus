@@ -222,6 +222,7 @@ pub async fn fetch_account_quota(
 
     let request = auth
         .request(state, Method::GET, &url)
+        .await?
         .header(ACCEPT, HeaderValue::from_static("application/json"));
 
     let response = request.send().await.map_err(|source| {

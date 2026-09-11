@@ -1,3 +1,4 @@
+import { GptAccountProxyDialog } from "./GptAccountProxyDialog";
 import { AnimatePresence } from "motion/react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
@@ -32,6 +33,7 @@ export function ProvidersScreen({ refreshRevision, onLoadingChange }: PageProps)
   const { providerGroups, providerGroupsLoading, loadProviderGroups } = useProviderGroups(authToken);
   const { requestJson, isActiveAuthToken, beginRequest } = useRequestScope(authToken);
   const { confirmationRequest, setConfirmationRequest, confirmationSubmitting, closeConfirmationDialog, confirmRequestedAction } = useConfirmation();
+  const [proxyTarget, setProxyTarget] = useState<GptAccount | null>(null);
   const [accounts, setAccounts] = useState<GptAccount[]>([]);
 
   const [claudeAccounts, setClaudeAccounts] = useState<ClaudeAccount[]>([]);
@@ -507,7 +509,7 @@ export function ProvidersScreen({ refreshRevision, onLoadingChange }: PageProps)
     }
   }
 
-  async function submitCallback(callbackUrl: string) {
+  async function submitCallback(callbackUrl: string, proxyUrl: string) {
     const isClaude = activeAccountProvider === "claude";
     if (utf8ByteLength(callbackUrl.trim()) > 16 * 1024) {
       toast.error("OAuth 账号导入失败", { description: "授权结果不能超过 16384 字节。" });
@@ -523,7 +525,7 @@ export function ProvidersScreen({ refreshRevision, onLoadingChange }: PageProps)
               authorization_result: callbackUrl,
               state: authorization?.state,
             }
-            : { callback_url: callbackUrl },
+            : { callback_url: callbackUrl, proxy_url: proxyUrl.trim() || null },
         ),
       }, authToken);
       setAuthorization(null);
@@ -549,7 +551,7 @@ export function ProvidersScreen({ refreshRevision, onLoadingChange }: PageProps)
     }
   }
 
-  async function submitManualAccount({ refreshToken, clientId, chatgptAccountId }: { refreshToken: string; clientId: string; chatgptAccountId: string }) {
+  async function submitManualAccount({ refreshToken, clientId, chatgptAccountId, proxyUrl }: { refreshToken: string; clientId: string; chatgptAccountId: string; proxyUrl: string }) {
     if (
       utf8ByteLength(refreshToken.trim()) > 32 * 1024 ||
       utf8ByteLength(clientId.trim()) > 512 ||
@@ -563,6 +565,7 @@ export function ProvidersScreen({ refreshRevision, onLoadingChange }: PageProps)
       await requestJson<GptAccount>(gptAccountsPath, {
         method: "POST",
         body: JSON.stringify({
+          proxy_url: proxyUrl.trim() || null,
           refresh_token: refreshToken.trim(),
           client_id: clientId.trim() || undefined,
           chatgpt_account_id: chatgptAccountId.trim() || undefined,
@@ -1181,6 +1184,7 @@ export function ProvidersScreen({ refreshRevision, onLoadingChange }: PageProps)
     onUpdateClaudeEnabled={updateClaudeEnabled}
     onUpdateGptEnabled={updateEnabled}
     onUpdateUpstreamApiKeyEnabled={updateUpstreamApiKeyEnabled}
+    onOpenGptProxy={setProxyTarget}
     onOpenAccountQuota={openAccountQuotaDialog}
     onOpenRateLimitReset={openRateLimitResetDialog}
     onDeleteGptAccount={requestDeleteAccount}
@@ -1188,7 +1192,15 @@ export function ProvidersScreen({ refreshRevision, onLoadingChange }: PageProps)
     onDeleteUpstreamApiKey={requestDeleteUpstreamApiKey}
     onOpenRequestOverride={openRequestOverrideDialog}
     onPageChange={loadActiveCredentialPage}
-  /><AnimatePresence>{accountImportOpen && (
+  /><AnimatePresence>{proxyTarget && providerAccess.isOwner && (
+    <GptAccountProxyDialog
+      key={`account-proxy-${proxyTarget.id}`}
+      account={proxyTarget}
+      authToken={authToken}
+      onClose={() => setProxyTarget(null)}
+      onSaved={() => { setProxyTarget(null); void loadAccounts(); }}
+    />
+  )}{accountImportOpen && (
     <AccountImportDialog
       key={`account-import-${activeAccountProvider}`}
       provider={activeAccountProvider}

@@ -30,6 +30,7 @@ pub mod account {
         let account = provider_sql::account::create_with_db_error_mapper(
             conn,
             NewProviderAccount {
+                proxy_url: None,
                 tenant_id,
                 provider: PROVIDER.to_owned(),
                 refresh_token,

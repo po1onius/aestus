@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 
+use crate::infra::account_proxy::{AccountProxy, ProxyView};
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -46,6 +47,7 @@ const MAX_CALLBACK_URL_BYTES: usize = 16 * 1024;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CreateGptAccountRequest {
+    proxy_url: Option<String>,
     refresh_token: Option<String>,
     client_id: Option<String>,
     chatgpt_account_id: Option<String>,
@@ -68,6 +70,7 @@ struct UpdateGptAccountEnabledRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CompleteOauthRequest {
+    proxy_url: Option<String>,
     callback_url: String,
     #[serde(default, rename = "override")]
     override_: RequestOverride,
@@ -94,7 +97,8 @@ struct DeleteGptAccountResponse {
 }
 
 #[derive(Debug, Serialize)]
-struct GptAccountResponse {
+pub(super) struct GptAccountResponse {
+    proxy: Option<ProxyView>,
     id: Uuid,
     account_id: Option<String>,
     client_id: String,
@@ -132,6 +136,7 @@ pub fn router() -> Router<AppState> {
             post(consume_gpt_account_rate_limit_reset_credit),
         )
         .route("/{id}/enabled", put(update_gpt_account_enabled))
+        .route("/{id}/proxy", put(super::gpt_proxy::update))
         .route("/{id}/override", put(update_gpt_account_override))
         .route("/{id}/group", put(update_gpt_account_group))
 }
@@ -173,6 +178,7 @@ async fn complete_oauth_callback(
 ) -> ConsoleResult<Json<GptAccountResponse>> {
     // override 属于纯本地输入，必须在消费一次性 OAuth state 和交换 code 之前完成校验。
     payload.override_.validate()?;
+    let proxy = AccountProxy::parse(payload.proxy_url.as_deref())?;
     let callback_url =
         normalize_required_limited(payload.callback_url, "callback_url", MAX_CALLBACK_URL_BYTES)?;
     let callback = auth::parse_callback_url(&callback_url)?;
@@ -183,6 +189,7 @@ async fn complete_oauth_callback(
         .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     super::precheck_resource_capacity(&state, &tenant_id, gpt_model::PROVIDER).await?;
 
+    let http_client = state.gpt_oauth_http_client(proxy.clone()).await?;
     let session = provider_oauth::take(&state, gpt_model::PROVIDER, &callback.state)
         .await?
         .ok_or_else(|| AppError::BadRequest {
@@ -195,13 +202,20 @@ async fn complete_oauth_callback(
 
     let auth_token = auth::exchange_callback_code(
         &state,
+        &http_client,
         &session.redirect_uri,
         &session.pkce_verifier,
         &callback.code,
     )
     .await?;
-    let account =
-        persist_oauth_auth_token(&state, tenant_id, auth_token, payload.override_).await?;
+    let account = persist_oauth_auth_token(
+        &state,
+        tenant_id,
+        auth_token,
+        payload.override_,
+        proxy.stored_url(),
+    )
+    .await?;
     let snapshot = ProviderResourceService::<GptMaintenance>::new(&state)
         .sync_account(account)
         .await?;
@@ -221,6 +235,7 @@ async fn create_gpt_account(
     Json(payload): Json<CreateGptAccountRequest>,
 ) -> ConsoleResult<Json<GptAccountResponse>> {
     payload.override_.validate()?;
+    let proxy = AccountProxy::parse(payload.proxy_url.as_deref())?;
     let refresh_token = normalize_optional_limited(
         payload.refresh_token,
         "refresh_token",
@@ -242,25 +257,33 @@ async fn create_gpt_account(
         .clone()
         .ok_or(AppError::Console(ConsoleError::Forbidden))?;
     super::precheck_resource_capacity(&state, &tenant_id, gpt_model::PROVIDER).await?;
-    let refresh_grant = match auth::refresh_token(&state, &refresh_token, &client_id).await {
-        Ok(refresh_grant) => refresh_grant,
-        Err(error) => {
-            let kind = error.kind();
-            warn!(
-                failure_kind = kind.as_str(),
-                client_id = %client_id,
-                chatgpt_account_id = chatgpt_account_id.as_deref().unwrap_or("<missing>"),
-                error = %error,
-                "管理端 refresh_token 导入 GPT 账号失败"
-            );
-            return Err(map_refresh_token_import_error(error).into());
-        }
-    };
+    let http_client = state.gpt_oauth_http_client(proxy.clone()).await?;
+    let refresh_grant =
+        match auth::refresh_token(&state, &http_client, &refresh_token, &client_id).await {
+            Ok(refresh_grant) => refresh_grant,
+            Err(error) => {
+                let kind = error.kind();
+                warn!(
+                    failure_kind = kind.as_str(),
+                    client_id = %client_id,
+                    chatgpt_account_id = chatgpt_account_id.as_deref().unwrap_or("<missing>"),
+                    error = %error,
+                    "管理端 refresh_token 导入 GPT 账号失败"
+                );
+                return Err(map_refresh_token_import_error(error).into());
+            }
+        };
     let auth_token =
         auth_token_from_refresh_import(refresh_token, chatgpt_account_id, refresh_grant)?;
-    let account =
-        persist_imported_auth_token(&state, tenant_id, client_id, auth_token, payload.override_)
-            .await?;
+    let account = persist_imported_auth_token(
+        &state,
+        tenant_id,
+        client_id,
+        auth_token,
+        payload.override_,
+        proxy.stored_url(),
+    )
+    .await?;
     let snapshot = ProviderResourceService::<GptMaintenance>::new(&state)
         .sync_account(account)
         .await?;
@@ -280,6 +303,7 @@ async fn persist_imported_auth_token(
     client_id: String,
     auth_token: RefreshedAuthToken,
     request_override: RequestOverride,
+    proxy_url: Option<String>,
 ) -> AppResult<ProviderAccount> {
     let plan_type = auth_token
         .plan_type
@@ -293,6 +317,7 @@ async fn persist_imported_auth_token(
         auth_token,
         plan_type,
         request_override,
+        proxy_url,
     )
     .await
 }
@@ -355,6 +380,7 @@ async fn persist_oauth_auth_token(
     tenant_id: String,
     auth_token: RefreshedAuthToken,
     request_override: RequestOverride,
+    proxy_url: Option<String>,
 ) -> AppResult<ProviderAccount> {
     let plan_type = auth_token
         .plan_type
@@ -368,6 +394,7 @@ async fn persist_oauth_auth_token(
         auth_token,
         plan_type,
         request_override,
+        proxy_url,
     )
     .await
 }
@@ -379,6 +406,7 @@ async fn persist_auth_token_with_plan(
     auth_token: RefreshedAuthToken,
     plan_type: String,
     request_override: RequestOverride,
+    proxy_url: Option<String>,
 ) -> AppResult<ProviderAccount> {
     let mut conn = state.db_conn().await?;
 
@@ -396,6 +424,7 @@ async fn persist_auth_token_with_plan(
         gpt_maintenance::next_token_refresh_at_from_exp(state, auth_token.access_token_expires_at),
         auth_token.chatgpt_account_is_fedramp,
         request_override,
+        proxy_url,
     )
     .await
 }
@@ -825,7 +854,10 @@ fn normalize_optional_limited(
 }
 
 impl GptAccountResponse {
-    fn from_snapshot(snapshot: AccountSnapshot, can_view_override: bool) -> AppResult<Self> {
+    pub(super) fn from_snapshot(
+        snapshot: AccountSnapshot,
+        can_view_override: bool,
+    ) -> AppResult<Self> {
         let AccountSnapshot {
             account,
             group,
@@ -857,6 +889,7 @@ impl GptAccountResponse {
 
         Ok(Self {
             id: account.id,
+            proxy: AccountProxy::parse(account.proxy_url.as_deref())?.view(),
             account_id: specific.chatgpt_account_id,
             client_id: account.client_id.clone(),
             email: specific.email,

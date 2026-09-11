@@ -32,11 +32,12 @@ interface AccountImportDialogProps {
   onClose: () => void;
   onCreateAuthorization: () => void;
   onCopyAuthorizationUrl: () => void;
-  onSubmitCallback: (callbackUrl: string) => void;
-  onSubmitManual: (input: { refreshToken: string; clientId: string; chatgptAccountId: string }) => void;
+  onSubmitCallback: (callbackUrl: string, proxyUrl: string) => void;
+  onSubmitManual: (input: { refreshToken: string; clientId: string; chatgptAccountId: string; proxyUrl: string }) => void;
 }
 
 export function AccountImportDialog(props: AccountImportDialogProps) {
+  const [proxyUrl, setProxyUrl] = useState("");
   const [mode, setMode] = useState(props.initialMode);
   const [callbackUrl, setCallbackUrl] = useState("");
   const [refreshToken, setRefreshToken] = useState("");
@@ -77,6 +78,17 @@ export function AccountImportDialog(props: AccountImportDialogProps) {
             <span className={tabContentClass}>RT 导入</span>
           </button>
         </SlidingTabList>
+      )}
+
+      {!isClaude && (
+        <div className={`${fieldStack} mb-5`}>
+          <label className={fieldLabel} htmlFor="importProxyUrl">账号代理 URL（可选）</label>
+          <input id="importProxyUrl" className={inputClass} value={proxyUrl}
+            onChange={event => setProxyUrl(event.target.value)} maxLength={4096}
+            autoComplete="off" spellCheck={false} disabled={props.saving || props.oauthLoading}
+            placeholder="http://user:password@proxy.example:8080" />
+          <p className={fieldHelp}>留空直连。支持 HTTP、HTTPS、SOCKS5、SOCKS5H，可在 URL 中填写认证信息。OAuth 浏览器登录使用浏览器自身的网络设置。</p>
+        </div>
       )}
 
       {mode === "oauth" ? (
@@ -146,7 +158,7 @@ export function AccountImportDialog(props: AccountImportDialogProps) {
                 </p>
               </div>
             )}
-            <form className={fieldStack} onSubmit={event => { event.preventDefault(); props.onSubmitCallback(callbackUrl); }}>
+            <form className={fieldStack} onSubmit={event => { event.preventDefault(); props.onSubmitCallback(callbackUrl, proxyUrl); }}>
               <label className={fieldLabel} htmlFor="callbackUrl">
                 {isClaude ? "Authorization Result" : "Callback URL"}
               </label>
@@ -175,7 +187,7 @@ export function AccountImportDialog(props: AccountImportDialogProps) {
         </div>
       ) : (
         <div>
-          <form className="grid gap-4" onSubmit={event => { event.preventDefault(); props.onSubmitManual({ refreshToken, clientId, chatgptAccountId }); }}>
+          <form className="grid gap-4" onSubmit={event => { event.preventDefault(); props.onSubmitManual({ refreshToken, clientId, chatgptAccountId, proxyUrl }); }}>
             <label className={fieldStack}>
               <span className={fieldLabel}>Client ID</span>
               <input

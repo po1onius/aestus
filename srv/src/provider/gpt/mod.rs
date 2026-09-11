@@ -1,6 +1,7 @@
 mod account_api;
 pub mod auth;
 pub mod codex_http;
+pub(crate) mod cookies;
 pub mod image_edits;
 pub mod image_generations;
 mod images;

@@ -82,6 +82,7 @@ interface ProvidersPageProps {
     apiKey: ProviderUpstreamApiKey,
     enabled: boolean,
   ) => void;
+  onOpenGptProxy: (account: GptAccount) => void;
   onOpenAccountQuota: (account: GptAccount) => void;
   onOpenRateLimitReset: (account: GptAccount) => void;
   onDeleteGptAccount: (account: GptAccount) => void;
@@ -146,6 +147,7 @@ export function ProvidersPage({
   onUpdateClaudeEnabled,
   onUpdateGptEnabled,
   onUpdateUpstreamApiKeyEnabled,
+  onOpenGptProxy,
   onOpenAccountQuota,
   onOpenRateLimitReset,
   onDeleteGptAccount,
@@ -361,6 +363,7 @@ export function ProvidersPage({
             groupUpdatingId={resourceGroupUpdatingId}
             enabledUpdatingId={enabledUpdatingId}
             deletingId={accountDeletingId}
+            onOpenProxy={onOpenGptProxy}
             onOpenQuota={onOpenAccountQuota}
             onOpenRateLimitReset={onOpenRateLimitReset}
             onUpdateEnabled={onUpdateGptEnabled}

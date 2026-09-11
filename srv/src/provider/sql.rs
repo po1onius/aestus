@@ -45,6 +45,57 @@ macro_rules! next_projection_version {
 pub mod account {
     use super::*;
 
+    /// 代理独立更新；行锁保证保留认证信息时读取最新值，不覆盖并发 token 刷新结果。
+    pub async fn update_proxy(
+        conn: &mut AsyncPgConnection,
+        tenant_id: String,
+        provider: &str,
+        id: Uuid,
+        input: crate::infra::account_proxy::ProxyUpdate,
+    ) -> AppResult<ProviderAccount> {
+        use crate::infra::account_proxy::AccountProxy;
+        use provider_accounts::dsl;
+        conn.transaction::<ProviderAccount, AppError, _>(async |conn| {
+            let current = required_account(
+                dsl::provider_accounts
+                    .filter(dsl::tenant_id.eq(&tenant_id))
+                    .filter(dsl::provider.eq(provider))
+                    .filter(dsl::id.eq(id))
+                    .for_update()
+                    .select(ProviderAccount::as_select())
+                    .first(conn)
+                    .await,
+                provider,
+                id,
+            )?;
+            let previous = AccountProxy::parse(current.proxy_url.as_deref())?;
+            let proxy = input.resolve(&previous)?;
+            if proxy == previous {
+                return Ok(current);
+            }
+            let account = required_account(
+                diesel::update(
+                    dsl::provider_accounts
+                        .filter(dsl::id.eq(id))
+                        .filter(dsl::tenant_id.eq(&tenant_id))
+                        .filter(dsl::provider.eq(provider)),
+                )
+                .set((
+                    dsl::proxy_url.eq(proxy.stored_url()),
+                    dsl::updated_at.eq(next_projection_version!(dsl::updated_at)),
+                ))
+                .returning(ProviderAccount::as_returning())
+                .get_result(conn)
+                .await,
+                provider,
+                id,
+            )?;
+            info!(account_id = %id, provider, proxy = ?proxy, "账号出站代理配置已更新");
+            Ok(account)
+        })
+        .await
+    }
+
     pub async fn create(
         conn: &mut AsyncPgConnection,
         new_account: NewProviderAccount,

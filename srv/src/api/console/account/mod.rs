@@ -5,6 +5,7 @@
 
 pub(super) mod claude;
 pub(super) mod gpt;
+mod gpt_proxy;
 
 /// 在消耗一次性 OAuth state、交换 code 或刷新 token 前提前检查容量。
 /// 此处不持锁、不预占名额；最终准入由通用 SQL 创建事务完成。

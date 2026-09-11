@@ -272,6 +272,9 @@ pub struct UpstreamResource {
     pub group_id: Uuid,
     pub kind: UpstreamResourceKind,
     pub auth_secret: String,
+    /// 账号出站代理，不属于 provider 私有请求上下文。
+    #[serde(default)]
+    pub proxy: crate::infra::account_proxy::AccountProxy,
     /// 官方 API Key 导入时确定的通用上游地址；账号使用 provider 全局地址，因此为 `None`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,

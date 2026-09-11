@@ -108,7 +108,10 @@ impl ProviderProtocol for GptResponsesProxy {
                     &config.gpt_upstream_responses_path,
                     request.uri.query(),
                 ),
-                HttpClientProfile::ChatGptCodex,
+                HttpClientProfile::ChatGptCodex {
+                    account_id: resource.id,
+                    proxy: resource.proxy.clone(),
+                },
             ),
             UpstreamResourceKind::ApiKey => (
                 build_upstream_url(
@@ -313,9 +316,7 @@ impl GptSseObserver {
                 max_sse_item_bytes = MAX_SSE_ITEM_BYTES,
                 "GPT SSE 事件缓冲区超过上限，按原始字节透传当前缓冲内容"
             );
-            update
-                .output
-                .push_back(self.sse_buffer.split().freeze());
+            update.output.push_back(self.sse_buffer.split().freeze());
             self.sse_scanned = 0;
         }
         update.policy_violation = self.policy_violation.take();
@@ -437,9 +438,7 @@ impl StreamObserver for GptSseObserver {
     fn complete(&mut self) -> StreamCompletion {
         let mut update = self.process_buffered_events();
         if !self.sse_buffer.is_empty() {
-            update
-                .output
-                .push_back(self.sse_buffer.split().freeze());
+            update.output.push_back(self.sse_buffer.split().freeze());
             self.sse_scanned = 0;
         }
         StreamCompletion {

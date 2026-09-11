@@ -332,6 +332,69 @@ Aestus 的 `/v1` 后，会自动请求该接口。
 
 GPT 搜索上游路径默认是 `/alpha/search`，可通过 `AESTUS_GPT_UPSTREAM_SEARCH_PATH` 覆盖。
 
+## GPT 账号代理
+
+租户 owner 可在 GPT 账号操作菜单中打开“代理设置”，选择直连或指定代理；OAuth 和 RT
+导入弹窗也支持填写代理 URL，服务端首次 token 交换及导入后的请求均使用所选代理。
+浏览器打开 OAuth 授权页面时仍使用浏览器自身的网络设置。
+
+代理保存在 `provider_accounts.proxy_url` 独立列中，不放入 `specific`，不增加代理版本。
+`NULL` 表示明确直连；支持 `http://`、`https://`、`socks5://`、`socks5h://`，可在 URL
+中携带用户名和密码。HTTP/HTTPS 默认端口分别为 80/443，SOCKS 默认为 1080；SOCKS5H
+由代理解析目标域名，SOCKS5 在本地解析。拒绝其他协议、非根路径、查询参数、fragment
+和超过 4096 字节的地址。凭证中的特殊字符应使用 URL 百分号编码。
+
+代理覆盖该账号的推理、搜索、图片、额度查询、额度重置和后台 token 刷新。指定代理及
+直连均不继承环境代理/NO_PROXY；代理连接失败不会绕过该代理直连。模型请求既有的
+换资源重试仍保留，换到另一账号时使用另一账号自己的代理。官方 API Key 和 Claude 的
+现有出网策略不受影响。请求覆盖与插件显式 Cookie 的优先级保持原样。
+
+`PUT /api/console/providers/gpt/accounts/{id}/proxy` 仅租户 owner 可调用，支持：
+
+```json
+{"proxy_url": "http://proxy.example:8080", "keep_auth": true}
+```
+
+`proxy_url=null` 或空字符串恢复直连；`keep_auth` 默认 false，true 时从数据库中保留
+最新的代理认证，URL 不得再包含用户名或密码。false 时以提交 URL 的认证为准，不含
+认证即清除原认证。更新在账号行锁内进行，只修改代理列及已有投影更新时间；不修改
+账号 token 世代，也不会被后台续期覆盖。返回账号最新快照，列表中的 `proxy` 仅包含
+移除全部认证的 `url` 和 `has_auth`，直连为 null；代理凭证不返回到控制台或日志。
+
+`POST /api/console/providers/gpt/accounts` 和 `/oauth/callback` 接受可选 `proxy_url`，
+缺省为直连。代理先校验，再进行 token 请求；OAuth 回调还会先构造客户端再消费 state。
+账号保存后通过现有 PostgreSQL → Redis 投影机制发布代理配置。所有网关实例应同步
+升级后再配置代理，避免不支持代理的旧实例使用其他出口。
+
+新列已加入初始化 migration，适用于空数据库；本次尚未新增或执行历史数据 migration。
+已有数据库必须在升级前完成加列，重复运行已执行过的初始化 migration 不会生效；需要
+保留历史数据时应先确认升级迁移方案。
+
+## GPT HTTP Cookie 管理
+
+GPT HTTP client 和 Cookie jar 按“上游账号资源 UUID + 规范化后的完整代理配置”隔离。
+同一账号在相同代理下的 Codex 推理、搜索、图片、额度接口及 token 刷新复用客户端组；
+组内短请求和流式 client 共用 jar，各自复用连接池并保留原有超时策略。账号 ID 来自已调度资源或已读取的账号记录，不取自调用方
+header。切换账号重试时切换客户端组，刷新 access token 不主动重建客户端组。
+
+客户端组由 Moka 按需缓存，容量目标为 4096 个账号/代理组合，30 分钟未获取的组过期；
+相同组合的并发初始化由缓存合并。容量淘汰、过期或进程重启后，再次使用该账号会创建空 jar。
+缓存淘汰只释放缓存引用，不中断在途请求；在途请求可能继续使用旧 jar，淘汰后新请求
+使用新 jar，两者不合并。30 分钟按客户端组的获取时间计算，不按响应结束时间计算。
+删除账号后停止新的资源调度，已有缓存按上述规则回收。缓存不保存 access token，也不
+替代账号启停或权限校验。初始化失败返回脱敏的服务内部错误，不触发换账号网络重试。
+
+Cookie 白名单与 Codex CLI 同步，保存及回传 Cloudflare 基础设施 Cookie 和 OpenAI
+`__oailb` 路由 Cookie。仅允许 HTTPS ChatGPT 域名，并遵循 Cookie 的 Domain、Path 和
+过期规则；不自动保存账号、session 或认证 Cookie，不持久化，也不跨实例同步。原生
+请求过滤下游传入的 Cookie，上游 `Set-Cookie` 不向下游转发。资源请求头覆盖或请求插件
+显式设置 `Cookie` 时，reqwest 使用该请求头，不再自动补充 jar 中的 Cookie；响应中的
+允许 Cookie 仍写入本次账号客户端组的 jar。
+
+代理或代理认证变更后，新请求按新配置查找客户端组，缓存未命中时创建空 jar；在途请求
+继续按其快照使用旧代理，旧、新 jar 不合并。切回相同配置可能复用尚未过期的旧 client
+和 Cookie；无需额外代理版本或跨实例清理本地缓存。
+
 ## 请求日志与用量
 
 业务日志统一由 `srv/src/logs` 模块管理：`request` 负责请求事件聚合、ClickHouse 读写和

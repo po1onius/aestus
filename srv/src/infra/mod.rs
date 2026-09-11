@@ -1,3 +1,4 @@
+pub mod account_proxy;
 pub mod clickhouse;
 pub mod db;
 pub mod email;

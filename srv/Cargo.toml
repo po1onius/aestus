@@ -24,10 +24,11 @@ json-patch = "4.2.0"
 lettre = { version = "0.11.22", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls-tls", "pool"] }
 logroller = "0.1.12"
 mime_guess = "2.0.5"
+moka = { version = "0.12.16", features = ["future"] }
 multer = "3.1.0"
 rand = "0.10.1"
 redis = { version = "1.2.2", features = ["tokio-comp", "connection-manager"] }
-reqwest = { version = "0.13.4", default-features = false, features = ["json", "form", "stream", "rustls", "cookies"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "form", "stream", "rustls", "cookies", "socks"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 sha2 = "0.11.0"

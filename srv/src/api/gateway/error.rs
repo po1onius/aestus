@@ -79,6 +79,7 @@ pub(super) fn project_error(error: &AppError) -> ProviderVisibleError {
         | AppError::InvalidConfig { .. }
         | AppError::MissingConfig { .. }
         | AppError::Startup { .. }
+        | AppError::HttpClientBuild { .. }
         | AppError::DbPoolBuild { .. }
         | AppError::DbPoolGet { .. }
         | AppError::DbQuery { .. }

@@ -70,7 +70,10 @@ impl ProviderProtocol for GptImageEditsProxy {
         let (base_url, client_profile) = match resource.kind {
             UpstreamResourceKind::Account => (
                 config.gpt_upstream_base_url.as_str(),
-                HttpClientProfile::ChatGptCodex,
+                HttpClientProfile::ChatGptCodex {
+                    account_id: resource.id,
+                    proxy: resource.proxy.clone(),
+                },
             ),
             UpstreamResourceKind::ApiKey => {
                 (resource.api_key_base_url()?, HttpClientProfile::Generic)

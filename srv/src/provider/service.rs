@@ -123,6 +123,19 @@ impl<'a, P: MaintenanceProvider> ProviderResourceService<'a, P> {
         self.sync_account(account).await
     }
 
+    pub async fn update_account_proxy(
+        &self,
+        tenant_id: String,
+        id: Uuid,
+        input: crate::infra::account_proxy::ProxyUpdate,
+    ) -> AppResult<AccountSnapshot> {
+        let mut conn = self.state.db_conn().await?;
+        require_account_tenant::<P>(&mut conn, tenant_id.clone(), id).await?;
+        let account = sql::account::update_proxy(&mut conn, tenant_id, P::NAME, id, input).await?;
+        drop(conn);
+        self.sync_account(account).await
+    }
+
     pub async fn update_account_override(
         &self,
         tenant_id: String,

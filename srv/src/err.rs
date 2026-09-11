@@ -29,6 +29,9 @@ pub enum AppError {
     #[error("服务启动失败: {message}")]
     Startup { message: String },
 
+    #[error("HTTP client 初始化失败: {message}")]
+    HttpClientBuild { message: String },
+
     #[error("数据库连接池初始化失败: {message}")]
     DbPoolBuild { message: String },
 
@@ -138,6 +141,7 @@ impl AppError {
             AppError::InvalidConfig { .. } => "invalid_config",
             AppError::MissingConfig { .. } => "missing_config",
             AppError::Startup { .. } => "startup_failed",
+            AppError::HttpClientBuild { .. } => "http_client_build_failed",
             AppError::DbPoolBuild { .. } => "db_pool_build_failed",
             AppError::DbPoolGet { .. } => "db_pool_get_failed",
             AppError::DbQuery { .. } => "db_query_failed",

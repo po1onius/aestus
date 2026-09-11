@@ -238,6 +238,8 @@ CREATE TABLE provider_accounts (
     status TEXT NOT NULL DEFAULT 'valid',
     status_reason TEXT,
     client_id TEXT NOT NULL,
+    -- 账号出站代理，NULL 表示直连；独立于 provider 私有账号信息。
+    proxy_url TEXT,
     specific JSONB NOT NULL DEFAULT '{}'::JSONB,
     "override" JSONB NOT NULL DEFAULT '{"header": {}, "body": {}}'::JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
