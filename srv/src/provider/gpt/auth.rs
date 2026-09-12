@@ -113,11 +113,11 @@ pub enum TokenRefreshError {
     #[error("刷新 token 请求失败: {message}")]
     Request { message: String },
 
-    // body 仅用于内部错误分类，Display/日志/API 响应都不能回显可能携带凭证的上游正文。
-    #[error("刷新 token 上游返回失败状态: {status}")]
+    #[error("刷新 token 上游返回失败状态: {status}: {message}")]
     UpstreamStatus {
         status: reqwest::StatusCode,
-        body: String,
+        kind: TokenRefreshFailureKind,
+        message: String,
     },
 
     #[error("刷新 token 响应格式无效: {message}")]
@@ -129,18 +129,70 @@ impl TokenRefreshError {
         match self {
             TokenRefreshError::Request { .. } => TokenRefreshFailureKind::Retryable,
             TokenRefreshError::BadResponse { .. } => TokenRefreshFailureKind::BadResponse,
-            TokenRefreshError::UpstreamStatus { status, body } => {
-                if *status == reqwest::StatusCode::UNAUTHORIZED
-                    || *status == reqwest::StatusCode::FORBIDDEN
-                    || body_contains_invalid_refresh_token(body)
-                {
-                    TokenRefreshFailureKind::InvalidRefreshToken
-                } else if *status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                    TokenRefreshFailureKind::RateLimited
+            TokenRefreshError::UpstreamStatus { kind, .. } => *kind,
+        }
+    }
+
+    /// 与 Codex CLI 一致，按结构化错误码和 HTTP 状态判断是否需要重新授权。
+    /// 必须先解析完整正文，不能因诊断信息截断而丢失错误码。
+    fn from_upstream_status(status: reqwest::StatusCode, body: &str) -> Self {
+        let payload = serde_json::from_str::<serde_json::Value>(body).ok();
+        let code = payload
+            .as_ref()
+            .and_then(extract_refresh_token_error_code)
+            .map(str::to_ascii_lowercase);
+        let permanent_message = match code.as_deref() {
+            Some("refresh_token_expired") => Some(
+                "Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again.",
+            ),
+            Some("refresh_token_reused") => Some(
+                "Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.",
+            ),
+            Some("refresh_token_invalidated") => Some(
+                "Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.",
+            ),
+            _ => None,
+        };
+        let invalid_grant =
+            status == reqwest::StatusCode::BAD_REQUEST && code.as_deref() == Some("invalid_grant");
+        let permanent = status == reqwest::StatusCode::UNAUTHORIZED
+            || permanent_message.is_some()
+            || invalid_grant;
+        let kind = if permanent {
+            TokenRefreshFailureKind::InvalidRefreshToken
+        } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            // 在网关中保留限流子类；与 Codex Transient 一样进入维护重试。
+            TokenRefreshFailureKind::RateLimited
+        } else {
+            TokenRefreshFailureKind::Retryable
+        };
+        let message = if permanent {
+            permanent_message.unwrap_or(
+                "Your access token could not be refreshed. Please log out and sign in again.",
+            )
+        } else {
+            payload
+                .as_ref()
+                .and_then(|value| value.get("error"))
+                .and_then(|error| error.get("message"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(if body.is_empty() {
+                    "Unknown error"
                 } else {
-                    TokenRefreshFailureKind::Retryable
-                }
-            }
+                    body
+                })
+        };
+        warn!(
+            upstream_status = status.as_u16(),
+            backend_code = code.as_deref(),
+            failure_kind = kind.as_str(),
+            unknown_error_code = permanent_message.is_none() && !invalid_grant,
+            "GPT refresh token 失败响应已按 Codex 规则分类"
+        );
+        Self::UpstreamStatus {
+            status,
+            kind,
+            message: message.to_owned(),
         }
     }
 }
@@ -212,12 +264,23 @@ pub async fn refresh_token(
         })?;
 
     let status = response.status();
-    let body = response
-        .bytes()
-        .await
-        .map_err(|source| TokenRefreshError::Request {
-            message: source.to_string(),
-        })?;
+    let body = match response.bytes().await {
+        Ok(body) => body,
+        Err(source) if !status.is_success() => {
+            warn!(
+                token_endpoint = %state.config().gpt_token_endpoint,
+                upstream_status = status.as_u16(),
+                error = %source,
+                "GPT refresh token 失败正文读取失败，按 Codex 规则使用空正文分类"
+            );
+            return Err(TokenRefreshError::from_upstream_status(status, ""));
+        }
+        Err(source) => {
+            return Err(TokenRefreshError::Request {
+                message: source.to_string(),
+            });
+        }
+    };
 
     if !status.is_success() {
         let tracing_body = response_body_for_tracing(&body);
@@ -229,10 +292,10 @@ pub async fn refresh_token(
             upstream_response_body = %tracing_body.content(),
             "GPT refresh token 请求收到失败响应，完整响应正文已写入 tracing"
         );
-        return Err(TokenRefreshError::UpstreamStatus {
+        return Err(TokenRefreshError::from_upstream_status(
             status,
-            body: truncate_for_status_reason(&String::from_utf8_lossy(&body)),
-        });
+            &String::from_utf8_lossy(&body),
+        ));
     }
 
     let payload = serde_json::from_slice::<RefreshTokenResponse>(&body).map_err(|source| {
@@ -557,16 +620,17 @@ fn normalize_optional_ref(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
-fn body_contains_invalid_refresh_token(body: &str) -> bool {
-    let lower = body.to_ascii_lowercase();
-    lower.contains("invalid_grant")
-        || lower.contains("invalid_refresh_token")
-        || lower.contains("refresh_token_expired")
-        || lower.contains("refresh_token_reused")
-        || lower.contains("refresh_token_invalidated")
-        || lower.contains("invalid refresh")
-        || lower.contains("expired refresh")
-        || lower.contains("unauthorized")
+fn extract_refresh_token_error_code(value: &serde_json::Value) -> Option<&str> {
+    let object = value.as_object()?;
+    if let Some(error) = object.get("error") {
+        if let Some(code) = error.get("code").and_then(serde_json::Value::as_str) {
+            return Some(code);
+        }
+        if let Some(code) = error.as_str() {
+            return Some(code);
+        }
+    }
+    object.get("code").and_then(serde_json::Value::as_str)
 }
 
 fn safe_oauth_error(body: &[u8]) -> String {
@@ -580,10 +644,4 @@ fn safe_oauth_error(body: &[u8]) -> String {
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
         })
         .unwrap_or_else(|| "unknown_oauth_error".to_owned())
-}
-
-fn truncate_for_status_reason(value: &str) -> String {
-    const MAX_STATUS_REASON_CHARS: usize = 2_048;
-
-    value.chars().take(MAX_STATUS_REASON_CHARS).collect()
 }

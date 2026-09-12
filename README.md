@@ -332,6 +332,21 @@ Aestus 的 `/v1` 后，会自动请求该接口。
 
 GPT 搜索上游路径默认是 `/alpha/search`，可通过 `AESTUS_GPT_UPSTREAM_SEARCH_PATH` 覆盖。
 
+## GPT 账号 token 刷新
+
+refresh token 的失败响应按 Codex CLI 规则解析完整 JSON，依次提取 `error.code`、
+字符串形式的 `error` 或顶层 `code`，错误码忽略 ASCII 大小写。HTTP 401、任意非 2xx
+响应中的 `refresh_token_expired` / `refresh_token_reused` / `refresh_token_invalidated`，
+以及 HTTP 400 搭配 `invalid_grant` 判为凭证永久失效；maintenance 在凭证世代仍匹配时
+将账号置为 `invalid`、移出调度并停止自动刷新。
+
+其他非 2xx（包括未命中上述条件的 403、429 和 5xx）按
+`AESTUS_GPT_TOKEN_REFRESH_RETRY_SECONDS` 安排重试；不再扫描正文关键词判断凭证失效。
+错误正文读取失败时按空正文结合状态码分类。永久失败使用 Codex 的固定重新登录提示；
+临时失败优先取 `error.message`，缺失时使用原始正文，空正文使用 `Unknown error`。
+诊断信息的存储截断在分类后执行，不影响错误码提取。请求失败和成功响应解析失败继续
+进入维护重试；运行日志保留失败响应完整正文，并记录提取的错误码和分类。
+
 ## GPT 账号代理
 
 租户 owner 可在 GPT 账号操作菜单中打开“代理设置”，选择直连或指定代理；OAuth 和 RT
