@@ -429,6 +429,12 @@ adapter / observer 只返回识别结果，由通用 proxy / 流包装器发送�
 用量、错误分类和策略日志复用解析结果。完整事件直接从字节缓冲切分，单行 `data:` 借用
 原始内容；透传保留上游原始字节，需转换的资源故障仍输出既有 client retry 事件。
 
+原生 GPT SSE 和流式响应插件均将 `response.incomplete` 记录为流错误，读取
+`response.incomplete_details.reason`（缺少或类型错误时为 `unknown`），并提取事件中
+有效的 `response.usage` 用于统计与额度扣减；usage 缺失或无效不影响错误识别。
+原始事件继续透传，不触发账号维护或改写为 client retry 事件。正常 EOF 后请求日志
+仍按流错误记录，避免客户端报错而网关显示成功。插件用法需重新构建并上传流式响应组件。
+
 独立 PostgreSQL 表 `gpt_policy_violation_logs` 保存主键 `id`、鉴权时的 `tenant_id`、
 `username` 快照、上游账号邮箱 `account_email`、实际观察时间 `occurred_at`（TIMESTAMPTZ）和
 `error_code`，不使用外键。PostgreSQL writer 根据请求日志聚合的资源 ID，限定本租户和 GPT

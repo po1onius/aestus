@@ -186,6 +186,10 @@ SSE 转 JSON 成功时输出
 - 其他 HTTP 状态、错误 type/code 或错误消息不产生 maintenance feedback；
 - 流式 `response.failed`：额外返回 `stream-failure`；policy/safety 等业务拒绝不会误报
   maintenance feedback。
+- 流式 `response.incomplete`：返回 `kind=response_incomplete` 的 `stream-failure`，
+  消息包含 `response.incomplete_details.reason`（缺少或类型错误时为 `unknown`），
+  并提取有效 usage；原始事件透传，不产生 maintenance feedback，也不替换为 client retry
+  事件。升级此处理需重新构建并上传流式响应 Component。
 
 buffered 插件完成上述 HTTP `429` feedback 提取后，会把 `usage_limit_reached` 和
 `usage_not_included` 的下游错误统一改写为 `error.type=rate_limit_exceeded`、

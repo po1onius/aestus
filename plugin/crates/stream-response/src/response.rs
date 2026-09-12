@@ -6,10 +6,8 @@ use crate::{Effects, Feedback, LimitFeedback, StreamFailure, Usage};
 /// maintenance/usage/failure 则必须依据上游原始事实生成。
 pub fn effects_from_raw_json(value: &Value, status: Option<u16>, stream: bool) -> Effects {
     let error = ErrorView::from_value(value);
-    Effects {
-        feedback: feedback_from_response(value, status),
-        usage: extract_usage(value),
-        failure: (stream && is_failed_event(value)).then(|| StreamFailure {
+    let failure = match value.get("type").and_then(Value::as_str) {
+        Some("response.failed") if stream => Some(StreamFailure {
             kind: error
                 .as_ref()
                 .and_then(|error| error.code.as_deref().or(error.kind.as_deref()))
@@ -22,6 +20,22 @@ pub fn effects_from_raw_json(value: &Value, status: Option<u16>, stream: bool) -
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| "OpenAI upstream response failed".to_owned()),
         }),
+        Some("response.incomplete") if stream => {
+            let reason = value
+                .pointer("/response/incomplete_details/reason")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            Some(StreamFailure {
+                kind: "response_incomplete".to_owned(),
+                message: bounded_reason(&format!("Incomplete response returned, reason: {reason}")),
+            })
+        }
+        _ => None,
+    };
+    Effects {
+        feedback: feedback_from_response(value, status),
+        usage: extract_usage(value),
+        failure,
     }
 }
 

@@ -337,10 +337,32 @@ impl GptSseObserver {
 
         match parsed {
             Some(CodexSseData::ResponseCompleted(usage)) => {
-                self.record_usage(usage);
+                self.record_usage(usage, "response.completed");
                 (original, None)
             }
             Some(CodexSseData::ResponseFailed(error)) => self.record_failure(error, original),
+            Some(CodexSseData::ResponseIncomplete { reason, usage }) => {
+                let usage_available = usage.is_some();
+                if let Some(usage) = usage {
+                    self.record_usage(usage, "response.incomplete");
+                }
+                let tracing_body = response_body_for_tracing(&original);
+                warn!(
+                    resource_type = self.resource_kind.as_str(),
+                    incomplete_reason = %reason,
+                    usage_available,
+                    upstream_response_body_bytes = original.len(),
+                    upstream_response_body_encoding = tracing_body.encoding(),
+                    upstream_response_body = %tracing_body.content(),
+                    "GPT SSE response.incomplete 已记录流错误，完整原始事件保持透传"
+                );
+                self.error = Some(StreamErrorRecord {
+                    kind: "sse_event",
+                    body: String::from_utf8_lossy(&original).to_string(),
+                });
+                // 输出未完成本身不表示账号故障，不产生资源维护回执。
+                (original, None)
+            }
             Some(CodexSseData::Other(value)) => {
                 // 仅按 type/code 识别策略日志，其他 error 字段类型错误不应阻止记录。
                 // 复用已有解析结果，不为旁路日志再次解析整个 SSE JSON。
@@ -365,17 +387,18 @@ impl GptSseObserver {
         }
     }
 
-    fn record_usage(&mut self, usage: CodexTokenUsage) {
+    fn record_usage(&mut self, usage: CodexTokenUsage, event_type: &'static str) {
         if self.usage.is_some() {
             return;
         }
         info!(
+            event_type,
             input_tokens = usage.input_tokens,
             cached_input_tokens = usage.cached_input_tokens,
             output_tokens = usage.output_tokens,
             reasoning_output_tokens = usage.reasoning_output_tokens,
             total_tokens = usage.total_tokens,
-            "GPT SSE response.completed 已旁路提取 token 用量"
+            "GPT SSE 终止事件已旁路提取 token 用量"
         );
         self.usage = Some(usage.into());
     }

@@ -863,7 +863,7 @@ data: {"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded
         }
     }
 
-    /// 官方 `response.completed.response.usage` 的 token 用量快照。
+    /// 官方 `response.completed` / `response.incomplete` 的 `response.usage` 快照。
     ///
     /// 成功响应体仍按字节透传给调用方；该结构只用于旁路提取日志和后续统计需要，
     /// 不参与成功响应的建模式转换。
@@ -953,6 +953,10 @@ data: {"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded
     pub enum CodexSseData {
         ResponseFailed(CodexResponseError),
         ResponseCompleted(CodexTokenUsage),
+        ResponseIncomplete {
+            reason: String,
+            usage: Option<CodexTokenUsage>,
+        },
         Other(serde_json::Value),
     }
 
@@ -975,6 +979,19 @@ data: {"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded
                 {
                     return Some(CodexSseData::ResponseCompleted(usage.into()));
                 }
+            }
+            Some("response.incomplete") => {
+                // 与 Codex CLI 一致：缺少原因时仍识别为流错误；usage 无效不影响识别。
+                let reason = value
+                    .pointer("/response/incomplete_details/reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_owned();
+                let usage = value
+                    .pointer("/response/usage")
+                    .and_then(|usage| ResponseCompletedUsage::deserialize(usage).ok())
+                    .map(Into::into);
+                return Some(CodexSseData::ResponseIncomplete { reason, usage });
             }
             _ => {}
         }
