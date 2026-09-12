@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use crate::infra::account_proxy::{AccountProxy, ProxyView};
+use crate::infra::account_proxy::{AccountProxy, ProxyView, validate_proxy_url};
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -178,7 +178,8 @@ async fn complete_oauth_callback(
 ) -> ConsoleResult<Json<GptAccountResponse>> {
     // override 属于纯本地输入，必须在消费一次性 OAuth state 和交换 code 之前完成校验。
     payload.override_.validate()?;
-    let proxy = AccountProxy::parse(payload.proxy_url.as_deref())?;
+    let proxy_url = validate_proxy_url(payload.proxy_url.as_deref())?;
+    let proxy = AccountProxy::parse(proxy_url.as_deref())?;
     let callback_url =
         normalize_required_limited(payload.callback_url, "callback_url", MAX_CALLBACK_URL_BYTES)?;
     let callback = auth::parse_callback_url(&callback_url)?;
@@ -208,14 +209,9 @@ async fn complete_oauth_callback(
         &callback.code,
     )
     .await?;
-    let account = persist_oauth_auth_token(
-        &state,
-        tenant_id,
-        auth_token,
-        payload.override_,
-        proxy.stored_url(),
-    )
-    .await?;
+    let account =
+        persist_oauth_auth_token(&state, tenant_id, auth_token, payload.override_, proxy_url)
+            .await?;
     let snapshot = ProviderResourceService::<GptMaintenance>::new(&state)
         .sync_account(account)
         .await?;
@@ -226,7 +222,9 @@ async fn complete_oauth_callback(
         "GPT OAuth callback 已完成，未分组账号已保存并进入统一 maintenance"
     );
 
-    Ok(Json(GptAccountResponse::from_snapshot(snapshot, true)?))
+    Ok(Json(GptAccountResponse::from_snapshot(
+        snapshot, true, true,
+    )?))
 }
 
 async fn create_gpt_account(
@@ -235,7 +233,8 @@ async fn create_gpt_account(
     Json(payload): Json<CreateGptAccountRequest>,
 ) -> ConsoleResult<Json<GptAccountResponse>> {
     payload.override_.validate()?;
-    let proxy = AccountProxy::parse(payload.proxy_url.as_deref())?;
+    let proxy_url = validate_proxy_url(payload.proxy_url.as_deref())?;
+    let proxy = AccountProxy::parse(proxy_url.as_deref())?;
     let refresh_token = normalize_optional_limited(
         payload.refresh_token,
         "refresh_token",
@@ -281,7 +280,7 @@ async fn create_gpt_account(
         client_id,
         auth_token,
         payload.override_,
-        proxy.stored_url(),
+        proxy_url,
     )
     .await?;
     let snapshot = ProviderResourceService::<GptMaintenance>::new(&state)
@@ -294,7 +293,9 @@ async fn create_gpt_account(
         "管理端通过 refresh_token 创建 GPT 账号成功"
     );
 
-    Ok(Json(GptAccountResponse::from_snapshot(snapshot, true)?))
+    Ok(Json(GptAccountResponse::from_snapshot(
+        snapshot, true, true,
+    )?))
 }
 
 async fn persist_imported_auth_token(
@@ -476,7 +477,11 @@ async fn list_gpt_accounts(
                     .group_id
                     .is_some_and(|id| ids.contains(&id))
             });
-            GptAccountResponse::from_snapshot(snapshot, can_view_override)
+            GptAccountResponse::from_snapshot(
+                snapshot,
+                can_view_override,
+                current_user.is_tenant_owner(),
+            )
         })
         .collect::<AppResult<Vec<_>>>()?;
 
@@ -497,7 +502,9 @@ async fn update_gpt_account_enabled(
         .update_account_enabled(tenant_id, id, payload.enabled)
         .await?;
 
-    Ok(Json(GptAccountResponse::from_snapshot(snapshot, true)?))
+    Ok(Json(GptAccountResponse::from_snapshot(
+        snapshot, true, true,
+    )?))
 }
 
 async fn update_gpt_account_override(
@@ -547,7 +554,11 @@ async fn update_gpt_account_override(
         gpt_account_id = %snapshot.account.id,
         "管理端更新 GPT 账号请求 override 成功，runtime 已同步"
     );
-    Ok(Json(GptAccountResponse::from_snapshot(snapshot, true)?))
+    Ok(Json(GptAccountResponse::from_snapshot(
+        snapshot,
+        true,
+        current_user.is_tenant_owner(),
+    )?))
 }
 
 async fn update_gpt_account_group(
@@ -568,7 +579,9 @@ async fn update_gpt_account_group(
         provider_group_id = ?snapshot.account.group_id,
         "管理端调整 GPT 账号分组成功，runtime 已同步"
     );
-    Ok(Json(GptAccountResponse::from_snapshot(snapshot, true)?))
+    Ok(Json(GptAccountResponse::from_snapshot(
+        snapshot, true, true,
+    )?))
 }
 
 async fn refresh_gpt_account_quota(
@@ -857,6 +870,7 @@ impl GptAccountResponse {
     pub(super) fn from_snapshot(
         snapshot: AccountSnapshot,
         can_view_override: bool,
+        can_view_proxy: bool,
     ) -> AppResult<Self> {
         let AccountSnapshot {
             account,
@@ -889,7 +903,11 @@ impl GptAccountResponse {
 
         Ok(Self {
             id: account.id,
-            proxy: AccountProxy::parse(account.proxy_url.as_deref())?.view(),
+            proxy: if can_view_proxy {
+                account.proxy_url.clone().map(|url| ProxyView { url })
+            } else {
+                None
+            },
             account_id: specific.chatgpt_account_id,
             client_id: account.client_id.clone(),
             email: specific.email,

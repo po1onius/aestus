@@ -1,4 +1,4 @@
-//! 账号出站代理。持久值和缓存键包含认证信息，Debug 与控制台视图始终脱敏。
+//! 账号出站代理。控制台保存原始 URL，连接与缓存键使用规范化配置，Debug 不输出认证信息。
 use std::fmt;
 
 use reqwest::{ClientBuilder, Proxy, Url};
@@ -13,15 +13,21 @@ pub struct AccountProxy(Option<String>);
 #[derive(Debug, Serialize)]
 pub struct ProxyView {
     pub url: String,
-    pub has_auth: bool,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProxyUpdate {
     pub proxy_url: Option<String>,
-    #[serde(default)]
-    pub keep_auth: bool,
+}
+
+/// 校验配置并保留输入格式（仅去除首尾空白），供持久化和控制台回显。
+pub fn validate_proxy_url(raw: Option<&str>) -> AppResult<Option<String>> {
+    AccountProxy::parse(raw)?;
+    Ok(raw
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(str::to_owned))
 }
 
 impl fmt::Debug for AccountProxy {
@@ -63,21 +69,6 @@ impl AccountProxy {
         Ok(Self(Some(url.to_string())))
     }
 
-    pub fn stored_url(&self) -> Option<String> {
-        self.0.clone()
-    }
-
-    pub fn view(&self) -> Option<ProxyView> {
-        let mut url = Url::parse(self.0.as_deref()?).ok()?;
-        let has_auth = !url.username().is_empty() || url.password().is_some();
-        let _ = url.set_username("");
-        let _ = url.set_password(None);
-        Some(ProxyView {
-            url: url.to_string(),
-            has_auth,
-        })
-    }
-
     /// 无代理时明确直连；有代理时只使用指定代理，不受环境代理及 NO_PROXY 干扰。
     pub fn apply(&self, builder: ClientBuilder) -> reqwest::Result<ClientBuilder> {
         let builder = builder.no_proxy();
@@ -85,30 +76,6 @@ impl AccountProxy {
             Some(url) => Ok(builder.proxy(Proxy::all(url)?)),
             None => Ok(builder),
         }
-    }
-}
-
-impl ProxyUpdate {
-    /// 调用方须在账号行锁内传入最新配置，避免保留认证时读到并发更新前的密码。
-    pub fn resolve(&self, current: &AccountProxy) -> AppResult<AccountProxy> {
-        let mut next = AccountProxy::parse(self.proxy_url.as_deref())?;
-        if self.keep_auth
-            && let Some(next_url) = next.0.as_mut()
-        {
-            let mut url = Url::parse(next_url).map_err(|_| invalid("代理 URL 格式无效"))?;
-            if !url.username().is_empty() || url.password().is_some() {
-                return Err(invalid("保留现有认证时，请填写不含用户名和密码的代理 URL"));
-            }
-            if let Some(current) = current.0.as_deref() {
-                let old = Url::parse(current).map_err(|_| invalid("已保存的代理 URL 无效"))?;
-                url.set_username(old.username())
-                    .map_err(|_| invalid("代理用户名无效"))?;
-                url.set_password(old.password())
-                    .map_err(|_| invalid("代理密码无效"))?;
-            }
-            *next_url = url.to_string();
-        }
-        AccountProxy::parse(next.0.as_deref())
     }
 }
 

@@ -88,9 +88,6 @@ export function GptAccountsTable({
                 <td>
                   <div className={entryStackClass}>
                     <strong className={entryTitleClass} title={account.email || "未命名账号"}>{account.email || "未命名账号"}</strong>
-                    <span className={cellNoteClass} title={account.proxy?.url}>
-                      {account.proxy ? `代理：${account.proxy.url}` : "直连"}
-                    </span>
                   </div>
                 </td>
                 <td>

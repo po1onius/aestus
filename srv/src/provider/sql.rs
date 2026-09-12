@@ -45,7 +45,7 @@ macro_rules! next_projection_version {
 pub mod account {
     use super::*;
 
-    /// 代理独立更新；行锁保证保留认证信息时读取最新值，不覆盖并发 token 刷新结果。
+    /// 代理独立更新；只写代理和投影版本，不覆盖并发 token 刷新结果。
     pub async fn update_proxy(
         conn: &mut AsyncPgConnection,
         tenant_id: String,
@@ -53,8 +53,9 @@ pub mod account {
         id: Uuid,
         input: crate::infra::account_proxy::ProxyUpdate,
     ) -> AppResult<ProviderAccount> {
-        use crate::infra::account_proxy::AccountProxy;
+        use crate::infra::account_proxy::validate_proxy_url;
         use provider_accounts::dsl;
+        let proxy_url = validate_proxy_url(input.proxy_url.as_deref())?;
         conn.transaction::<ProviderAccount, AppError, _>(async |conn| {
             let current = required_account(
                 dsl::provider_accounts
@@ -68,9 +69,7 @@ pub mod account {
                 provider,
                 id,
             )?;
-            let previous = AccountProxy::parse(current.proxy_url.as_deref())?;
-            let proxy = input.resolve(&previous)?;
-            if proxy == previous {
+            if proxy_url == current.proxy_url {
                 return Ok(current);
             }
             let account = required_account(
@@ -81,7 +80,7 @@ pub mod account {
                         .filter(dsl::provider.eq(provider)),
                 )
                 .set((
-                    dsl::proxy_url.eq(proxy.stored_url()),
+                    dsl::proxy_url.eq(&proxy_url),
                     dsl::updated_at.eq(next_projection_version!(dsl::updated_at)),
                 ))
                 .returning(ProviderAccount::as_returning())
@@ -90,7 +89,7 @@ pub mod account {
                 provider,
                 id,
             )?;
-            info!(account_id = %id, provider, proxy = ?proxy, "账号出站代理配置已更新");
+            info!(account_id = %id, provider, proxy_configured = proxy_url.is_some(), "账号出站代理配置已更新");
             Ok(account)
         })
         .await

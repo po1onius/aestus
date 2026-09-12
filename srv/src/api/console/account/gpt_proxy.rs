@@ -28,5 +28,7 @@ pub(super) async fn update(
         .update_account_proxy(tenant_id, id, input)
         .await?;
     info!(account_id = %id, actor_id = %owner.id, "GPT 账号代理设置已保存并同步 runtime");
-    Ok(Json(GptAccountResponse::from_snapshot(snapshot, true)?))
+    Ok(Json(GptAccountResponse::from_snapshot(
+        snapshot, true, true,
+    )?))
 }

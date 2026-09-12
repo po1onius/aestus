@@ -336,7 +336,8 @@ GPT 搜索上游路径默认是 `/alpha/search`，可通过 `AESTUS_GPT_UPSTREAM
 
 租户 owner 可在 GPT 账号操作菜单中打开“代理设置”，选择直连或指定代理；OAuth 和 RT
 导入弹窗也支持填写代理 URL，服务端首次 token 交换及导入后的请求均使用所选代理。
-浏览器打开 OAuth 授权页面时仍使用浏览器自身的网络设置。
+浏览器打开 OAuth 授权页面时仍使用浏览器自身的网络设置。账号列仅展示账号名称，
+代理配置在“代理设置”弹窗中查看和编辑。
 
 代理保存在 `provider_accounts.proxy_url` 独立列中，不放入 `specific`，不增加代理版本。
 `NULL` 表示明确直连；支持 `http://`、`https://`、`socks5://`、`socks5h://`，可在 URL
@@ -352,14 +353,17 @@ GPT 搜索上游路径默认是 `/alpha/search`，可通过 `AESTUS_GPT_UPSTREAM
 `PUT /api/console/providers/gpt/accounts/{id}/proxy` 仅租户 owner 可调用，支持：
 
 ```json
-{"proxy_url": "http://proxy.example:8080", "keep_auth": true}
+{"proxy_url": "http://user:password@proxy.example:8080"}
 ```
 
-`proxy_url=null` 或空字符串恢复直连；`keep_auth` 默认 false，true 时从数据库中保留
-最新的代理认证，URL 不得再包含用户名或密码。false 时以提交 URL 的认证为准，不含
-认证即清除原认证。更新在账号行锁内进行，只修改代理列及已有投影更新时间；不修改
-账号 token 世代，也不会被后台续期覆盖。返回账号最新快照，列表中的 `proxy` 仅包含
-移除全部认证的 `url` 和 `has_auth`，直连为 null；代理凭证不返回到控制台或日志。
+`proxy_url=null` 或空字符串恢复直连；每次保存均以提交的完整 URL 为准，不含认证即清除
+原认证。URL 校验后仅去除首尾空白，保留输入格式和用户名、密码；实际连接和客户端缓存键
+仍使用规范化后的配置。更新在账号行锁内进行，只修改代理列及已有投影更新时间；不修改
+账号 token 世代，也不会被后台续期覆盖。返回账号最新快照，租户 owner 的 `proxy.url`
+完整返回已保存的 URL，弹窗原样显示，不再提供“保留认证”选项或 `keep_auth` 参数。
+直连或非 owner 响应中的 `proxy` 为 null；日志不记录代理认证信息。
+此接口调整需要同步发布前后端，无需数据库迁移；历史 URL 按已有存储值显示，重新保存后
+使用新输入格式。
 
 `POST /api/console/providers/gpt/accounts` 和 `/oauth/callback` 接受可选 `proxy_url`，
 缺省为直连。代理先校验，再进行 token 请求；OAuth 回调还会先构造客户端再消费 state。
